@@ -4,6 +4,7 @@ import os
 import asyncio
 from dotenv import load_dotenv
 from cogs.state import is_bot_banned
+import cogs.http_session as http_session
 
 load_dotenv()
 
@@ -13,7 +14,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None) 
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 COGS = [
     "cogs.ai",
@@ -26,7 +27,7 @@ COGS = [
     "cogs.bugreport",
     "cogs.errorhandler",
     "cogs.help",
-    "cogs.fun", 
+    "cogs.fun",
 ]
 
 
@@ -68,9 +69,15 @@ async def on_ready():
 
 async def main():
     async with bot:
-        for cog in COGS:
-            await bot.load_extension(cog)
-        await bot.start(TOKEN)
+        # Create the shared HTTP session before loading cogs (cogs import it at call-time)
+        await http_session.create_session()
+        try:
+            for cog in COGS:
+                await bot.load_extension(cog)
+            await bot.start(TOKEN)
+        finally:
+            # Always close the session cleanly, even on crash
+            await http_session.close_session()
 
 
 asyncio.run(main())

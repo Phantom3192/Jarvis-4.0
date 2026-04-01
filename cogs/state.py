@@ -1,119 +1,181 @@
 """
 Shared mutable state across cogs.
-Import bot_bans, seen_users, stats, guild_prompts from here — never from other cogs directly.
-This ensures all cogs always read/write the same objects.
+Optimized: single data file, debounced disk writes to reduce I/O.
 """
 import json
 import os
 import time
+import asyncio
 
-BAN_FILE    = "bot_bans.json"
-SEEN_FILE   = "seen_users.json"
-STATS_FILE  = "stats.json"
-PROMPTS_FILE = "guild_prompts.json"
+DATA_FILE = "jarvis_data.json"
+
+# ── Internal data store ───────────────────────────────────────────────────────
+
+_data = {
+    "bans":    {},
+    "seen":    [],
+    "stats":   {},
+    "prompts": {},
+}
+
+_dirty = False          # True when in-memory data differs from disk
+_save_task = None       # Pending debounced save task
+
+
+def _load():
+    global _data
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r") as f:
+                loaded = json.load(f)
+                # Merge keys so missing keys in old files don't crash
+                for key in _data:
+                    if key in loaded:
+                        _data[key] = loaded[key]
+        except (json.JSONDecodeError, OSError):
+            pass
+
+
+def _flush():
+    """Write data to disk immediately."""
+    global _dirty
+    try:
+        with open(DATA_FILE, "w") as f:
+            json.dump(_data, f, separators=(",", ":"))
+        _dirty = False
+    except OSError as e:
+        print(f"❌ Failed to save data: {e}")
+
+
+async def _debounced_save(delay: float = 2.0):
+    """Wait `delay` seconds then flush. Cancelled and restarted on each new write."""
+    await asyncio.sleep(delay)
+    _flush()
+
+
+def _schedule_save():
+    """Mark dirty and schedule a debounced flush (cancels any pending one)."""
+    global _dirty, _save_task
+    _dirty = True
+    loop = None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (e.g. during initial load) — flush immediately
+        _flush()
+        return
+    if _save_task and not _save_task.done():
+        _save_task.cancel()
+    _save_task = loop.create_task(_debounced_save())
+
 
 # ── Ban state ─────────────────────────────────────────────────────────────────
 
-def _load_bans() -> dict:
-    if os.path.exists(BAN_FILE):
-        with open(BAN_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
 def save_bans():
-    with open(BAN_FILE, "w") as f:
-        json.dump(bot_bans, f, indent=2)
+    _schedule_save()
 
 def is_bot_banned(user_id: int) -> bool:
-    return str(user_id) in bot_bans
+    return str(user_id) in _data["bans"]
 
-bot_bans: dict = _load_bans()
+@property
+def bot_bans() -> dict:
+    return _data["bans"]
+
+# Expose as module-level dict proxy for compatibility with admin.py
+import types
+
+class _BanProxy(dict):
+    """Thin dict subclass that proxies reads/writes to _data['bans']."""
+    def __contains__(self, key):           return key in _data["bans"]
+    def __getitem__(self, key):            return _data["bans"][key]
+    def __setitem__(self, key, value):     _data["bans"][key] = value
+    def __delitem__(self, key):            del _data["bans"][key]
+    def __iter__(self):                    return iter(_data["bans"])
+    def __len__(self):                     return len(_data["bans"])
+    def get(self, key, default=None):      return _data["bans"].get(key, default)
+    def items(self):                       return _data["bans"].items()
+    def keys(self):                        return _data["bans"].keys()
+    def values(self):                      return _data["bans"].values()
+    def pop(self, key, *args):             return _data["bans"].pop(key, *args)
+
+bot_bans: dict = _BanProxy()
+
 
 # ── Seen users state ──────────────────────────────────────────────────────────
 
-def _load_seen() -> set:
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
+class _SeenProxy(set):
+    """Thin set subclass that proxies reads/writes to _data['seen'] list."""
+    def __contains__(self, item):  return item in _seen_set
+    def __iter__(self):            return iter(_seen_set)
+    def __len__(self):             return len(_seen_set)
+    def add(self, item):
+        if item not in _seen_set:
+            _seen_set.add(item)
+            _data["seen"] = list(_seen_set)
+            _schedule_save()
+
+_seen_set: set = set()
 
 def mark_seen(user_id: int):
-    seen_users.add(user_id)
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(seen_users), f)
+    if user_id not in _seen_set:
+        _seen_set.add(user_id)
+        _data["seen"] = list(_seen_set)
+        _schedule_save()
 
 def is_new_user(user_id: int) -> bool:
-    return user_id not in seen_users
+    return user_id not in _seen_set
 
-seen_users: set = _load_seen()
+seen_users: set = _SeenProxy()
+
 
 # ── Stats state ───────────────────────────────────────────────────────────────
 
-def _load_stats() -> dict:
-    if os.path.exists(STATS_FILE):
-        with open(STATS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def _save_stats():
-    with open(STATS_FILE, "w") as f:
-        json.dump(user_stats, f, indent=2)
-
 def record_message(user_id: int, user_text: str, reply_text: str):
-    """Record a completed AI interaction for stats tracking."""
-    uid = str(user_id)
-    now = time.time()
-    # Rough token estimate: ~4 chars per token
+    uid  = str(user_id)
+    now  = time.time()
     tokens = (len(user_text) + len(reply_text)) // 4
 
-    if uid not in user_stats:
-        user_stats[uid] = {
+    if uid not in _data["stats"]:
+        _data["stats"][uid] = {
             "messages": 0,
             "tokens_est": 0,
             "first_seen": now,
             "last_seen": now,
         }
-
-    user_stats[uid]["messages"]   += 1
-    user_stats[uid]["tokens_est"] += tokens
-    user_stats[uid]["last_seen"]   = now
-    _save_stats()
+    s = _data["stats"][uid]
+    s["messages"]   += 1
+    s["tokens_est"] += tokens
+    s["last_seen"]   = now
+    _schedule_save()
 
 def get_stats(user_id: int) -> dict | None:
-    """Return stats dict for a user, or None if they have no history."""
-    return user_stats.get(str(user_id))
+    return _data["stats"].get(str(user_id))
 
-user_stats: dict = _load_stats()
 
 # ── Guild prompt state ────────────────────────────────────────────────────────
 
-def _load_prompts() -> dict:
-    if os.path.exists(PROMPTS_FILE):
-        with open(PROMPTS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def _save_prompts():
-    with open(PROMPTS_FILE, "w") as f:
-        json.dump(guild_prompts, f, indent=2)
-
 def get_guild_prompt(guild_id: int | None) -> str | None:
-    """Return custom system prompt for a guild, or None to use default."""
     if guild_id is None:
         return None
-    return guild_prompts.get(str(guild_id))
+    return _data["prompts"].get(str(guild_id))
 
 def set_guild_prompt(guild_id: int, prompt: str):
-    guild_prompts[str(guild_id)] = prompt
-    _save_prompts()
+    _data["prompts"][str(guild_id)] = prompt
+    _schedule_save()
 
 def reset_guild_prompt(guild_id: int) -> bool:
-    """Remove custom prompt. Returns True if one existed."""
     uid = str(guild_id)
-    if uid in guild_prompts:
-        del guild_prompts[uid]
-        _save_prompts()
+    if uid in _data["prompts"]:
+        del _data["prompts"][uid]
+        _schedule_save()
         return True
     return False
 
-guild_prompts: dict = _load_prompts()
+
+# ── Startup load ──────────────────────────────────────────────────────────────
+
+_load()
+# Rebuild seen set from loaded list
+_seen_set.update(int(x) for x in _data["seen"])
+# Ensure seen list contains ints
+_data["seen"] = list(_seen_set)

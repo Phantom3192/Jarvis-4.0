@@ -3,8 +3,9 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import asyncio
-import aiohttp
+import html
 from cogs.ai import generate_ai_response
+from cogs.http_session import get_session
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -104,28 +105,23 @@ WYR_QUESTIONS = [
 
 # ── Active game tracking ──────────────────────────────────────────────────────
 
-active_hangman: dict[int, dict] = {}   # channel_id → game state
-active_trivia:  dict[int, dict] = {}   # channel_id → game state
+active_hangman: dict[int, dict] = {}
+active_trivia:  dict[int, dict] = {}
 
 
-# ── Trivia helper (Open Trivia DB) ────────────────────────────────────────────
+# ── Trivia helper ─────────────────────────────────────────────────────────────
 
 async def _fetch_trivia() -> dict | None:
     url = "https://opentdb.com/api.php?amount=1&type=multiple"
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                data = await resp.json()
-                if data["response_code"] == 0:
-                    return data["results"][0]
+        session = get_session()
+        async with session.get(url, timeout=5) as resp:
+            data = await resp.json()
+            if data["response_code"] == 0:
+                return data["results"][0]
     except Exception:
         pass
     return None
-
-
-def _unescape(text: str) -> str:
-    import html
-    return html.unescape(text)
 
 
 # ── Trivia view ───────────────────────────────────────────────────────────────
@@ -133,10 +129,9 @@ def _unescape(text: str) -> str:
 class TriviaView(discord.ui.View):
     def __init__(self, correct: str, options: list[str], channel_id: int):
         super().__init__(timeout=20)
-        self.correct   = correct
+        self.correct    = correct
         self.channel_id = channel_id
-        self.answered  = False
-        self.winner    = None
+        self.answered   = False
 
         labels = ["A", "B", "C", "D"]
         for i, opt in enumerate(options):
@@ -150,8 +145,6 @@ class TriviaView(discord.ui.View):
                 await interaction.response.send_message("⚡ Someone already answered!", ephemeral=True)
                 return
             self.answered = True
-            self.winner   = interaction.user
-
             for item in self.children:
                 item.disabled = True
                 if isinstance(item, discord.ui.Button):
@@ -159,12 +152,10 @@ class TriviaView(discord.ui.View):
                         item.style = discord.ButtonStyle.success
                     elif item.custom_id == choice and choice != self.correct:
                         item.style = discord.ButtonStyle.danger
-
             if choice == self.correct:
                 msg = f"✅ **{interaction.user.display_name}** got it! The answer was **{self.correct}**."
             else:
                 msg = f"❌ **{interaction.user.display_name}** guessed wrong. The answer was **{self.correct}**."
-
             await interaction.response.edit_message(view=self)
             await interaction.followup.send(msg)
             active_trivia.pop(self.channel_id, None)
@@ -190,60 +181,43 @@ class Fun(commands.Cog):
         if interaction.channel_id in active_trivia:
             await interaction.response.send_message("⚠️ A trivia game is already running in this channel!", ephemeral=True)
             return
-
         await interaction.response.defer()
         q = await _fetch_trivia()
         if not q:
             await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again in a moment.")
             return
-
-        question  = _unescape(q["question"])
-        correct   = _unescape(q["correct_answer"])
-        incorrect = [_unescape(a) for a in q["incorrect_answers"]]
+        question  = html.unescape(q["question"])
+        correct   = html.unescape(q["correct_answer"])
+        incorrect = [html.unescape(a) for a in q["incorrect_answers"]]
         options   = incorrect + [correct]
         random.shuffle(options)
-
-        embed = discord.Embed(
-            title="🧠 Trivia Time!",
-            description=question,
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(name="Category",   value=q["category"],   inline=True)
+        embed = discord.Embed(title="🧠 Trivia Time!", description=question, color=discord.Color.blurple())
+        embed.add_field(name="Category",   value=q["category"],              inline=True)
         embed.add_field(name="Difficulty", value=q["difficulty"].capitalize(), inline=True)
         embed.set_footer(text="You have 20 seconds — first to answer wins!")
-
         view = TriviaView(correct, options, interaction.channel_id)
         active_trivia[interaction.channel_id] = True
         await interaction.followup.send(embed=embed, view=view)
 
     @commands.command(name="trivia")
     async def prefix_trivia(self, ctx: commands.Context):
-        """Start a trivia question."""
         if ctx.channel.id in active_trivia:
             await ctx.reply("⚠️ A trivia game is already running in this channel!")
             return
-
         async with ctx.typing():
             q = await _fetch_trivia()
         if not q:
             await ctx.reply("⚠️ Couldn't fetch a trivia question. Try again in a moment.")
             return
-
-        question  = _unescape(q["question"])
-        correct   = _unescape(q["correct_answer"])
-        incorrect = [_unescape(a) for a in q["incorrect_answers"]]
+        question  = html.unescape(q["question"])
+        correct   = html.unescape(q["correct_answer"])
+        incorrect = [html.unescape(a) for a in q["incorrect_answers"]]
         options   = incorrect + [correct]
         random.shuffle(options)
-
-        embed = discord.Embed(
-            title="🧠 Trivia Time!",
-            description=question,
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(name="Category",   value=q["category"],   inline=True)
+        embed = discord.Embed(title="🧠 Trivia Time!", description=question, color=discord.Color.blurple())
+        embed.add_field(name="Category",   value=q["category"],              inline=True)
         embed.add_field(name="Difficulty", value=q["difficulty"].capitalize(), inline=True)
         embed.set_footer(text="You have 20 seconds — first to answer wins!")
-
         view = TriviaView(correct, options, ctx.channel.id)
         active_trivia[ctx.channel.id] = True
         await ctx.reply(embed=embed, view=view)
@@ -255,30 +229,18 @@ class Fun(commands.Cog):
         if interaction.channel_id in active_hangman:
             await interaction.response.send_message("⚠️ A hangman game is already running here!", ephemeral=True)
             return
-        word = random.choice(HANGMAN_WORDS)
-        state = {
-            "word":    word,
-            "guessed": set(),
-            "wrong":   0,
-            "host":    interaction.user.id,
-        }
+        word  = random.choice(HANGMAN_WORDS)
+        state = {"word": word, "guessed": set(), "wrong": 0, "host": interaction.user.id}
         active_hangman[interaction.channel_id] = state
-        embed = _hangman_embed(state)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=_hangman_embed(state))
 
     @commands.command(name="hangman")
     async def prefix_hangman(self, ctx: commands.Context):
-        """Start a game of hangman."""
         if ctx.channel.id in active_hangman:
             await ctx.reply("⚠️ A hangman game is already running here!")
             return
-        word = random.choice(HANGMAN_WORDS)
-        state = {
-            "word":    word,
-            "guessed": set(),
-            "wrong":   0,
-            "host":    ctx.author.id,
-        }
+        word  = random.choice(HANGMAN_WORDS)
+        state = {"word": word, "guessed": set(), "wrong": 0, "host": ctx.author.id}
         active_hangman[ctx.channel.id] = state
         await ctx.reply(embed=_hangman_embed(state))
 
@@ -289,25 +251,18 @@ class Fun(commands.Cog):
         cid = message.channel.id
         if cid not in active_hangman:
             return
-
         content = message.content.strip().lower()
         if len(content) != 1 or not content.isalpha():
             return
-
         state  = active_hangman[cid]
         letter = content
         word   = state["word"]
-
         if letter in state["guessed"]:
             await message.reply(f"⚠️ **{letter}** was already guessed!", delete_after=4)
             return
-
         state["guessed"].add(letter)
-
         if letter not in word:
             state["wrong"] += 1
-
-        # Win check
         if all(c in state["guessed"] for c in word):
             del active_hangman[cid]
             embed = _hangman_embed(state, finished=True)
@@ -315,8 +270,6 @@ class Fun(commands.Cog):
             embed.add_field(name="🎉 Winner!", value=f"{message.author.mention} guessed the word!", inline=False)
             await message.reply(embed=embed)
             return
-
-        # Lose check
         if state["wrong"] >= 6:
             del active_hangman[cid]
             embed = _hangman_embed(state, finished=True)
@@ -324,7 +277,6 @@ class Fun(commands.Cog):
             embed.add_field(name="💀 Game Over!", value=f"The word was **{word}**.", inline=False)
             await message.reply(embed=embed)
             return
-
         await message.reply(embed=_hangman_embed(state))
 
     @app_commands.command(name="stophangman", description="Stop the current hangman game")
@@ -347,17 +299,13 @@ class Fun(commands.Cog):
             f"One short paragraph max. Don't start with 'Oh' or 'Ah'."
         )
         reply = await generate_ai_response(interaction.user.id, prompt, interaction.guild_id)
-        embed = discord.Embed(
-            description=f"🔥 {reply}",
-            color=discord.Color.orange(),
-        )
+        embed = discord.Embed(description=f"🔥 {reply}", color=discord.Color.orange())
         embed.set_author(name=f"Roasting {user.display_name}", icon_url=user.display_avatar.url)
         embed.set_footer(text=f"Requested by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
     @commands.command(name="roast")
     async def prefix_roast(self, ctx: commands.Context, user: discord.Member = None):
-        """Roast a user. Usage: !roast @user"""
         if not user:
             await ctx.reply("Usage: `!roast @user`")
             return
@@ -390,7 +338,6 @@ class Fun(commands.Cog):
 
     @commands.command(name="compliment")
     async def prefix_compliment(self, ctx: commands.Context, user: discord.Member = None):
-        """Compliment a user. Usage: !compliment @user"""
         if not user:
             await ctx.reply("Usage: `!compliment @user`")
             return
@@ -409,10 +356,7 @@ class Fun(commands.Cog):
     @app_commands.command(name="wyr", description="Would you rather…?")
     async def slash_wyr(self, interaction: discord.Interaction):
         a, b = random.choice(WYR_QUESTIONS)
-        embed = discord.Embed(
-            title="🤔 Would You Rather…",
-            color=discord.Color.purple(),
-        )
+        embed = discord.Embed(title="🤔 Would You Rather…", color=discord.Color.purple())
         embed.add_field(name="Option A", value=f"🅰️ {a.capitalize()}", inline=False)
         embed.add_field(name="Option B", value=f"🅱️ {b.capitalize()}", inline=False)
         embed.set_footer(text="Reply with A or B!")
@@ -420,7 +364,6 @@ class Fun(commands.Cog):
 
     @commands.command(name="wyr")
     async def prefix_wyr(self, ctx: commands.Context):
-        """Would you rather…?"""
         a, b = random.choice(WYR_QUESTIONS)
         embed = discord.Embed(title="🤔 Would You Rather…", color=discord.Color.purple())
         embed.add_field(name="Option A", value=f"🅰️ {a.capitalize()}", inline=False)
@@ -439,7 +382,6 @@ class Fun(commands.Cog):
 
     @commands.command(name="truth")
     async def prefix_truth(self, ctx: commands.Context):
-        """Get a truth question."""
         q = random.choice(TRUTH_QUESTIONS)
         embed = discord.Embed(title="🫣 Truth!", description=q, color=discord.Color.teal())
         embed.set_footer(text=f"Asked to {ctx.author.display_name}")
@@ -454,7 +396,6 @@ class Fun(commands.Cog):
 
     @commands.command(name="dare")
     async def prefix_dare(self, ctx: commands.Context):
-        """Get a dare challenge."""
         d = random.choice(DARE_CHALLENGES)
         embed = discord.Embed(title="😈 Dare!", description=d, color=discord.Color.red())
         embed.set_footer(text=f"Dared to {ctx.author.display_name}")
@@ -470,7 +411,6 @@ class Fun(commands.Cog):
 
     @commands.command(name="funfact")
     async def prefix_funfact(self, ctx: commands.Context):
-        """Get a random fun fact."""
         fact = random.choice(FUN_FACTS)
         embed = discord.Embed(title="🤯 Fun Fact!", description=fact, color=discord.Color.green())
         await ctx.reply(embed=embed)
@@ -479,18 +419,17 @@ class Fun(commands.Cog):
 # ── Hangman embed helper ──────────────────────────────────────────────────────
 
 def _hangman_embed(state: dict, finished: bool = False) -> discord.Embed:
-    word     = state["word"]
-    guessed  = state["guessed"]
-    wrong    = state["wrong"]
-    display  = " ".join(c if c in guessed else "\_" for c in word)
+    word    = state["word"]
+    guessed = state["guessed"]
+    wrong   = state["wrong"]
+    display = " ".join(c if c in guessed else "\\_" for c in word)
     wrong_letters = ", ".join(sorted(g for g in guessed if g not in word)) or "None"
-
     embed = discord.Embed(
         title="🪢 Hangman",
         color=discord.Color.blurple() if not finished else discord.Color.greyple(),
     )
     embed.description = HANGMAN_STAGES[min(wrong, 6)]
-    embed.add_field(name="Word",          value=f"`{display}`",     inline=False)
+    embed.add_field(name="Word",          value=f"`{display}`",      inline=False)
     embed.add_field(name="Wrong guesses", value=f"`{wrong_letters}`", inline=True)
     embed.add_field(name="Lives left",    value=f"`{6 - wrong}/6`",  inline=True)
     if not finished:

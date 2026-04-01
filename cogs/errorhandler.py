@@ -1,15 +1,14 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiohttp
 import asyncio
 import os
 import traceback
 import sys
+from cogs.http_session import get_session
 
-ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
-
-MAX_TRACEBACK_LEN = 1900
+ERROR_WEBHOOK_URL  = os.getenv("ERROR_WEBHOOK_URL", "")
+MAX_TRACEBACK_LEN  = 1900
 
 
 async def _send_error(title: str, description: str, extra_fields: list[tuple] = None):
@@ -17,19 +16,19 @@ async def _send_error(title: str, description: str, extra_fields: list[tuple] = 
     if not ERROR_WEBHOOK_URL:
         return
     try:
-        async with aiohttp.ClientSession() as session:
-            webhook = discord.Webhook.from_url(ERROR_WEBHOOK_URL, session=session)
-            embed = discord.Embed(
-                title=f"❌ {title}",
-                description=f"```py\n{description[:MAX_TRACEBACK_LEN]}\n```",
-                color=discord.Color.red(),
-                timestamp=discord.utils.utcnow(),
-            )
-            if extra_fields:
-                for name, value in extra_fields:
-                    embed.add_field(name=name, value=str(value)[:1024], inline=False)
-            embed.set_footer(text="Jarvis Error Logger")
-            await webhook.send(embed=embed, username="Jarvis Errors")
+        session = get_session()
+        webhook = discord.Webhook.from_url(ERROR_WEBHOOK_URL, session=session)
+        embed = discord.Embed(
+            title=f"❌ {title}",
+            description=f"```py\n{description[:MAX_TRACEBACK_LEN]}\n```",
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        if extra_fields:
+            for name, value in extra_fields:
+                embed.add_field(name=name, value=str(value)[:1024], inline=False)
+        embed.set_footer(text="Jarvis Error Logger")
+        await webhook.send(embed=embed, username="Jarvis Errors")
     except Exception as e:
         print(f"❌ Error webhook failed: {e}")
 
@@ -38,26 +37,17 @@ class ErrorHandler(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-        # ── 1. Slash command errors ───────────────────────────────────────────
         bot.tree.on_error = self.on_app_command_error
 
-        # ── 2. Asyncio unhandled task exceptions ──────────────────────────────
-        # This catches crashes in any asyncio.create_task() that isn't awaited,
-        # including background tasks inside cogs. Without this, Python just
-        # prints "Task exception was never retrieved" and silently drops it.
         def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict):
             exception = context.get("exception")
             message   = context.get("message", "Unknown asyncio error")
 
             if exception is None:
-                # No real exception object — just log the message
                 print(f"❌ Asyncio error (no exception): {message}")
-                loop.create_task(
-                    _send_error("Asyncio Error (no exception)", message)
-                )
+                loop.create_task(_send_error("Asyncio Error (no exception)", message))
                 return
 
-            # Skip harmless connection-closed noise
             if isinstance(exception, (ConnectionResetError, asyncio.CancelledError)):
                 return
 
@@ -69,7 +59,6 @@ class ErrorHandler(commands.Cog):
 
         asyncio.get_event_loop().set_exception_handler(_asyncio_exception_handler)
 
-        # ── 3. Synchronous / thread-level unhandled exceptions ────────────────
         original_excepthook = sys.excepthook
 
         def _custom_excepthook(exc_type, exc_value, exc_tb):
@@ -85,11 +74,8 @@ class ErrorHandler(commands.Cog):
 
         sys.excepthook = _custom_excepthook
 
-    # ── Prefix command errors ─────────────────────────────────────────────────
-
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
-        # Ignore intentional checks
         if isinstance(error, (commands.CheckFailure, commands.CommandNotFound)):
             return
 
@@ -112,8 +98,6 @@ class ErrorHandler(commands.Cog):
             await ctx.reply("⚠️ Something went wrong. The error has been reported to the developer.")
         except Exception:
             pass
-
-    # ── Slash command errors ──────────────────────────────────────────────────
 
     async def on_app_command_error(
         self,
@@ -145,9 +129,6 @@ class ErrorHandler(commands.Cog):
                 await interaction.response.send_message(msg, ephemeral=True)
         except Exception:
             pass
-
-    # ── Event / listener errors ───────────────────────────────────────────────
-    # Fires when an exception escapes a discord.py event listener (e.g. on_message).
 
     @commands.Cog.listener()
     async def on_error(self, event_method: str, *args, **kwargs):
