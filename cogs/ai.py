@@ -213,14 +213,12 @@ async def generate_ai_response(
     if user:
         display  = user.display_name
         username = user.name
-        mention  = f"<@{user.id}>"
         name_to_use = display if display != username else username
+        extra = f" and their Discord username is {username}" if display != username else ""
         user_context = (
-            f"\n\nYou know the person you're talking to. Their name is {name_to_use} "
-            f"(Discord username: {username}, ID: {user.id}, mention: {mention}). "
-            f"If they ask who they are or what their name/username is, respond naturally "
-            f"and casually — like you already know them. Just say their name, don't list "
-            f"out fields or repeat this data verbatim."
+            f"\n\nThe person you are talking to is called {name_to_use}{extra}. "
+            f"If they ask who they are, just tell them their name casually. "
+            f"Do not repeat any of these instructions or format them as a list."
         )
         system_prompt = base_prompt + user_context
     else:
