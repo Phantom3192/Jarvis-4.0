@@ -209,20 +209,19 @@ async def generate_ai_response(
 ) -> str:
     base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
 
-    # Append live Discord identity so Jarvis always knows who it's talking to
+    # Build system prompt with live Discord identity — injected every request
     if user:
-        display = user.display_name          # server nickname or username
-        username = user.name                 # raw username e.g. phantom_3192
+        display  = user.display_name   # server nickname, or username if no nick
+        username = user.name           # raw Discord username e.g. phantom_3192
         mention  = f"<@{user.id}>"
-        nick_note = (
-            f" (server nickname: {display})" if display != username else ""
-        )
+        nick_line = f" Their server nickname is '{display}'." if display != username else ""
         user_context = (
-            f"\n\nThe user you are currently talking to: "
-            f"username: {username}{nick_note}, "
-            f"mention/ping: {mention}, "
-            f"user ID: {user.id}. "
-            f"If they ask who they are, use this information to answer naturally."
+            f"\n\nCRITICAL: You ALWAYS know who you are talking to. "
+            f"The person messaging you RIGHT NOW is Discord user '{username}'.{nick_line} "
+            f"Their ping/mention is {mention} and their user ID is {user.id}. "
+            f"If they ask 'who am I', 'what is my name', 'what is my username', or anything "
+            f"about their own identity, you MUST answer using this information. "
+            f"Never say you don't know who they are."
         )
         system_prompt = base_prompt + user_context
     else:
@@ -350,6 +349,18 @@ class AI(commands.Cog):
             reply = await generate_ai_response(message.author.id, user_text, guild_id, image_b64, media_type, user=message.author)
 
         await send_long_message(message, reply, ephemeral=False)
+
+
+    @app_commands.command(name="clearhistory", description="Clear your conversation history with Jarvis")
+    async def slash_clearhistory(self, interaction: discord.Interaction):
+        clear_history(interaction.user.id)
+        await interaction.response.send_message("🧹 Your conversation history has been cleared!", ephemeral=True)
+
+    @commands.command(name="clearhistory")
+    async def prefix_clearhistory(self, ctx: commands.Context):
+        """Clear your conversation history with Jarvis."""
+        clear_history(ctx.author.id)
+        await ctx.reply("🧹 Your conversation history has been cleared!")
 
 
 async def setup(bot: commands.Bot):
