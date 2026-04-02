@@ -15,4 +15,3 @@ google-generativeai>=0.7.0
 
 #Database and async support
 motor
-libsql
