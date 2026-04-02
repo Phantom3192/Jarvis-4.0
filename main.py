@@ -5,6 +5,8 @@ import asyncio
 from dotenv import load_dotenv
 from cogs.state import is_bot_banned
 import cogs.http_session as http_session
+from cogs.state import init_db
+
 
 load_dotenv()
 
@@ -71,6 +73,8 @@ async def main():
     async with bot:
         # Create the shared HTTP session before loading cogs (cogs import it at call-time)
         await http_session.create_session()
+        await init_db()  
+
         try:
             for cog in COGS:
                 await bot.load_extension(cog)
