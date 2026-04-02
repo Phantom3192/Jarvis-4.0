@@ -184,21 +184,23 @@ async def generate_ai_response(
     in_group    = _is_in_group(user_id, channel_id)
 
     if user:
-        name = user.display_name if user.display_name != user.name else user.name
+        name     = user.display_name if user.display_name != user.name else user.name
+        username = user.name
         if in_group:
             n = len(active_groups[channel_id])
             system_prompt = (
                 base_prompt +
                 f"\n\nThis is a shared group conversation between {n} people. "
-                f"Messages are prefixed with the sender's name. "
-                f"The person who just sent this message is called {name}. "
-                f"If they ask who they are, say their name naturally."
+                f"Messages are prefixed with the sender's name so you know who said what. "
+                f"The person who just sent this message is {name} (username: {username}). "
+                f"Only mention their name/username if they directly ask about their own identity."
             )
         else:
             system_prompt = (
                 base_prompt +
-                f"\n\nThe person you are talking to is called {name}. "
-                f"If they ask who they are, say their name naturally."
+                f"\n\nThe person messaging you is {name} (username: {username}). "
+                f"Only reveal this if they directly ask who they are. "
+                f"Never volunteer their name or username unprompted."
             )
     else:
         system_prompt = base_prompt
