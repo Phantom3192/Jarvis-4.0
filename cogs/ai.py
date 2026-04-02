@@ -316,6 +316,45 @@ class AI(commands.Cog):
             )
             return
 
+        # ── Add to group trigger ───────────────────────────────────────────
+        # e.g. "Jarvis add @alice to group" / "Jarvis add @alice @bob to group"
+        if re.search(r"\badd\b.+\bto\s+group\b", lower) or re.search(r"\badd\b.+\bgroup\b", lower):
+            members = get_group_members(message.channel.id)
+            if not members:
+                await message.reply("⚠️ There's no active group conversation. Start one first with `Jarvis group conversation @user`.")
+                return
+            to_add = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot and u.id not in members]
+            if not to_add:
+                await message.reply("⚠️ Those users are already in the group, or no valid users were mentioned.")
+                return
+            active_groups[message.channel.id].update(u.id for u in to_add)
+            names = ", ".join(u.display_name for u in to_add)
+            total = len(active_groups[message.channel.id])
+            await message.reply(f"➕ **{names}** joined the group conversation! ({total} participants total)")
+            return
+
+        # ── Remove from group trigger ──────────────────────────────────────
+        # e.g. "Jarvis remove @alice from group"
+        if re.search(r"\bremove\b.+\bfrom\s+group\b", lower) or re.search(r"\bkick\b.+\bgroup\b", lower):
+            members = get_group_members(message.channel.id)
+            if not members:
+                await message.reply("⚠️ There's no active group conversation in this channel.")
+                return
+            to_remove = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot and u.id in members]
+            if not to_remove:
+                await message.reply("⚠️ Those users aren't in the group, or no valid users were mentioned.")
+                return
+            for u in to_remove:
+                active_groups[message.channel.id].discard(u.id)
+            names = ", ".join(u.display_name for u in to_remove)
+            total = len(active_groups[message.channel.id])
+            if total < 2:
+                end_group(message.channel.id)
+                await message.reply(f"➖ **{names}** left the group. Not enough participants — group ended. Everyone is back to private mode.")
+            else:
+                await message.reply(f"➖ **{names}** removed from the group conversation. ({total} participants remaining)")
+            return
+
         # ── Group end trigger ──────────────────────────────────────────────
         # e.g. "Jarvis end group" / "Jarvis stop group"
         if re.search(r"\b(end|stop)\s+group\b", lower):
