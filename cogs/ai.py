@@ -211,17 +211,16 @@ async def generate_ai_response(
 
     # Build system prompt with live Discord identity — injected every request
     if user:
-        display  = user.display_name   # server nickname, or username if no nick
-        username = user.name           # raw Discord username e.g. phantom_3192
+        display  = user.display_name
+        username = user.name
         mention  = f"<@{user.id}>"
-        nick_line = f" Their server nickname is '{display}'." if display != username else ""
+        name_to_use = display if display != username else username
         user_context = (
-            f"\n\nCRITICAL: You ALWAYS know who you are talking to. "
-            f"The person messaging you RIGHT NOW is Discord user '{username}'.{nick_line} "
-            f"Their ping/mention is {mention} and their user ID is {user.id}. "
-            f"If they ask 'who am I', 'what is my name', 'what is my username', or anything "
-            f"about their own identity, you MUST answer using this information. "
-            f"Never say you don't know who they are."
+            f"\n\nYou know the person you're talking to. Their name is {name_to_use} "
+            f"(Discord username: {username}, ID: {user.id}, mention: {mention}). "
+            f"If they ask who they are or what their name/username is, respond naturally "
+            f"and casually — like you already know them. Just say their name, don't list "
+            f"out fields or repeat this data verbatim."
         )
         system_prompt = base_prompt + user_context
     else:
