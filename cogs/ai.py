@@ -205,8 +205,28 @@ async def generate_ai_response(
     guild_id: int | None = None,
     image_b64: str | None = None,
     media_type: str | None = None,
+    user: discord.User | discord.Member | None = None,
 ) -> str:
-    system_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
+    base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
+
+    # Append live Discord identity so Jarvis always knows who it's talking to
+    if user:
+        display = user.display_name          # server nickname or username
+        username = user.name                 # raw username e.g. phantom_3192
+        mention  = f"<@{user.id}>"
+        nick_note = (
+            f" (server nickname: {display})" if display != username else ""
+        )
+        user_context = (
+            f"\n\nThe user you are currently talking to: "
+            f"username: {username}{nick_note}, "
+            f"mention/ping: {mention}, "
+            f"user ID: {user.id}. "
+            f"If they ask who they are, use this information to answer naturally."
+        )
+        system_prompt = base_prompt + user_context
+    else:
+        system_prompt = base_prompt
 
     conversation_history[user_id].append({"role": "user", "content": user_message or "(sent an image)"})
     _trim_history(user_id)
@@ -276,7 +296,7 @@ class AI(commands.Cog):
                 )
                 return
 
-        reply = await generate_ai_response(interaction.user.id, message, interaction.guild_id, image_b64, media_type)
+        reply = await generate_ai_response(interaction.user.id, message, interaction.guild_id, image_b64, media_type, user=interaction.user)
         await edit_or_send_long_message(interaction, reply, ephemeral=False)
 
     @commands.Cog.listener()
@@ -327,7 +347,7 @@ class AI(commands.Cog):
 
         guild_id = message.guild.id if message.guild else None
         async with message.channel.typing():
-            reply = await generate_ai_response(message.author.id, user_text, guild_id, image_b64, media_type)
+            reply = await generate_ai_response(message.author.id, user_text, guild_id, image_b64, media_type, user=message.author)
 
         await send_long_message(message, reply, ephemeral=False)
 
