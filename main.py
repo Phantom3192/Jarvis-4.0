@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 from cogs.state import is_bot_banned
 import cogs.http_session as http_session
 from cogs.state import init_db
-
+from cogs.history import init_history
+ 
 
 load_dotenv()
 
@@ -74,6 +75,7 @@ async def main():
         # Create the shared HTTP session before loading cogs (cogs import it at call-time)
         await http_session.create_session()
         await init_db()  
+        await init_history()   # ← ADD THIS LINE
 
         try:
             for cog in COGS:
