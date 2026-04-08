@@ -37,11 +37,12 @@ def parse_duration(amount: int, unit: str) -> int:
     }
     return amount * multipliers.get(unit, -1)
 
-BAN_USAGE   = ("**Usage:** `!botban @user [duration] [unit] [reason]`\n"
+BAN_USAGE   = ("**Usage:** `!global-ban @user [duration unit] [reason]`\n"
                "**Examples:**\n"
-               "`!global-ban @user spamming`\n"
-               "`!global-ban @user permanent abusing the bot`\n"
-               "`!global-ban @user 7 days flooding`")
+               "`!global-ban @user spamming` — permanent ban\n"
+               "`!global-ban @user permanent abusing the bot` — permanent ban\n"
+               "`!global-ban @user 7 days flooding` — 7-day temp ban\n"
+               "`!global-ban @user 2 hours repeated spam` — 2-hour temp ban")
 UNBAN_USAGE = "**Usage:** `!global-unban <user_id>`"
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -75,7 +76,10 @@ class Admin(commands.Cog):
     async def _do_botban(self, user: discord.User | discord.Member, reason, duration, unit, send_msg):
         import time
 
-        if duration == 0 or unit == "permanent":
+        # Permanent ban: duration is 0 OR unit is "permanent"
+        is_permanent = (duration == 0 or unit == "permanent")
+
+        if is_permanent:
             bot_bans[str(user.id)] = {"reason": reason, "expires": None}
             save_bans()
             try:
@@ -172,12 +176,23 @@ class Admin(commands.Cog):
 
         if args:
             if args[0].lower() == "permanent":
+                # !global-ban @user permanent [reason]
                 reason = " ".join(args[1:]) or "No reason provided"
             elif args[0].isdigit() and len(args) >= 2:
+                # !global-ban @user 7 days [reason]
                 duration = int(args[0])
                 unit = args[1]
+                # Validate unit before proceeding
+                if parse_duration(duration, unit) <= 0:
+                    await ctx.reply(
+                        f"❌ `{unit}` is not a valid time unit.\n"
+                        "Valid units: `minutes`, `hours`, `days`, `weeks`\n\n"
+                        + BAN_USAGE
+                    )
+                    return
                 reason = " ".join(args[2:]) or "No reason provided"
             else:
+                # No duration prefix — permanent ban with reason
                 reason = " ".join(args)
 
         await self._do_botban(user, reason, duration, unit, ctx.reply)
