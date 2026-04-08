@@ -20,8 +20,8 @@ async def init_history():
     global _conn
 
     # Read env vars here (after load_dotenv has run), not at module level
-    turso_url   = os.getenv("TURSO_URL", "")
-    turso_token = os.getenv("TURSO_TOKEN", "")
+    turso_url   = os.getenv("TURSO_URL", "").strip().lstrip("=").strip()
+    turso_token = os.getenv("TURSO_TOKEN", "").strip()
     print(f"DEBUG TURSO_URL: '{turso_url}'")
     print(f"DEBUG TURSO_TOKEN length: {len(turso_token)}")
 
