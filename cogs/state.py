@@ -27,28 +27,47 @@ _data = {
 
 async def init_db():
     global _client, _db, _col
-    _client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
-    _db  = _client["jarvis"]
-    _col = _db["state"]
 
-    # Load everything from DB into memory
-    doc = await _col.find_one({"_id": "main"})
-    if doc:
-        _data["bans"]        = doc.get("bans",        {})
-        _data["stats"]       = doc.get("stats",       {})
-        _data["prompts"]     = doc.get("prompts",     {})
-        _data["rate_limits"] = doc.get("rate_limits", {})
-        _data["seen"]        = set(doc.get("seen", []))
-    else:
-        # First run — create the document
-        await _col.insert_one({
-            "_id":         "main",
-            "bans":        {},
-            "seen":        [],
-            "stats":       {},
-            "prompts":     {},
-            "rate_limits": {},
-        })
+    if not MONGODB_URL:
+        print(
+            "⚠️  MONGODB_URL is not set in your .env file.\n"
+            "   Jarvis will run in memory-only mode — all data (bans, stats, prompts)\n"
+            "   will be lost on restart. To persist data, add MONGODB_URL to your .env:\n"
+            "   MONGODB_URL=mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/"
+        )
+        return  # Skip DB entirely — bot still starts fine
+
+    try:
+        _client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URL)
+        _db  = _client["jarvis"]
+        _col = _db["state"]
+
+        # Load everything from DB into memory
+        doc = await _col.find_one({"_id": "main"})
+        if doc:
+            _data["bans"]        = doc.get("bans",        {})
+            _data["stats"]       = doc.get("stats",       {})
+            _data["prompts"]     = doc.get("prompts",     {})
+            _data["rate_limits"] = doc.get("rate_limits", {})
+            _data["seen"]        = set(doc.get("seen", []))
+        else:
+            # First run — create the document
+            await _col.insert_one({
+                "_id":         "main",
+                "bans":        {},
+                "seen":        [],
+                "stats":       {},
+                "prompts":     {},
+                "rate_limits": {},
+            })
+        print("✅ MongoDB connected")
+
+    except Exception as e:
+        print(
+            f"❌ MongoDB connection failed: {e}\n"
+            "   Jarvis will run in memory-only mode. Check your MONGODB_URL in .env."
+        )
+        _col = None  # Ensure _col is None so _save() is a no-op
 
 
 async def _save():
@@ -178,8 +197,8 @@ def reset_guild_prompt(guild_id: int) -> bool:
 
 # ── AI Rate limiting ──────────────────────────────────────────────────────────
 
-DAILY_AI_LIMIT   = 20   # max AI messages per user per day
-WARN_AT          = 15   # send a heads-up warning at this count
+DAILY_AI_LIMIT = 50   # max AI messages per user per day
+WARN_AT        = 40   # send a heads-up warning at this count
 
 def _today_utc() -> str:
     """Return today's date as a YYYY-MM-DD string (UTC)."""
