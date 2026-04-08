@@ -76,6 +76,7 @@ CATEGORIES = {
             ("--style anime",     "Add a style flag: anime, realistic, pixel, cartoon, sketch, watercolor, cinematic, fantasy"),
         ],
     },
+    "🎉 Fun": {
         "description": "Fun commands to play around with.",
         "commands": [
             ("!trivia", "Get a random trivia question to test your knowledge"),
@@ -98,6 +99,7 @@ CATEGORIES = {
             
         ],
     },
+}   # ── end CATEGORIES ──────────────────────────────────────────────────────────
 
 
 # ── Embed builder ─────────────────────────────────────────────────────────────
