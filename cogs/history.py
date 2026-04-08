@@ -31,7 +31,7 @@ async def init_history():
         return
 
     try:
-        import libsql
+        import libsql_experimental as libsql
         _conn = libsql.connect(
             database=turso_url,
             auth_token=turso_token,

@@ -5,7 +5,7 @@ import os
 import re
 from collections import defaultdict
 import groq
-import google.generativeai as genai
+import google.genai as genai
 import base64
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
