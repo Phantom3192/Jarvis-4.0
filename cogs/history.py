@@ -22,6 +22,8 @@ async def init_history():
     # Read env vars here (after load_dotenv has run), not at module level
     turso_url   = os.getenv("TURSO_URL", "")
     turso_token = os.getenv("TURSO_TOKEN", "")
+    print(f"DEBUG TURSO_URL: '{turso_url}'")
+    print(f"DEBUG TURSO_TOKEN length: {len(turso_token)}")
 
     if not turso_url or not turso_token:
         print(
