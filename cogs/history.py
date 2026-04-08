@@ -5,10 +5,6 @@ Stores last 20 messages per user, auto-deletes after 30 days inactivity.
 import os
 import time
 import asyncio
-import libsql
-
-TURSO_URL   = os.getenv("TURSO_URL", "")
-TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
 
 MAX_HISTORY      = 20    # messages per user
 INACTIVE_DAYS    = 30    # auto-delete after this many days of inactivity
@@ -22,28 +18,46 @@ _conn = None
 async def init_history():
     """Call once at startup to connect and create table."""
     global _conn
-    _conn = libsql.connect(
-        database=TURSO_URL,
-        auth_token=TURSO_TOKEN,
-    )
-    _conn.execute("""
-        CREATE TABLE IF NOT EXISTS history (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id     TEXT NOT NULL,
-            role        TEXT NOT NULL,
-            content     TEXT NOT NULL,
-            timestamp   REAL NOT NULL
-        )
-    """)
-    _conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_history_user
-        ON history (user_id, timestamp)
-    """)
-    _conn.commit()
-    print("✅ Turso history DB connected")
 
-    # Start background cleanup task
-    asyncio.create_task(_cleanup_loop())
+    # Read env vars here (after load_dotenv has run), not at module level
+    turso_url   = os.getenv("TURSO_URL", "")
+    turso_token = os.getenv("TURSO_TOKEN", "")
+
+    if not turso_url or not turso_token:
+        print(
+            "⚠️  TURSO_URL or TURSO_TOKEN is not set in your .env file.\n"
+            "   Conversation history will not be saved across restarts."
+        )
+        return
+
+    try:
+        import libsql
+        _conn = libsql.connect(
+            database=turso_url,
+            auth_token=turso_token,
+        )
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                timestamp   REAL NOT NULL
+            )
+        """)
+        _conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_history_user
+            ON history (user_id, timestamp)
+        """)
+        _conn.commit()
+        print("✅ Turso history DB connected")
+
+        # Start background cleanup task
+        asyncio.create_task(_cleanup_loop())
+
+    except Exception as e:
+        print(f"❌ Turso connection failed: {e}\n   History will not be persisted.")
+        _conn = None
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
@@ -53,16 +67,17 @@ async def add_message(user_id: int, role: str, content: str):
     Add a message to history and trim to MAX_HISTORY.
     role: 'user' or 'assistant'
     """
+    if _conn is None:
+        return
+
     uid = str(user_id)
     now = time.time()
 
-    # Insert new message
     _conn.execute(
         "INSERT INTO history (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
         [uid, role, content, now]
     )
 
-    # Trim to last MAX_HISTORY messages
     _conn.execute("""
         DELETE FROM history
         WHERE user_id = ?
@@ -82,6 +97,9 @@ async def get_history(user_id: int) -> list[dict]:
     Get conversation history for a user.
     Returns list of {'role': ..., 'content': ...} dicts oldest first.
     """
+    if _conn is None:
+        return []
+
     uid = str(user_id)
     result = _conn.execute(
         """
@@ -100,6 +118,9 @@ async def clear_history(user_id: int) -> bool:
     Clear all history for a user.
     Returns True if anything was deleted.
     """
+    if _conn is None:
+        return False
+
     uid = str(user_id)
     _conn.execute("DELETE FROM history WHERE user_id = ?", [uid])
     _conn.commit()
@@ -108,6 +129,9 @@ async def clear_history(user_id: int) -> bool:
 
 async def get_history_count(user_id: int) -> int:
     """Get number of stored messages for a user."""
+    if _conn is None:
+        return 0
+
     uid = str(user_id)
     result = _conn.execute(
         "SELECT COUNT(*) FROM history WHERE user_id = ?",
@@ -126,6 +150,8 @@ async def _cleanup_loop():
 
 
 async def _cleanup_inactive():
+    if _conn is None:
+        return
     cutoff = time.time() - (INACTIVE_DAYS * 86400)
     _conn.execute("""
         DELETE FROM history
