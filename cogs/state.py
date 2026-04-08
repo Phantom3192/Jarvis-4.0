@@ -15,10 +15,11 @@ _col = None  # single "jarvis" collection
 # ── In-memory mirrors (so the rest of your cogs work unchanged) ───────────────
 
 _data = {
-    "bans":    {},
-    "seen":    set(),
-    "stats":   {},
-    "prompts": {},
+    "bans":        {},
+    "seen":        set(),
+    "stats":       {},
+    "prompts":     {},
+    "rate_limits": {},   # uid → {"count": int, "day": "YYYY-MM-DD"}
 }
 
 
@@ -33,18 +34,20 @@ async def init_db():
     # Load everything from DB into memory
     doc = await _col.find_one({"_id": "main"})
     if doc:
-        _data["bans"]    = doc.get("bans",    {})
-        _data["stats"]   = doc.get("stats",   {})
-        _data["prompts"] = doc.get("prompts", {})
-        _data["seen"]    = set(doc.get("seen", []))
+        _data["bans"]        = doc.get("bans",        {})
+        _data["stats"]       = doc.get("stats",       {})
+        _data["prompts"]     = doc.get("prompts",     {})
+        _data["rate_limits"] = doc.get("rate_limits", {})
+        _data["seen"]        = set(doc.get("seen", []))
     else:
         # First run — create the document
         await _col.insert_one({
-            "_id":     "main",
-            "bans":    {},
-            "seen":    [],
-            "stats":   {},
-            "prompts": {},
+            "_id":         "main",
+            "bans":        {},
+            "seen":        [],
+            "stats":       {},
+            "prompts":     {},
+            "rate_limits": {},
         })
 
 
@@ -55,10 +58,11 @@ async def _save():
     await _col.update_one(
         {"_id": "main"},
         {"$set": {
-            "bans":    _data["bans"],
-            "seen":    list(_data["seen"]),
-            "stats":   _data["stats"],
-            "prompts": _data["prompts"],
+            "bans":        _data["bans"],
+            "seen":        list(_data["seen"]),
+            "stats":       _data["stats"],
+            "prompts":     _data["prompts"],
+            "rate_limits": _data["rate_limits"],
         }},
         upsert=True,
     )
@@ -170,3 +174,63 @@ def reset_guild_prompt(guild_id: int) -> bool:
         _schedule_save()
         return True
     return False
+
+
+# ── AI Rate limiting ──────────────────────────────────────────────────────────
+
+DAILY_AI_LIMIT   = 20   # max AI messages per user per day
+WARN_AT          = 15   # send a heads-up warning at this count
+
+def _today_utc() -> str:
+    """Return today's date as a YYYY-MM-DD string (UTC)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def get_ai_usage(user_id: int) -> tuple[int, str]:
+    """
+    Return (count_today, reset_date) for a user.
+    Resets automatically if the stored day is not today.
+    """
+    uid   = str(user_id)
+    today = _today_utc()
+    entry = _data["rate_limits"].get(uid)
+
+    if not entry or entry.get("day") != today:
+        # New day — reset
+        _data["rate_limits"][uid] = {"count": 0, "day": today}
+        _schedule_save()
+        return 0, today
+
+    return entry["count"], today
+
+
+def increment_ai_usage(user_id: int) -> int:
+    """
+    Increment the user's daily AI message count.
+    Returns the new count after incrementing.
+    """
+    uid   = str(user_id)
+    today = _today_utc()
+    entry = _data["rate_limits"].get(uid)
+
+    if not entry or entry.get("day") != today:
+        _data["rate_limits"][uid] = {"count": 1, "day": today}
+    else:
+        _data["rate_limits"][uid]["count"] += 1
+
+    _schedule_save()
+    return _data["rate_limits"][uid]["count"]
+
+
+def is_ai_rate_limited(user_id: int) -> bool:
+    """Return True if the user has exhausted their daily AI quota."""
+    count, _ = get_ai_usage(user_id)
+    return count >= DAILY_AI_LIMIT
+
+
+def reset_ai_usage(user_id: int):
+    """Admin helper — manually reset a user's daily AI count."""
+    uid = str(user_id)
+    _data["rate_limits"][uid] = {"count": 0, "day": _today_utc()}
+    _schedule_save()

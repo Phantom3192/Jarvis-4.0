@@ -5,7 +5,7 @@ import asyncio
 import json
 import os
 import aiohttp
-from cogs.state import bot_bans, save_bans, is_bot_banned
+from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -327,6 +327,31 @@ class Admin(commands.Cog):
         note  = f"\n*...and {len(lines) - 20} more.*" if len(lines) > 20 else ""
         await interaction.followup.send(f"🚫 **Bot-banned users ({len(bot_bans)}):**\n\n{chunk}{note}")
 
+
+
+    @commands.command(name="resetlimit")
+    async def prefix_resetlimit(self, ctx: commands.Context, user: discord.User = None):
+        """Admin only — reset a user's daily AI message limit."""
+        if not is_admin(ctx.author):
+            await ctx.reply("🚫 You don't have permission to use this command.")
+            return
+        if user is None:
+            await ctx.reply("**Usage:** `!resetlimit @user`")
+            return
+        reset_ai_usage(user.id)
+        await ctx.reply(f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.")
+
+    @app_commands.command(name="resetlimit", description="Reset a user's daily AI message limit (admin only)")
+    @app_commands.describe(user="The user whose limit to reset")
+    async def slash_resetlimit(self, interaction: discord.Interaction, user: discord.User):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+            return
+        reset_ai_usage(user.id)
+        await interaction.response.send_message(
+            f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):

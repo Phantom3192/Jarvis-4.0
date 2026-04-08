@@ -13,6 +13,8 @@ CATEGORIES = {
             ("/chat",        "Chat with Jarvis (supports image attachments)"),
             ("@mention",     "Mention Jarvis or say 'jarvis' in a message to chat"),
             ("reply",        "Reply to any of Jarvis's messages to continue the conversation"),
+            ("!mylimit",     "Check how many AI messages you have left today"),
+            ("/mylimit",     "Slash version of mylimit"),
         ],
     },
     "📊 Stats": {
@@ -61,6 +63,8 @@ CATEGORIES = {
             ("/botunban",           "Slash version of global-unban"),
             ("!global-bans",        "List all currently banned users"),
             ("/botbans",            "Slash version of global-bans"),
+            ("!resetlimit @user",   "Reset a user's daily AI message limit"),
+            ("/resetlimit",         "Slash version of resetlimit"),
         ],
     },
 

@@ -7,7 +7,11 @@ from collections import defaultdict
 import groq
 import google.generativeai as genai
 import base64
-from cogs.state import is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt
+from cogs.state import (
+    is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
+    is_ai_rate_limited, increment_ai_usage, get_ai_usage,
+    DAILY_AI_LIMIT, WARN_AT,
+)
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session
 
@@ -32,6 +36,26 @@ DEFAULT_SYSTEM_PROMPT = (
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 RATE_LIMIT_MSG  = "⚠️ All AI models are currently rate limited. Please try again in a few minutes."
+
+DAILY_LIMIT_MSG = (
+    "⏳ **You've reached your daily Jarvis AI limit!**\n\n"
+    "You've used all **{limit}** of your free AI messages for today. "
+    "Your limit resets at **midnight UTC** — come back then and I'll be ready.\n\n"
+    "In the meantime, here's what you can still do:\n"
+    "🎮 **`!trivia`** or **`/trivia`** — test your knowledge with a trivia question\n"
+    "🪢 **`!hangman`** or **`/hangman`** — play a round of hangman\n"
+    "🤔 **`/wyr`** — Would You Rather? fun for the whole server\n"
+    "🫣 **`/truth`** or **`/dare`** — classic truth or dare\n"
+    "🤯 **`/funfact`** — get a random fun fact\n"
+    "📊 **`/stats`** — check your Jarvis usage stats\n"
+    "💡 **`!feedback`** — share ideas or suggestions with the developer\n\n"
+    "See you tomorrow! 👋"
+)
+
+WARN_LIMIT_MSG = (
+    "⚠️ **Heads up** — you've used **{count}/{limit}** AI messages today. "
+    "You have **{remaining}** left before your limit resets at midnight UTC."
+)
 
 _groq_client: groq.AsyncGroq | None = groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
@@ -180,6 +204,10 @@ async def generate_ai_response(
     media_type: str | None = None,
     user: discord.User | discord.Member | None = None,
 ) -> str:
+    # ── Daily rate limit check ────────────────────────────────────────────────
+    if is_ai_rate_limited(user_id):
+        return DAILY_LIMIT_MSG.format(limit=DAILY_AI_LIMIT)
+
     base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
     in_group    = _is_in_group(user_id, channel_id)
 
@@ -236,6 +264,15 @@ async def generate_ai_response(
     history.append({"role": "assistant", "content": reply})
     _trim(history)
     record_message(user_id, user_message, reply)
+
+    # ── Increment daily usage & attach warning if approaching limit ───────────
+    new_count = increment_ai_usage(user_id)
+    if new_count == WARN_AT:
+        remaining = DAILY_AI_LIMIT - new_count
+        reply += (
+            f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=DAILY_AI_LIMIT, remaining=remaining)}"
+        )
+
     return reply
 
 
@@ -390,6 +427,73 @@ class AI(commands.Cog):
         async with message.channel.typing():
             reply = await generate_ai_response(message.author.id, user_text, message.channel.id, guild_id, image_b64, media_type, user=message.author)
         await send_long_message(message, reply, ephemeral=False)
+
+    # ── /mylimit ──────────────────────────────────────────────────────────────
+
+    @app_commands.command(name="mylimit", description="Check how many AI messages you have left today")
+    async def slash_mylimit(self, interaction: discord.Interaction):
+        count, day = get_ai_usage(interaction.user.id)
+        remaining  = max(0, DAILY_AI_LIMIT - count)
+        pct        = count / DAILY_AI_LIMIT
+
+        if remaining == 0:
+            colour = discord.Color.red()
+            status = "❌ Limit reached"
+        elif pct >= 0.75:
+            colour = discord.Color.orange()
+            status = "⚠️ Running low"
+        else:
+            colour = discord.Color.green()
+            status = "✅ Good to go"
+
+        bar_filled = int(pct * 10)
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
+
+        embed = discord.Embed(
+            title="📊 Your Daily AI Limit",
+            color=colour,
+            description=(
+                f"`{bar}` {count}/{DAILY_AI_LIMIT}\n"
+                f"**Status:** {status}\n"
+                f"**Remaining:** {remaining} message(s)\n"
+                f"**Resets:** midnight UTC (daily)"
+            ),
+        )
+        embed.set_footer(text=f"Limit resets every day at 00:00 UTC  •  {day}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.command(name="mylimit")
+    async def prefix_mylimit(self, ctx: commands.Context):
+        """Check how many AI messages you have left today."""
+        count, day = get_ai_usage(ctx.author.id)
+        remaining  = max(0, DAILY_AI_LIMIT - count)
+        pct        = count / DAILY_AI_LIMIT
+
+        if remaining == 0:
+            colour = discord.Color.red()
+            status = "❌ Limit reached"
+        elif pct >= 0.75:
+            colour = discord.Color.orange()
+            status = "⚠️ Running low"
+        else:
+            colour = discord.Color.green()
+            status = "✅ Good to go"
+
+        bar_filled = int(pct * 10)
+        bar = "█" * bar_filled + "░" * (10 - bar_filled)
+
+        embed = discord.Embed(
+            title="📊 Your Daily AI Limit",
+            color=colour,
+            description=(
+                f"`{bar}` {count}/{DAILY_AI_LIMIT}\n"
+                f"**Status:** {status}\n"
+                f"**Remaining:** {remaining} message(s)\n"
+                f"**Resets:** midnight UTC (daily)"
+            ),
+        )
+        embed.set_footer(text=f"Limit resets every day at 00:00 UTC  •  {day}")
+        await ctx.reply(embed=embed)
 
     # ── clearhistory ──────────────────────────────────────────────────────────
 
