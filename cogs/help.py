@@ -68,7 +68,14 @@ CATEGORIES = {
         ],
     },
 
-    "🎮Fun": {
+    "🎨 Image Gen": {
+        "description": "Generate AI images from text prompts — free, no limits.",
+        "commands": [
+            ("/imagine",          "Generate an image from a text prompt"),
+            ("!imagine <prompt>", "Prefix version of imagine"),
+            ("--style anime",     "Add a style flag: anime, realistic, pixel, cartoon, sketch, watercolor, cinematic, fantasy"),
+        ],
+    },
         "description": "Fun commands to play around with.",
         "commands": [
             ("!trivia", "Get a random trivia question to test your knowledge"),
@@ -91,7 +98,6 @@ CATEGORIES = {
             
         ],
     },
-}
 
 
 # ── Embed builder ─────────────────────────────────────────────────────────────

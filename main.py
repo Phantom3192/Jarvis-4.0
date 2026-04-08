@@ -3,14 +3,13 @@ from discord.ext import commands
 import os
 import asyncio
 from dotenv import load_dotenv
-
-load_dotenv()  # Load environment variables from .env file
-
 from cogs.state import is_bot_banned
 import cogs.http_session as http_session
 from cogs.state import init_db
 from cogs.history import init_history
+ 
 
+load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -32,6 +31,7 @@ COGS = [
     "cogs.errorhandler",
     "cogs.help",
     "cogs.fun",
+    "cogs.imagine",
 ]
 
 
