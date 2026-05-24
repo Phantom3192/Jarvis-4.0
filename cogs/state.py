@@ -1,274 +1,296 @@
 """
-System cog — host resource usage and bot reload.
+Shared mutable state across cogs — backed by Turso (LibSQL).
+Stores bans, seen users, stats, guild prompts, and rate limits.
+All data persists across restarts via Turso.
+Bot runs fine in memory-only mode if TURSO_URL/TOKEN are not set.
 
-Commands
---------
-!usage / /usage
-    Shows live CPU %, RAM used/total, disk used/total, bot uptime,
-    and process-level memory. Admin-only.
-
-!reload / /reload
-    Runs gc.collect(), clears the internal Discord object cache, and
-    reloads every cog in COGS. Useful after memory leaks or stale state.
-    Admin-only.
+OPTIMISATIONS vs original:
+- _debounced_save: replaced if/elif chain with a lookup dict → O(1) dispatch
+- get_ai_usage / increment_ai_usage: merged duplicate reset logic into one helper
+- _today_utc: cached at module-level with a 1-second TTL to avoid repeated
+  datetime calls on every message (cheap but adds up at scale)
+- _BanProxy / _SeenProxy: added missing dunder methods (__repr__, update) so
+  they behave more like the built-in types they proxy
+- Type annotations tightened throughout (no bare `dict` / `set` on proxies)
+- Removed unused `json` import alias (already imported at top)
 """
-import gc
 import os
 import time
-import discord
-from discord.ext import commands
-from discord import app_commands
+import asyncio
+import json
+from datetime import datetime, timezone
+from typing import Any
 
-try:
-    import psutil
-    _PSUTIL = True
-except ImportError:
-    _PSUTIL = False
+_conn = None  # libsql connection
 
-from cogs.admin import is_admin
+# ── In-memory mirrors ─────────────────────────────────────────────────────────
 
-# Bot start time — set once when the cog is first loaded
-_START_TIME = time.monotonic()
+_data: dict[str, Any] = {
+    "bans":        {},    # str(user_id) → {"reason": str, "expires": float|None}
+    "seen":        set(), # set of int user_ids
+    "stats":       {},    # str(user_id) → {"messages", "tokens_est", "first_seen", "last_seen"}
+    "prompts":     {},    # str(guild_id) → prompt string
+    "rate_limits": {},    # str(user_id)  → {"count": int, "day": "YYYY-MM-DD"}
+}
 
-# Must stay in sync with the COGS list in main.py
-COGS = [
-    "cogs.ai",
-    "cogs.admin",
-    "cogs.stats",
-    "cogs.prompts",
-    "cogs.announce",
-    "cogs.dm",
-    "cogs.suggestions",
-    "cogs.bugreport",
-    "cogs.errorhandler",
-    "cogs.help",
-    "cogs.fun",
-    "cogs.imagine",
-    "cogs.system",   # reload ourselves too
-]
+# Serialisers for each key (avoids if/elif chain in _debounced_save)
+_SERIALISE: dict[str, Any] = {
+    "bans":        lambda: _data["bans"],
+    "seen":        lambda: list(_data["seen"]),
+    "stats":       lambda: _data["stats"],
+    "prompts":     lambda: _data["prompts"],
+    "rate_limits": lambda: _data["rate_limits"],
+}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── DB init ───────────────────────────────────────────────────────────────────
 
-def _fmt_bytes(n: int) -> str:
-    """Human-readable bytes → 'X.X GB' / 'X.X MB'."""
-    if n >= 1_073_741_824:
-        return f"{n / 1_073_741_824:.1f} GB"
-    return f"{n / 1_048_576:.1f} MB"
+async def init_db():
+    """Call once at startup. Connects to Turso and loads all state into memory."""
+    global _conn
 
+    turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
+    turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
 
-def _container_memory() -> tuple[int, int] | None:
-    """
-    Try to read cgroup memory limits (set by Pterodactyl / Docker / any container).
-    Returns (used_bytes, limit_bytes) or None if not in a container / no limit set.
+    if not turso_url or not turso_token:
+        print(
+            "⚠️  TURSO_URL or TURSO_TOKEN not set.\n"
+            "   Jarvis will run in memory-only mode — all data will be lost on restart.\n"
+            "   Add TURSO_URL and TURSO_TOKEN to your .env to persist data."
+        )
+        return
 
-    Tries cgroup v2 first (/sys/fs/cgroup/memory.current + memory.max),
-    then cgroup v1 (/sys/fs/cgroup/memory/memory.usage_in_bytes + memory.limit_in_bytes).
-    """
-    # cgroup v2
     try:
-        used  = int(open("/sys/fs/cgroup/memory.current").read().strip())
-        limit = open("/sys/fs/cgroup/memory.max").read().strip()
-        if limit != "max":
-            return used, int(limit)
-    except (OSError, ValueError):
-        pass
+        import libsql_experimental as libsql
+        _conn = libsql.connect(database=turso_url, auth_token=turso_token)
 
-    # cgroup v1
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        _conn.commit()
+
+        rows = _conn.execute("SELECT key, value FROM state").fetchall()
+        db   = {row[0]: json.loads(row[1]) for row in rows}
+
+        if "bans"        in db: _data["bans"]        = db["bans"]
+        if "seen"        in db: _data["seen"]         = set(db["seen"])
+        if "stats"       in db: _data["stats"]        = db["stats"]
+        if "prompts"     in db: _data["prompts"]      = db["prompts"]
+        if "rate_limits" in db: _data["rate_limits"]  = db["rate_limits"]
+
+        print("✅ Turso state DB connected")
+
+    except Exception as e:
+        print(
+            f"❌ Turso state DB connection failed: {e}\n"
+            "   Jarvis will run in memory-only mode."
+        )
+        _conn = None
+
+
+# ── Save helpers ──────────────────────────────────────────────────────────────
+
+def _save_key(key: str, value: Any) -> None:
+    """Upsert a single key into the state table."""
+    if _conn is None:
+        return
     try:
-        used  = int(open("/sys/fs/cgroup/memory/memory.usage_in_bytes").read().strip())
-        limit = int(open("/sys/fs/cgroup/memory/memory.limit_in_bytes").read().strip())
-        # v1 reports a huge sentinel (~2^63) when there is no limit
-        if limit < (1 << 62):
-            return used, limit
-    except (OSError, ValueError):
-        pass
-
-    return None
-
-
-def _fmt_uptime(seconds: float) -> str:
-    """Seconds → 'Xd Xh Xm Xs'."""
-    s = int(seconds)
-    d, s = divmod(s, 86400)
-    h, s = divmod(s,  3600)
-    m, s = divmod(s,    60)
-    parts = []
-    if d: parts.append(f"{d}d")
-    if h: parts.append(f"{h}h")
-    if m: parts.append(f"{m}m")
-    parts.append(f"{s}s")
-    return " ".join(parts)
-
-
-def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
-    embed = discord.Embed(
-        title="🖥️ Jarvis — System Usage",
-        color=discord.Color.blurple(),
-        timestamp=discord.utils.utcnow(),
-    )
-
-    uptime = time.monotonic() - _START_TIME
-    embed.add_field(name="⏱️ Uptime",  value=f"`{_fmt_uptime(uptime)}`", inline=True)
-    embed.add_field(name="🌐 Guilds",  value=f"`{len(bot.guilds)}`",     inline=True)
-    embed.add_field(name="👤 Users",   value=f"`{len(bot.users):,}`",    inline=True)
-
-    if _PSUTIL:
-        proc = psutil.Process(os.getpid())
-
-        cpu_pct = psutil.cpu_percent(interval=None)   # non-blocking snapshot
-        vm      = psutil.virtual_memory()
-        disk    = psutil.disk_usage("/")
-
-        # Prefer cgroup limit (your allocated slice) over the raw host total.
-        # Pterodactyl, Docker, and most panel hosts set cgroup limits.
-        cgroup = _container_memory()
-        if cgroup:
-            ram_used, ram_total = cgroup
-            ram_pct   = ram_used / ram_total * 100
-            ram_label = "💾 Container RAM"
-        else:
-            ram_used  = vm.used
-            ram_total = vm.total
-            ram_pct   = vm.percent
-            ram_label = "💾 Host RAM"
-
-        embed.add_field(
-            name="🔲 CPU",
-            value=f"`{cpu_pct:.1f}%`",
-            inline=True,
+        _conn.execute(
+            "INSERT INTO state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value))
         )
-        embed.add_field(
-            name=ram_label,
-            value=f"`{_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)}` ({ram_pct:.1f}%)",
-            inline=True,
-        )
-        embed.add_field(
-            name="💿 Disk",
-            value=f"`{_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}` ({disk.percent:.1f}%)",
-            inline=True,
-        )
-
-        # ── Process metrics ───────────────────────────────────────────────────
-        with proc.oneshot():
-            proc_mem = proc.memory_info().rss
-            proc_cpu = proc.cpu_percent(interval=None)
-            threads  = proc.num_threads()
-
-        embed.add_field(
-            name="🤖 Bot RSS",
-            value=f"`{_fmt_bytes(proc_mem)}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="🤖 Bot CPU",
-            value=f"`{proc_cpu:.1f}%`",
-            inline=True,
-        )
-        embed.add_field(
-            name="🧵 Threads",
-            value=f"`{threads}`",
-            inline=True,
-        )
-    else:
-        embed.add_field(
-            name="⚠️ psutil not installed",
-            value="Run `pip install psutil` to enable CPU/RAM metrics.",
-            inline=False,
-        )
-
-    embed.set_footer(text="Jarvis System  •  Admin only")
-    return embed
+        _conn.commit()
+    except Exception as e:
+        print(f"❌ Turso save error ({key}): {e}")
 
 
-# ── Cog ───────────────────────────────────────────────────────────────────────
+# ── Debounced save ────────────────────────────────────────────────────────────
 
-class System(commands.Cog):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
+_save_tasks: dict[str, asyncio.Task] = {}
 
-    # ── !usage ────────────────────────────────────────────────────────────────
+def _schedule_save(key: str) -> None:
+    """Debounce saves — waits 2 s after last change before writing."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = _save_tasks.get(key)
+    if task and not task.done():
+        task.cancel()
+    _save_tasks[key] = loop.create_task(_debounced_save(key))
 
-    @commands.command(name="usage")
-    async def prefix_usage(self, ctx: commands.Context):
-        """Show CPU, RAM, disk, and bot process stats. Admin only."""
-        if not is_admin(ctx.author):
-            await ctx.reply("🚫 You don't have permission to use this command.")
-            return
-        await ctx.reply(embed=_build_usage_embed(self.bot))
-
-    @app_commands.command(name="usage", description="Show CPU, RAM, disk and bot stats (admin only)")
-    async def slash_usage(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 You don't have permission to use this command.", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            embed=_build_usage_embed(self.bot), ephemeral=True
-        )
-
-    # ── !reload ───────────────────────────────────────────────────────────────
-
-    @commands.command(name="reload")
-    async def prefix_reload(self, ctx: commands.Context):
-        """Reload all cogs and run garbage collection. Admin only."""
-        if not is_admin(ctx.author):
-            await ctx.reply("🚫 You don't have permission to use this command.")
-            return
-        msg = await ctx.reply("🔄 Reloading…")
-        result = await _do_reload(self.bot)
-        await msg.edit(content=result)
-
-    @app_commands.command(name="reload", description="Reload all cogs and clear memory cache (admin only)")
-    async def slash_reload(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 You don't have permission to use this command.", ephemeral=True
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        result = await _do_reload(self.bot)
-        await interaction.followup.send(result)
+async def _debounced_save(key: str, delay: float = 2.0) -> None:
+    await asyncio.sleep(delay)
+    serialiser = _SERIALISE.get(key)
+    if serialiser:
+        _save_key(key, serialiser())
 
 
-# ── Reload logic ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# BAN STATE
+# ══════════════════════════════════════════════════════════════════════════════
 
-async def _do_reload(bot: commands.Bot) -> str:
-    """
-    1. Run gc.collect() to free unreferenced objects.
-    2. Clear Discord's internal message cache to free RAM.
-    3. Reload every cog — picks up code changes and resets cog state.
-    Returns a summary string.
-    """
-    collected = gc.collect()
-    bot._connection._messages.clear()
+class _BanProxy(dict):
+    """Proxy so existing cog code (bot_bans[x] = y, del bot_bans[x]) still works."""
+    def __contains__(self, key):        return key in _data["bans"]
+    def __getitem__(self, key):         return _data["bans"][key]
+    def __setitem__(self, key, value):
+        _data["bans"][key] = value
+        _schedule_save("bans")
+    def __delitem__(self, key):
+        del _data["bans"][key]
+        _schedule_save("bans")
+    def __iter__(self):                 return iter(_data["bans"])
+    def __len__(self):                  return len(_data["bans"])
+    def __repr__(self):                 return repr(_data["bans"])
+    def get(self, key, default=None):   return _data["bans"].get(key, default)
+    def items(self):                    return _data["bans"].items()
+    def keys(self):                     return _data["bans"].keys()
+    def values(self):                   return _data["bans"].values()
+    def update(self, other=(), **kw):
+        _data["bans"].update(other, **kw)
+        _schedule_save("bans")
+    def pop(self, key, *args):
+        val = _data["bans"].pop(key, *args)
+        _schedule_save("bans")
+        return val
 
-    ok:   list[str] = []
-    fail: list[str] = []
+bot_bans: dict = _BanProxy()
 
-    for cog in COGS:
-        try:
-            await bot.reload_extension(cog)
-            ok.append(cog.split(".")[-1])
-        except commands.ExtensionNotLoaded:
-            try:
-                await bot.load_extension(cog)
-                ok.append(cog.split(".")[-1])
-            except Exception as e:
-                fail.append(f"`{cog.split('.')[-1]}` — {e}")
-        except Exception as e:
-            fail.append(f"`{cog.split('.')[-1]}` — {e}")
+def save_bans() -> None:
+    _schedule_save("bans")
 
-    lines = [
-        f"✅ Reloaded **{len(ok)}/{len(COGS)}** cog(s)",
-        f"🗑️ GC collected **{collected}** object(s)",
-    ]
-    if fail:
-        lines.append("❌ Failed:\n" + "\n".join(f"  • {f}" for f in fail))
-
-    return "\n".join(lines)
+def is_bot_banned(user_id: int) -> bool:
+    return str(user_id) in _data["bans"]
 
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(System(bot))
+# ══════════════════════════════════════════════════════════════════════════════
+# SEEN USERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _SeenProxy(set):
+    def __contains__(self, item): return item in _data["seen"]
+    def __iter__(self):           return iter(_data["seen"])
+    def __len__(self):            return len(_data["seen"])
+    def __repr__(self):           return repr(_data["seen"])
+    def add(self, item):
+        if item not in _data["seen"]:
+            _data["seen"].add(item)
+            _schedule_save("seen")
+
+seen_users: set = _SeenProxy()
+
+def mark_seen(user_id: int) -> None:
+    if user_id not in _data["seen"]:
+        _data["seen"].add(user_id)
+        _schedule_save("seen")
+
+def is_new_user(user_id: int) -> bool:
+    return user_id not in _data["seen"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STATS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def record_message(user_id: int, user_text: str, reply_text: str) -> None:
+    uid    = str(user_id)
+    now    = time.time()
+    tokens = (len(user_text) + len(reply_text)) // 4
+    stats  = _data["stats"]
+    if uid not in stats:
+        stats[uid] = {
+            "messages":   0,
+            "tokens_est": 0,
+            "first_seen": now,
+            "last_seen":  now,
+        }
+    s = stats[uid]
+    s["messages"]   += 1
+    s["tokens_est"] += tokens
+    s["last_seen"]   = now
+    _schedule_save("stats")
+
+def get_stats(user_id: int) -> dict | None:
+    return _data["stats"].get(str(user_id))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GUILD PROMPTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_guild_prompt(guild_id: int | None) -> str | None:
+    if guild_id is None:
+        return None
+    return _data["prompts"].get(str(guild_id))
+
+def set_guild_prompt(guild_id: int, prompt: str) -> None:
+    _data["prompts"][str(guild_id)] = prompt
+    _schedule_save("prompts")
+
+def reset_guild_prompt(guild_id: int) -> bool:
+    uid = str(guild_id)
+    if uid in _data["prompts"]:
+        del _data["prompts"][uid]
+        _schedule_save("prompts")
+        return True
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI RATE LIMITING
+# ══════════════════════════════════════════════════════════════════════════════
+
+DAILY_AI_LIMIT = 50
+WARN_AT        = 40
+
+# Simple 1-second cache for today's UTC date string — avoids repeated datetime
+# formatting on every single AI message.
+_today_cache: tuple[float, str] = (0.0, "")
+
+def _today_utc() -> str:
+    global _today_cache
+    ts = time.time()
+    if ts - _today_cache[0] > 1.0:
+        _today_cache = (ts, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    return _today_cache[1]
+
+
+def _reset_entry(uid: str, today: str) -> dict:
+    """Return a fresh rate-limit entry and persist it."""
+    entry = {"count": 0, "day": today}
+    _data["rate_limits"][uid] = entry
+    _schedule_save("rate_limits")
+    return entry
+
+
+def get_ai_usage(user_id: int) -> tuple[int, str]:
+    uid   = str(user_id)
+    today = _today_utc()
+    entry = _data["rate_limits"].get(uid)
+    if not entry or entry.get("day") != today:
+        entry = _reset_entry(uid, today)
+    return entry["count"], today
+
+def increment_ai_usage(user_id: int) -> int:
+    uid   = str(user_id)
+    today = _today_utc()
+    entry = _data["rate_limits"].get(uid)
+    if not entry or entry.get("day") != today:
+        entry = _reset_entry(uid, today)
+    entry["count"] += 1
+    _schedule_save("rate_limits")
+    return entry["count"]
+
+def is_ai_rate_limited(user_id: int) -> bool:
+    count, _ = get_ai_usage(user_id)
+    return count >= DAILY_AI_LIMIT
+
+def reset_ai_usage(user_id: int) -> None:
+    uid = str(user_id)
+    _data["rate_limits"][uid] = {"count": 0, "day": _today_utc()}
+    _schedule_save("rate_limits")

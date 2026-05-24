@@ -15,7 +15,6 @@ Commands
 import gc
 import os
 import time
-import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -58,6 +57,36 @@ def _fmt_bytes(n: int) -> str:
     return f"{n / 1_048_576:.1f} MB"
 
 
+def _container_memory() -> tuple[int, int] | None:
+    """
+    Try to read cgroup memory limits (set by Pterodactyl / Docker / any container).
+    Returns (used_bytes, limit_bytes) or None if not in a container / no limit set.
+
+    Tries cgroup v2 first (/sys/fs/cgroup/memory.current + memory.max),
+    then cgroup v1 (/sys/fs/cgroup/memory/memory.usage_in_bytes + memory.limit_in_bytes).
+    """
+    # cgroup v2
+    try:
+        used  = int(open("/sys/fs/cgroup/memory.current").read().strip())
+        limit = open("/sys/fs/cgroup/memory.max").read().strip()
+        if limit != "max":
+            return used, int(limit)
+    except (OSError, ValueError):
+        pass
+
+    # cgroup v1
+    try:
+        used  = int(open("/sys/fs/cgroup/memory/memory.usage_in_bytes").read().strip())
+        limit = int(open("/sys/fs/cgroup/memory/memory.limit_in_bytes").read().strip())
+        # v1 reports a huge sentinel (~2^63) when there is no limit
+        if limit < (1 << 62):
+            return used, limit
+    except (OSError, ValueError):
+        pass
+
+    return None
+
+
 def _fmt_uptime(seconds: float) -> str:
     """Seconds → 'Xd Xh Xm Xs'."""
     s = int(seconds)
@@ -80,26 +109,38 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     )
 
     uptime = time.monotonic() - _START_TIME
-    embed.add_field(name="⏱️ Uptime",   value=f"`{_fmt_uptime(uptime)}`", inline=True)
-    embed.add_field(name="🌐 Guilds",   value=f"`{len(bot.guilds)}`",     inline=True)
-    embed.add_field(name="👤 Users",    value=f"`{len(bot.users):,}`",    inline=True)
+    embed.add_field(name="⏱️ Uptime",  value=f"`{_fmt_uptime(uptime)}`", inline=True)
+    embed.add_field(name="🌐 Guilds",  value=f"`{len(bot.guilds)}`",     inline=True)
+    embed.add_field(name="👤 Users",   value=f"`{len(bot.users):,}`",    inline=True)
 
     if _PSUTIL:
         proc = psutil.Process(os.getpid())
 
-        # ── Host metrics ──────────────────────────────────────────────────────
-        cpu_pct  = psutil.cpu_percent(interval=None)    # non-blocking snapshot
-        vm       = psutil.virtual_memory()
-        disk     = psutil.disk_usage("/")
+        cpu_pct = psutil.cpu_percent(interval=None)   # non-blocking snapshot
+        vm      = psutil.virtual_memory()
+        disk    = psutil.disk_usage("/")
+
+        # Prefer cgroup limit (your allocated slice) over the raw host total.
+        # Pterodactyl, Docker, and most panel hosts set cgroup limits.
+        cgroup = _container_memory()
+        if cgroup:
+            ram_used, ram_total = cgroup
+            ram_pct   = ram_used / ram_total * 100
+            ram_label = "💾 Container RAM"
+        else:
+            ram_used  = vm.used
+            ram_total = vm.total
+            ram_pct   = vm.percent
+            ram_label = "💾 Host RAM"
 
         embed.add_field(
-            name="🔲 Host CPU",
+            name="🔲 CPU",
             value=f"`{cpu_pct:.1f}%`",
             inline=True,
         )
         embed.add_field(
-            name="💾 Host RAM",
-            value=f"`{_fmt_bytes(vm.used)} / {_fmt_bytes(vm.total)}` ({vm.percent:.1f}%)",
+            name=ram_label,
+            value=f"`{_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)}` ({ram_pct:.1f}%)",
             inline=True,
         )
         embed.add_field(
@@ -110,9 +151,9 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
 
         # ── Process metrics ───────────────────────────────────────────────────
         with proc.oneshot():
-            proc_mem  = proc.memory_info().rss
-            proc_cpu  = proc.cpu_percent(interval=None)
-            threads   = proc.num_threads()
+            proc_mem = proc.memory_info().rss
+            proc_cpu = proc.cpu_percent(interval=None)
+            threads  = proc.num_threads()
 
         embed.add_field(
             name="🤖 Bot RSS",
@@ -150,13 +191,13 @@ class System(commands.Cog):
 
     @commands.command(name="usage")
     async def prefix_usage(self, ctx: commands.Context):
-        """Show host CPU, RAM, disk, and bot process stats. Admin only."""
+        """Show CPU, RAM, disk, and bot process stats. Admin only."""
         if not is_admin(ctx.author):
             await ctx.reply("🚫 You don't have permission to use this command.")
             return
         await ctx.reply(embed=_build_usage_embed(self.bot))
 
-    @app_commands.command(name="usage", description="Show host CPU, RAM, disk and bot stats (admin only)")
+    @app_commands.command(name="usage", description="Show CPU, RAM, disk and bot stats (admin only)")
     async def slash_usage(self, interaction: discord.Interaction):
         if not is_admin(interaction.user):
             await interaction.response.send_message(
@@ -191,24 +232,18 @@ class System(commands.Cog):
         await interaction.followup.send(result)
 
 
-# ── Reload logic (shared by prefix and slash) ─────────────────────────────────
+# ── Reload logic ──────────────────────────────────────────────────────────────
 
 async def _do_reload(bot: commands.Bot) -> str:
     """
     1. Run gc.collect() to free unreferenced objects.
-    2. Clear Discord's internal member/message caches to free RAM.
+    2. Clear Discord's internal message cache to free RAM.
     3. Reload every cog — picks up code changes and resets cog state.
     Returns a summary string.
     """
-    # Step 1 — garbage collect
     collected = gc.collect()
+    bot._connection._messages.clear()
 
-    # Step 2 — clear Discord object caches
-    bot._connection._messages.clear()          # cached Message objects
-    # Note: clearing bot._connection._users/_guilds would drop member cache
-    # and is usually too aggressive for a running bot, so we skip those.
-
-    # Step 3 — reload cogs
     ok:   list[str] = []
     fail: list[str] = []
 
@@ -217,7 +252,6 @@ async def _do_reload(bot: commands.Bot) -> str:
             await bot.reload_extension(cog)
             ok.append(cog.split(".")[-1])
         except commands.ExtensionNotLoaded:
-            # Cog wasn't loaded yet — try loading it fresh
             try:
                 await bot.load_extension(cog)
                 ok.append(cog.split(".")[-1])
