@@ -90,7 +90,7 @@ def _save_key(key: str, value):
         _conn.execute(
             "INSERT INTO state (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [key, serialised]
+            (key, serialised)
         )
         _conn.commit()
     except Exception as e:
