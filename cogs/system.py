@@ -26,6 +26,7 @@ except ImportError:
     _PSUTIL = False
 
 from cogs.admin import is_admin
+from cogs.state import seen_users
 
 # Bot start time — set once when the cog is first loaded
 _START_TIME = time.monotonic()
@@ -111,7 +112,7 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     uptime = time.monotonic() - _START_TIME
     embed.add_field(name="⏱️ Uptime",  value=f"`{_fmt_uptime(uptime)}`", inline=True)
     embed.add_field(name="🌐 Guilds",  value=f"`{len(bot.guilds)}`",     inline=True)
-    embed.add_field(name="👤 Users",   value=f"`{len(bot.users):,}`",    inline=True)
+    embed.add_field(name="👤 Seen Users", value=f"`{len(seen_users):,}`", inline=True)
 
     if _PSUTIL:
         proc = psutil.Process(os.getpid())
