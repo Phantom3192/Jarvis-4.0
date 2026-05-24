@@ -1,16 +1,12 @@
 """
-System cog — host resource usage and bot reload.
+System cog — host resource usage, bot reload, ping, and uptime.
 
 Commands
 --------
-!usage / /usage
-    Shows live CPU %, RAM used/total, disk used/total, bot uptime,
-    and process-level memory. Admin-only.
-
-!reload / /reload
-    Runs gc.collect(), clears the internal Discord object cache, and
-    reloads every cog in COGS. Useful after memory leaks or stale state.
-    Admin-only.
+!ping / /ping        — Latency + Discord API round-trip. Available to all users.
+!uptime / /uptime    — How long the bot has been running. Available to all users.
+!usage / /usage      — Full CPU/RAM/disk/process stats. Admin only.
+!reload / /reload    — Reload all cogs + GC. Admin only.
 """
 import gc
 import os
@@ -28,10 +24,10 @@ except ImportError:
 from cogs.admin import is_admin
 from cogs.state import seen_users
 
-# Bot start time — set once when the cog is first loaded
+# Set once at import — survives cog reloads because the module stays in sys.modules
 _START_TIME = time.monotonic()
 
-# Must stay in sync with the COGS list in main.py
+# Must stay in sync with COGS in main.py
 COGS = [
     "cogs.ai",
     "cogs.admin",
@@ -45,55 +41,23 @@ COGS = [
     "cogs.help",
     "cogs.fun",
     "cogs.imagine",
-    "cogs.system",   # reload ourselves too
+    "cogs.system",
 ]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _fmt_bytes(n: int) -> str:
-    """Human-readable bytes → 'X.X GB' / 'X.X MB'."""
     if n >= 1_073_741_824:
         return f"{n / 1_073_741_824:.1f} GB"
     return f"{n / 1_048_576:.1f} MB"
 
 
-def _container_memory() -> tuple[int, int] | None:
-    """
-    Try to read cgroup memory limits (set by Pterodactyl / Docker / any container).
-    Returns (used_bytes, limit_bytes) or None if not in a container / no limit set.
-
-    Tries cgroup v2 first (/sys/fs/cgroup/memory.current + memory.max),
-    then cgroup v1 (/sys/fs/cgroup/memory/memory.usage_in_bytes + memory.limit_in_bytes).
-    """
-    # cgroup v2
-    try:
-        used  = int(open("/sys/fs/cgroup/memory.current").read().strip())
-        limit = open("/sys/fs/cgroup/memory.max").read().strip()
-        if limit != "max":
-            return used, int(limit)
-    except (OSError, ValueError):
-        pass
-
-    # cgroup v1
-    try:
-        used  = int(open("/sys/fs/cgroup/memory/memory.usage_in_bytes").read().strip())
-        limit = int(open("/sys/fs/cgroup/memory/memory.limit_in_bytes").read().strip())
-        # v1 reports a huge sentinel (~2^63) when there is no limit
-        if limit < (1 << 62):
-            return used, limit
-    except (OSError, ValueError):
-        pass
-
-    return None
-
-
 def _fmt_uptime(seconds: float) -> str:
-    """Seconds → 'Xd Xh Xm Xs'."""
     s = int(seconds)
     d, s = divmod(s, 86400)
-    h, s = divmod(s,  3600)
-    m, s = divmod(s,    60)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
     parts = []
     if d: parts.append(f"{d}d")
     if h: parts.append(f"{h}h")
@@ -102,43 +66,64 @@ def _fmt_uptime(seconds: float) -> str:
     return " ".join(parts)
 
 
+def _container_memory() -> tuple[int, int] | None:
+    """
+    Read cgroup memory limits (Pterodactyl / Docker).
+    Returns (used_bytes, limit_bytes) or None if not containerised.
+    Tries cgroup v2 first, then v1.
+    """
+    try:
+        used  = int(open("/sys/fs/cgroup/memory.current").read().strip())
+        limit = open("/sys/fs/cgroup/memory.max").read().strip()
+        if limit != "max":
+            return used, int(limit)
+    except (OSError, ValueError):
+        pass
+    try:
+        used  = int(open("/sys/fs/cgroup/memory/memory.usage_in_bytes").read().strip())
+        limit = int(open("/sys/fs/cgroup/memory/memory.limit_in_bytes").read().strip())
+        if limit < (1 << 62):
+            return used, limit
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _ping_colour(ms: float) -> discord.Color:
+    if ms < 100:
+        return discord.Color.green()
+    if ms < 200:
+        return discord.Color.yellow()
+    return discord.Color.red()
+
+
 def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     embed = discord.Embed(
         title="🖥️ Jarvis — System Usage",
         color=discord.Color.blurple(),
         timestamp=discord.utils.utcnow(),
     )
-
     uptime = time.monotonic() - _START_TIME
-    embed.add_field(name="⏱️ Uptime",  value=f"`{_fmt_uptime(uptime)}`", inline=True)
-    embed.add_field(name="🌐 Guilds",  value=f"`{len(bot.guilds)}`",     inline=True)
-    embed.add_field(name="👤 Seen Users", value=f"`{len(seen_users):,}`", inline=True)
+    embed.add_field(name="⏱️ Uptime",     value=f"`{_fmt_uptime(uptime)}`", inline=True)
+    embed.add_field(name="🌐 Guilds",     value=f"`{len(bot.guilds)}`",     inline=True)
+    embed.add_field(name="👤 Seen Users", value=f"`{len(seen_users):,}`",   inline=True)
 
     if _PSUTIL:
-        proc = psutil.Process(os.getpid())
-
-        cpu_pct = psutil.cpu_percent(interval=None)   # non-blocking snapshot
+        proc    = psutil.Process(os.getpid())
+        cpu_pct = psutil.cpu_percent(interval=None)
         vm      = psutil.virtual_memory()
         disk    = psutil.disk_usage("/")
 
-        # Prefer cgroup limit (your allocated slice) over the raw host total.
-        # Pterodactyl, Docker, and most panel hosts set cgroup limits.
         cgroup = _container_memory()
         if cgroup:
             ram_used, ram_total = cgroup
             ram_pct   = ram_used / ram_total * 100
             ram_label = "💾 Container RAM"
         else:
-            ram_used  = vm.used
-            ram_total = vm.total
-            ram_pct   = vm.percent
+            ram_used, ram_total, ram_pct = vm.used, vm.total, vm.percent
             ram_label = "💾 Host RAM"
 
-        embed.add_field(
-            name="🔲 CPU",
-            value=f"`{cpu_pct:.1f}%`",
-            inline=True,
-        )
+        embed.add_field(name="🔲 CPU",   value=f"`{cpu_pct:.1f}%`", inline=True)
         embed.add_field(
             name=ram_label,
             value=f"`{_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)}` ({ram_pct:.1f}%)",
@@ -150,27 +135,14 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
             inline=True,
         )
 
-        # ── Process metrics ───────────────────────────────────────────────────
         with proc.oneshot():
             proc_mem = proc.memory_info().rss
             proc_cpu = proc.cpu_percent(interval=None)
             threads  = proc.num_threads()
 
-        embed.add_field(
-            name="🤖 Bot RSS",
-            value=f"`{_fmt_bytes(proc_mem)}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="🤖 Bot CPU",
-            value=f"`{proc_cpu:.1f}%`",
-            inline=True,
-        )
-        embed.add_field(
-            name="🧵 Threads",
-            value=f"`{threads}`",
-            inline=True,
-        )
+        embed.add_field(name="🤖 Bot RSS", value=f"`{_fmt_bytes(proc_mem)}`", inline=True)
+        embed.add_field(name="🤖 Bot CPU", value=f"`{proc_cpu:.1f}%`",        inline=True)
+        embed.add_field(name="🧵 Threads", value=f"`{threads}`",               inline=True)
     else:
         embed.add_field(
             name="⚠️ psutil not installed",
@@ -182,17 +154,100 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     return embed
 
 
+# ── Reload logic ──────────────────────────────────────────────────────────────
+
+async def _do_reload(bot: commands.Bot) -> str:
+    collected = gc.collect()
+    bot._connection._messages.clear()
+
+    ok: list[str] = []
+    fail: list[str] = []
+
+    for cog in COGS:
+        try:
+            await bot.reload_extension(cog)
+            ok.append(cog.split(".")[-1])
+        except commands.ExtensionNotLoaded:
+            try:
+                await bot.load_extension(cog)
+                ok.append(cog.split(".")[-1])
+            except Exception as e:
+                fail.append(f"`{cog.split('.')[-1]}` — {e}")
+        except Exception as e:
+            fail.append(f"`{cog.split('.')[-1]}` — {e}")
+
+    lines = [
+        f"✅ Reloaded **{len(ok)}/{len(COGS)}** cog(s)",
+        f"🗑️ GC collected **{collected}** object(s)",
+    ]
+    if fail:
+        lines.append("❌ Failed:\n" + "\n".join(f"  • {f}" for f in fail))
+    return "\n".join(lines)
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class System(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # ── !ping ─────────────────────────────────────────────────────────────────
+
+    @commands.command(name="ping")
+    async def prefix_ping(self, ctx: commands.Context):
+        """Check Jarvis latency."""
+        ws_ms  = round(self.bot.latency * 1000)
+        before = time.monotonic()
+        msg    = await ctx.reply("🏓 Pinging…")
+        api_ms = round((time.monotonic() - before) * 1000)
+
+        embed = discord.Embed(title="🏓 Pong!", color=_ping_colour(ws_ms))
+        embed.add_field(name="WebSocket",    value=f"`{ws_ms} ms`",  inline=True)
+        embed.add_field(name="API Round-trip", value=f"`{api_ms} ms`", inline=True)
+        await msg.edit(content=None, embed=embed)
+
+    @app_commands.command(name="ping", description="Check Jarvis latency")
+    async def slash_ping(self, interaction: discord.Interaction):
+        ws_ms  = round(self.bot.latency * 1000)
+        before = time.monotonic()
+        await interaction.response.send_message("🏓 Pinging…")
+        api_ms = round((time.monotonic() - before) * 1000)
+
+        embed = discord.Embed(title="🏓 Pong!", color=_ping_colour(ws_ms))
+        embed.add_field(name="WebSocket",      value=f"`{ws_ms} ms`",  inline=True)
+        embed.add_field(name="API Round-trip", value=f"`{api_ms} ms`", inline=True)
+        await interaction.edit_original_response(content=None, embed=embed)
+
+    # ── !uptime ───────────────────────────────────────────────────────────────
+
+    @commands.command(name="uptime")
+    async def prefix_uptime(self, ctx: commands.Context):
+        """Check how long Jarvis has been running."""
+        uptime = time.monotonic() - _START_TIME
+        embed  = discord.Embed(
+            title="⏱️ Jarvis Uptime",
+            description=f"Online for **{_fmt_uptime(uptime)}**",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Jarvis")
+        await ctx.reply(embed=embed)
+
+    @app_commands.command(name="uptime", description="Check how long Jarvis has been online")
+    async def slash_uptime(self, interaction: discord.Interaction):
+        uptime = time.monotonic() - _START_TIME
+        embed  = discord.Embed(
+            title="⏱️ Jarvis Uptime",
+            description=f"Online for **{_fmt_uptime(uptime)}**",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Jarvis")
+        await interaction.response.send_message(embed=embed)
+
     # ── !usage ────────────────────────────────────────────────────────────────
 
     @commands.command(name="usage")
     async def prefix_usage(self, ctx: commands.Context):
-        """Show CPU, RAM, disk, and bot process stats. Admin only."""
+        """Show host CPU, RAM, disk, and bot process stats. Admin only."""
         if not is_admin(ctx.author):
             await ctx.reply("🚫 You don't have permission to use this command.")
             return
@@ -231,44 +286,6 @@ class System(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         result = await _do_reload(self.bot)
         await interaction.followup.send(result)
-
-
-# ── Reload logic ──────────────────────────────────────────────────────────────
-
-async def _do_reload(bot: commands.Bot) -> str:
-    """
-    1. Run gc.collect() to free unreferenced objects.
-    2. Clear Discord's internal message cache to free RAM.
-    3. Reload every cog — picks up code changes and resets cog state.
-    Returns a summary string.
-    """
-    collected = gc.collect()
-    bot._connection._messages.clear()
-
-    ok:   list[str] = []
-    fail: list[str] = []
-
-    for cog in COGS:
-        try:
-            await bot.reload_extension(cog)
-            ok.append(cog.split(".")[-1])
-        except commands.ExtensionNotLoaded:
-            try:
-                await bot.load_extension(cog)
-                ok.append(cog.split(".")[-1])
-            except Exception as e:
-                fail.append(f"`{cog.split('.')[-1]}` — {e}")
-        except Exception as e:
-            fail.append(f"`{cog.split('.')[-1]}` — {e}")
-
-    lines = [
-        f"✅ Reloaded **{len(ok)}/{len(COGS)}** cog(s)",
-        f"🗑️ GC collected **{collected}** object(s)",
-    ]
-    if fail:
-        lines.append("❌ Failed:\n" + "\n".join(f"  • {f}" for f in fail))
-
-    return "\n".join(lines)
 
 
 async def setup(bot: commands.Bot):

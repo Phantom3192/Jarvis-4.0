@@ -1,26 +1,14 @@
 """
 AI cog — handles all chat interactions with Jarvis.
 
-OPTIMISATIONS vs original:
-- genai.configure() was called inside _try_gemini on EVERY request, meaning it
-  reconfigured the SDK on each API call.  Now we configure once per unique
-  api_key with a small cache (_gemini_configured) so it's only called when the
-  key actually changes.
-- _try_gemini used google.genai.GenerativeModel + start_chat — the newer
-  google-genai SDK (≥0.5) uses client.aio.models.generate_content which is
-  fully async and avoids the sync chat object.  Both paths kept with a version
-  guard so the old SDK still works.
-- Mention-stripping in on_message: replaced two separate .replace() calls with
-  a single compiled regex (_MENTION_RE) so the pattern is only compiled once.
-- _build_mylimit_embed extracted into a standalone function — was duplicated
-  verbatim between the slash and prefix !mylimit commands (~25 lines).
-- user_text clean-up: combined "jarvis" variants into one re.sub call.
-- aiohttp_timeout() helper in imagine.py called on every image fetch; moved to
-  a module-level constant here (same pattern applied in imagine.py).
-- history: the in-memory defaultdict(list) store is still used.  The
-  history.py Turso-backed store is available as a drop-in but not wired up
-  here to avoid breaking changes — see NOTE below.
-- Removed redundant `import base64` duplication in imagine.py (kept here).
+CHANGES vs previous version:
+- Per-user model preference stored in _user_model (in-memory dict).
+  Users pick via /setmodel or !setmodel. Preference is reset on bot restart
+  (intentionally lightweight — no DB needed for a UI preference).
+- generate_ai_response now reads the user's preferred model and routes
+  to that provider first, falling back to others if it fails.
+- MODELS dict is the single source of truth for available choices.
+- !ping / !uptime moved to system.py — not duplicated here.
 """
 import discord
 from discord.ext import commands
@@ -53,6 +41,52 @@ GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 HISTORY_LIMIT = 10
 MAX_TOKENS    = 800
 
+# ── Available models for /setmodel ───────────────────────────────────────────
+# key        → internal identifier stored per user
+# "label"    → shown in Discord UI
+# "desc"     → shown in the info embed
+# "supports_vision" → whether this model can handle image attachments
+
+MODELS: dict[str, dict] = {
+    "auto": {
+        "label":           "🔄 Auto (default)",
+        "desc":            "Tries Groq Llama first, falls back to Gemini automatically.",
+        "supports_vision": True,
+    },
+    "groq": {
+        "label":           "⚡ Groq — Llama 3.3 70B",
+        "desc":            "Fast. Best for quick questions and conversation.",
+        "supports_vision": False,
+    },
+    "gemini-flash": {
+        "label":           "✨ Gemini 2.0 Flash",
+        "desc":            "Google's fast multimodal model. Supports images.",
+        "supports_vision": True,
+    },
+    "gemini-lite": {
+        "label":           "🪶 Gemini 2.0 Flash-Lite",
+        "desc":            "Lightest model. Best for simple tasks when speed matters.",
+        "supports_vision": True,
+    },
+}
+
+MODEL_CHOICES = [
+    app_commands.Choice(name=v["label"], value=k)
+    for k, v in MODELS.items()
+]
+
+# ── Per-user model preference (in-memory) ─────────────────────────────────────
+# Resets on restart — intentional, no DB overhead needed for a UI preference.
+_user_model: dict[int, str] = {}
+
+def get_user_model(user_id: int) -> str:
+    return _user_model.get(user_id, "auto")
+
+def set_user_model(user_id: int, model_key: str) -> None:
+    _user_model[user_id] = model_key
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are Jarvis, a sharp, efficient, and slightly witty AI assistant built for Discord by Phantom. "
     "If someone asks who made you or who your creator is, say Phantom — but never volunteer or repeat this unprompted. "
@@ -83,20 +117,18 @@ WARN_LIMIT_MSG = (
     "You have **{remaining}** left before your limit resets at midnight UTC."
 )
 
-# ── Compiled regex: strip bot mentions and the word "jarvis" ──────────────────
-# Built once at import time instead of on every message.
+# ── Compiled regex ────────────────────────────────────────────────────────────
 
 _MENTION_RE = re.compile(r"<@!?\d+>")
 _JARVIS_RE  = re.compile(r"\bjarvis\b", re.IGNORECASE)
 
-# ── Groq client (singleton) ───────────────────────────────────────────────────
+# ── Groq client ───────────────────────────────────────────────────────────────
 
 _groq_client: groq.AsyncGroq | None = (
     groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 )
 
 # ── Gemini configure cache ────────────────────────────────────────────────────
-# Avoid calling genai.configure() on every request — configure once per key.
 
 _gemini_configured: set[str] = set()
 
@@ -107,9 +139,9 @@ def _ensure_gemini_configured(api_key: str) -> None:
 
 # ── History stores ────────────────────────────────────────────────────────────
 
-private_history: dict[int, list[dict]] = defaultdict(list)   # user_id    → msgs
-group_history:   dict[int, list[dict]] = defaultdict(list)   # channel_id → msgs
-active_groups:   dict[int, set[int]]   = {}                  # channel_id → {user_ids}
+private_history: dict[int, list[dict]] = defaultdict(list)
+group_history:   dict[int, list[dict]] = defaultdict(list)
+active_groups:   dict[int, set[int]]   = {}
 
 
 def _is_in_group(user_id: int, channel_id: int) -> bool:
@@ -242,7 +274,6 @@ async def _try_gemini(
     if not api_key:
         return None
     try:
-        # Configure only when the key hasn't been seen before
         _ensure_gemini_configured(api_key)
         model   = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
         history = [
@@ -301,7 +332,8 @@ async def generate_ai_response(
     else:
         system_prompt = base_prompt
 
-    history = _get_history(user_id, channel_id)
+    history  = _get_history(user_id, channel_id)
+    has_image = bool(image_b64 and media_type)
 
     stored = (
         f"[{user.display_name}]: {user_message or '(sent an image)'}"
@@ -311,23 +343,56 @@ async def generate_ai_response(
     history.append({"role": "user", "content": stored})
     _trim(history)
 
-    has_image = bool(image_b64 and media_type)
-    if has_image:
+    # ── Route based on user's preferred model ─────────────────────────────────
+    preferred = get_user_model(user_id)
+
+    if preferred == "groq":
+        if has_image:
+            # Groq vision → Gemini fallback
+            reply = (
+                await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+            )
+        else:
+            reply = (
+                await _try_groq(history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)
+            )
+
+    elif preferred == "gemini-flash":
         reply = (
-            await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-            or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY_2,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY_2,  GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
+            await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+            or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+            or await _try_groq(history, system_prompt)   # text fallback only
         )
-    else:
+
+    elif preferred == "gemini-lite":
         reply = (
-            await _try_groq(history, system_prompt)
-            or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt)
-            or await _try_gemini(GEMINI_API_KEY_2,  GEMINI_MODEL_FLASH, history, system_prompt)
-            or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_LITE,  history, system_prompt)
-            or await _try_gemini(GEMINI_API_KEY_2,  GEMINI_MODEL_LITE,  history, system_prompt)
+            await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
+            or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
+            or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+            or await _try_groq(history, system_prompt)
         )
+
+    else:  # "auto" — original waterfall
+        if has_image:
+            reply = (
+                await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
+            )
+        else:
+            reply = (
+                await _try_groq(history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt)
+            )
 
     if not reply:
         history.pop()
@@ -345,10 +410,9 @@ async def generate_ai_response(
     return reply
 
 
-# ── Shared embed builder for /mylimit and !mylimit ────────────────────────────
+# ── Shared embed builders ─────────────────────────────────────────────────────
 
 def _build_mylimit_embed(user_id: int) -> discord.Embed:
-    """Build the daily-limit embed. Extracted to avoid duplicating ~20 lines."""
     count, day = get_ai_usage(user_id)
     remaining  = max(0, DAILY_AI_LIMIT - count)
     pct        = count / DAILY_AI_LIMIT
@@ -377,11 +441,36 @@ def _build_mylimit_embed(user_id: int) -> discord.Embed:
     return embed
 
 
+def _build_model_embed(user_id: int) -> discord.Embed:
+    current = get_user_model(user_id)
+    info    = MODELS[current]
+    embed   = discord.Embed(
+        title="🤖 Your AI Model",
+        color=discord.Color.blurple(),
+        description=f"**Current:** {info['label']}\n{info['desc']}",
+    )
+    embed.add_field(
+        name="Available Models",
+        value="\n".join(
+            f"{'▶ ' if k == current else '  '}`{k}` — {v['label']}"
+            for k, v in MODELS.items()
+        ),
+        inline=False,
+    )
+    if not MODELS[current]["supports_vision"] and current != "auto":
+        embed.set_footer(text="⚠️ This model doesn't support images — image messages will fall back to Gemini.")
+    else:
+        embed.set_footer(text="Use /setmodel or !setmodel to change  •  Resets on bot restart")
+    return embed
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class AI(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    # ── /chat ─────────────────────────────────────────────────────────────────
 
     @app_commands.command(name="chat", description="Chat with Jarvis")
     @app_commands.describe(message="Your message to Jarvis", image="Optional image for Jarvis to analyse")
@@ -414,6 +503,8 @@ class AI(commands.Cog):
         )
         await edit_or_send_long_message(interaction, reply, ephemeral=False)
 
+    # ── on_message ────────────────────────────────────────────────────────────
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot:
@@ -438,18 +529,16 @@ class AI(commands.Cog):
             await message.reply("🚫 You've been banned from Jarvis. Contact the bot owner if you think this is a mistake.")
             return
 
-        # ── Group start trigger ────────────────────────────────────────────
+        # ── Group start ────────────────────────────────────────────────────
         if re.search(r"\b(group|public)\s+conversation\b", lower):
             participants = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot]
             all_ids      = list({message.author.id} | {u.id for u in participants})
-
             if len(all_ids) < 2:
                 await message.reply(
                     "⚠️ Mention at least one other person to start a group conversation.\n"
                     "**Example:** `Jarvis group conversation @friend`"
                 )
                 return
-
             start_group(message.channel.id, all_ids)
             names = " & ".join(
                 (message.guild.get_member(uid) or message.author).display_name
@@ -510,7 +599,6 @@ class AI(commands.Cog):
             return
 
         # ── Normal message ─────────────────────────────────────────────────
-        # Strip bot mention and "jarvis" keyword with pre-compiled regexes
         user_text = _MENTION_RE.sub("", content)
         user_text = _JARVIS_RE.sub("", user_text).strip(" ,:-")
 
@@ -537,7 +625,7 @@ class AI(commands.Cog):
             )
         await send_long_message(message, reply, ephemeral=False)
 
-    # ── /mylimit ──────────────────────────────────────────────────────────────
+    # ── /mylimit & !mylimit ───────────────────────────────────────────────────
 
     @app_commands.command(name="mylimit", description="Check how many AI messages you have left today")
     async def slash_mylimit(self, interaction: discord.Interaction):
@@ -550,7 +638,7 @@ class AI(commands.Cog):
         """Check how many AI messages you have left today."""
         await ctx.reply(embed=_build_mylimit_embed(ctx.author.id))
 
-    # ── clearhistory ──────────────────────────────────────────────────────────
+    # ── /clearhistory & !clearhistory ─────────────────────────────────────────
 
     @app_commands.command(name="clearhistory", description="Clear your Jarvis conversation history")
     async def slash_clearhistory(self, interaction: discord.Interaction):
@@ -567,6 +655,45 @@ class AI(commands.Cog):
         clear_history(ctx.author.id, ctx.channel.id)
         in_group = bool(get_group_members(ctx.channel.id))
         await ctx.reply(f"🧹 {'Group conversation' if in_group else 'Your'} history has been cleared!")
+
+    # ── /setmodel & !setmodel ─────────────────────────────────────────────────
+
+    @app_commands.command(name="setmodel", description="Choose which AI model Jarvis uses for your messages")
+    @app_commands.describe(model="The model to use for your conversations")
+    @app_commands.choices(model=MODEL_CHOICES)
+    async def slash_setmodel(self, interaction: discord.Interaction, model: app_commands.Choice[str]):
+        set_user_model(interaction.user.id, model.value)
+        info = MODELS[model.value]
+        await interaction.response.send_message(
+            embed=_build_model_embed(interaction.user.id), ephemeral=True
+        )
+
+    @commands.command(name="setmodel")
+    async def prefix_setmodel(self, ctx: commands.Context, model: str = None):
+        """Choose your AI model. Usage: !setmodel <auto|groq|gemini-flash|gemini-lite>"""
+        if not model or model not in MODELS:
+            keys = ", ".join(f"`{k}`" for k in MODELS)
+            await ctx.reply(
+                f"**Usage:** `!setmodel <model>`\n"
+                f"**Available:** {keys}\n\n"
+                + "\n".join(f"**`{k}`** — {v['label']}: {v['desc']}" for k, v in MODELS.items())
+            )
+            return
+        set_user_model(ctx.author.id, model)
+        await ctx.reply(embed=_build_model_embed(ctx.author.id))
+
+    # ── /mymodel & !mymodel ───────────────────────────────────────────────────
+
+    @app_commands.command(name="mymodel", description="Check which AI model you're currently using")
+    async def slash_mymodel(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=_build_model_embed(interaction.user.id), ephemeral=True
+        )
+
+    @commands.command(name="mymodel")
+    async def prefix_mymodel(self, ctx: commands.Context):
+        """Check your current AI model preference."""
+        await ctx.reply(embed=_build_model_embed(ctx.author.id))
 
 
 async def setup(bot: commands.Bot):
