@@ -1,18 +1,6 @@
-# Jarvis Discord Bot - Requirements
-
-# Discord bot framework
-discord.py>=2.3.0
-
-# Environment variable management
-python-dotenv>=1.0.0
-
-# HTTP client (used for webhooks and image fetching)
-aiohttp>=3.9.0
-
-# AI providers
-groq>=0.9.0
+discord.py
+python-dotenv
+groq
 google-genai
-
-# Database and async support
-motor
+aiohttp
 libsql-experimental
