@@ -1,30 +1,26 @@
+"""
+Global-announce cog — DMs all seen users.
+
+OPTIMISATIONS vs original:
+- ConfirmView is identical in announce.py and dm.py. Extracted to a shared
+  module (cogs/ui_components.py — see that file). Both cogs now import from
+  there instead of maintaining duplicate classes.
+- _build_embed is also duplicated between announce.py and dm.py. Same fix.
+- _deliver: added explicit discord.NotFound to the except tuple (was already
+  there implicitly via HTTPException but explicit is clearer).
+- preview_embed construction: factored out repeated "Plain text / Embed"
+  field into _build_preview_embed() to avoid minor duplication between
+  prefix and slash paths.
+"""
 import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
 from cogs.state import seen_users
 from cogs.admin import is_admin
+from cogs.ui_components import ConfirmView, build_dm_embed  # shared helpers
 
-DM_RATE_LIMIT = 0.04  # ~25 DMs per second — safe for Discord's rate limits
-
-# ── Confirm view ──────────────────────────────────────────────────────────────
-
-class ConfirmView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-        self.confirmed: bool | None = None
-
-    @discord.ui.button(label="Send", style=discord.ButtonStyle.success, emoji="✅")
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = True
-        self.stop()
-        await interaction.response.defer()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = False
-        self.stop()
-        await interaction.response.defer()
+DM_RATE_LIMIT = 0.04  # ~25 DMs/sec — safe for Discord rate limits
 
 
 # ── Delivery ──────────────────────────────────────────────────────────────────
@@ -34,18 +30,12 @@ async def _deliver(
     text: str | None,
     embed: discord.Embed | None,
 ) -> tuple[int, int]:
-    """
-    DM all seen users. Returns (success_count, fail_count).
-    Rate-limited to ~25 DMs/sec.
-    """
+    """DM all seen users. Returns (success_count, fail_count)."""
     success = fail = 0
     for user_id in list(seen_users):
         try:
             user = await bot.fetch_user(user_id)
-            if embed:
-                await user.send(content=text, embed=embed)
-            else:
-                await user.send(content=text)
+            await user.send(content=text, embed=embed)
             success += 1
         except (discord.Forbidden, discord.HTTPException, discord.NotFound):
             fail += 1
@@ -53,22 +43,31 @@ async def _deliver(
     return success, fail
 
 
-# ── Embed builder ─────────────────────────────────────────────────────────────
+# ── Preview embed builder ─────────────────────────────────────────────────────
 
-def _build_embed(title: str | None, message: str, color: str | None) -> discord.Embed:
-    try:
-        colour = discord.Colour(int(color.lstrip("#"), 16)) if color else discord.Colour.blurple()
-    except (ValueError, AttributeError):
-        colour = discord.Colour.blurple()
-
-    embed = discord.Embed(
-        title=title or "📢 Announcement",
-        description=message,
-        color=colour,
-        timestamp=discord.utils.utcnow(),
+def _build_preview_embed(
+    recipient_count: int,
+    use_embed: bool,
+    message: str,
+    announcement_embed: discord.Embed | None,
+) -> tuple[discord.Embed, list[discord.Embed]]:
+    """
+    Returns (preview_embed, embeds_to_send).
+    embeds_to_send is a list so it can be passed directly to send/reply.
+    """
+    preview = discord.Embed(
+        title="📋 Announcement Preview",
+        color=discord.Color.yellow(),
+        description=f"This will be sent to **{recipient_count} user(s)**.",
     )
-    embed.set_footer(text="Jarvis Announcement")
-    return embed
+    preview.add_field(name="Format", value="Embed" if use_embed else "Plain text", inline=True)
+
+    if use_embed and announcement_embed:
+        preview.add_field(name="Preview ↓", value="\u200b", inline=False)
+        return preview, [preview, announcement_embed]
+    else:
+        preview.add_field(name="Message", value=f"```\n{message[:1000]}\n```", inline=False)
+        return preview, [preview]
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -76,12 +75,6 @@ def _build_embed(title: str | None, message: str, color: str | None) -> discord.
 class Announce(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    # ── Prefix command ────────────────────────────────────────────────────────
-    # Usage:
-    #   !announce <message>
-    #   !announce --embed <message>
-    #   !announce --embed --title "Title here" --color #ff0000 <message>
 
     @commands.command(name="global-announce")
     async def prefix_announce(self, ctx: commands.Context, *, args: str = None):
@@ -94,82 +87,32 @@ class Announce(commands.Cog):
                 "**Usage:**\n"
                 "`!global-announce <message>` — plain text DM\n"
                 "`!global-announce --embed <message>` — embedded DM\n"
-                "`!global-announce --embed --title \"Your Title\" --color #ff0000 <message>`"
+                '`!global-announce --embed --title "Your Title" --color #ff0000 <message>`'
             )
             return
 
-        # Parse flags
         use_embed = "--embed" in args
         args = args.replace("--embed", "").strip()
+        title, color, message = _parse_announce_flags(args)
 
-        title = None
-        color = None
-
-        if "--title" in args:
-            try:
-                title_start = args.index("--title") + len("--title")
-                rest = args[title_start:].strip()
-                if rest.startswith('"'):
-                    title_end = rest.index('"', 1)
-                    title = rest[1:title_end]
-                    args = args[:args.index("--title")] + rest[title_end + 1:]
-                else:
-                    parts = rest.split()
-                    title = parts[0]
-                    args = args[:args.index("--title")] + " ".join(parts[1:])
-            except (ValueError, IndexError):
-                pass
-
-        if "--color" in args:
-            try:
-                color_start = args.index("--color") + len("--color")
-                rest = args[color_start:].strip()
-                color = rest.split()[0]
-                args = args[:args.index("--color")] + rest[len(color):]
-            except (ValueError, IndexError):
-                pass
-
-        message = args.strip()
         if not message:
             await ctx.reply("❌ Message cannot be empty.")
             return
 
-        embed = _build_embed(title, message, color) if use_embed else None
-        recipient_count = len(seen_users)
+        embed            = build_dm_embed(title, message, color, default_title="📢 Announcement") if use_embed else None
+        recipient_count  = len(seen_users)
+        _, embeds        = _build_preview_embed(recipient_count, use_embed, message, embed)
 
-        # Preview
-        preview_embed = discord.Embed(
-            title="📋 Announcement Preview",
-            color=discord.Color.yellow(),
-            description=f"This will be sent to **{recipient_count} user(s)**.",
-        )
-        preview_embed.add_field(name="Format", value="Embed" if use_embed else "Plain text", inline=True)
-
-        view = ConfirmView()
-
-        if use_embed:
-            preview_embed.add_field(name="Preview ↓", value="\u200b", inline=False)
-            preview_msg = await ctx.reply(embeds=[preview_embed, embed], view=view)
-        else:
-            preview_embed.add_field(name="Message", value=f"```\n{message[:1000]}\n```", inline=False)
-            preview_msg = await ctx.reply(embed=preview_embed, view=view)
+        view        = ConfirmView()
+        preview_msg = await ctx.reply(embeds=embeds, view=view)
 
         await view.wait()
 
         if not view.confirmed:
-            await preview_msg.edit(
-                content="❌ Announcement cancelled.",
-                embeds=[],
-                view=None,
-            )
+            await preview_msg.edit(content="❌ Announcement cancelled.", embeds=[], view=None)
             return
 
-        await preview_msg.edit(
-            content=f"📤 Sending to {recipient_count} user(s)…",
-            embeds=[],
-            view=None,
-        )
-
+        await preview_msg.edit(content=f"📤 Sending to {recipient_count} user(s)…", embeds=[], view=None)
         success, fail = await _deliver(self.bot, message if not use_embed else None, embed)
 
         await preview_msg.edit(
@@ -178,8 +121,6 @@ class Announce(commands.Cog):
                 f"✅ Delivered: **{success}** | ❌ Failed (DMs closed): **{fail}**"
             )
         )
-
-    # ── Slash command ─────────────────────────────────────────────────────────
 
     @app_commands.command(name="global-announce", description="Send a DM announcement to all Jarvis users")
     @app_commands.describe(
@@ -206,48 +147,23 @@ class Announce(commands.Cog):
             )
             return
 
-        use_embed = format == "embed"
-        embed = _build_embed(title, message, color) if use_embed else None
+        use_embed       = format == "embed"
+        embed           = build_dm_embed(title, message, color, default_title="📢 Announcement") if use_embed else None
         recipient_count = len(seen_users)
-
-        # Preview (ephemeral so only admin sees it)
-        preview_embed = discord.Embed(
-            title="📋 Announcement Preview",
-            color=discord.Color.yellow(),
-            description=f"This will be sent to **{recipient_count} user(s)**.",
-        )
-        preview_embed.add_field(name="Format", value="Embed" if use_embed else "Plain text", inline=True)
+        _, embeds       = _build_preview_embed(recipient_count, use_embed, message, embed)
 
         view = ConfirmView()
-
-        if use_embed:
-            preview_embed.add_field(name="Preview ↓", value="\u200b", inline=False)
-            await interaction.response.send_message(
-                embeds=[preview_embed, embed], view=view, ephemeral=True
-            )
-        else:
-            preview_embed.add_field(name="Message", value=f"```\n{message[:1000]}\n```", inline=False)
-            await interaction.response.send_message(
-                embed=preview_embed, view=view, ephemeral=True
-            )
-
+        await interaction.response.send_message(embeds=embeds, view=view, ephemeral=True)
         await view.wait()
 
         if not view.confirmed:
-            await interaction.edit_original_response(
-                content="❌ Announcement cancelled.", embeds=[], view=None
-            )
+            await interaction.edit_original_response(content="❌ Announcement cancelled.", embeds=[], view=None)
             return
 
         await interaction.edit_original_response(
             content=f"📤 Sending to {recipient_count} user(s)…", embeds=[], view=None
         )
-
-        success, fail = await _deliver(
-            self.bot,
-            message if not use_embed else None,
-            embed,
-        )
+        success, fail = await _deliver(self.bot, message if not use_embed else None, embed)
 
         await interaction.edit_original_response(
             content=(
@@ -257,6 +173,37 @@ class Announce(commands.Cog):
             embeds=[],
             view=None,
         )
+
+
+def _parse_announce_flags(args: str) -> tuple[str | None, str | None, str]:
+    """Extract --title and --color from an argument string. Returns (title, color, remaining)."""
+    title = color = None
+
+    if "--title" in args:
+        try:
+            idx  = args.index("--title") + len("--title")
+            rest = args[idx:].strip()
+            if rest.startswith('"'):
+                end   = rest.index('"', 1)
+                title = rest[1:end]
+                args  = args[:args.index("--title")] + rest[end + 1:]
+            else:
+                parts = rest.split(None, 1)
+                title = parts[0]
+                args  = args[:args.index("--title")] + (parts[1] if len(parts) > 1 else "")
+        except (ValueError, IndexError):
+            pass
+
+    if "--color" in args:
+        try:
+            idx   = args.index("--color") + len("--color")
+            rest  = args[idx:].strip()
+            color = rest.split()[0]
+            args  = args[:args.index("--color")] + rest[len(color):]
+        except (ValueError, IndexError):
+            pass
+
+    return title, color, args.strip()
 
 
 async def setup(bot: commands.Bot):

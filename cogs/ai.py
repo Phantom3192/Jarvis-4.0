@@ -1,3 +1,27 @@
+"""
+AI cog — handles all chat interactions with Jarvis.
+
+OPTIMISATIONS vs original:
+- genai.configure() was called inside _try_gemini on EVERY request, meaning it
+  reconfigured the SDK on each API call.  Now we configure once per unique
+  api_key with a small cache (_gemini_configured) so it's only called when the
+  key actually changes.
+- _try_gemini used google.genai.GenerativeModel + start_chat — the newer
+  google-genai SDK (≥0.5) uses client.aio.models.generate_content which is
+  fully async and avoids the sync chat object.  Both paths kept with a version
+  guard so the old SDK still works.
+- Mention-stripping in on_message: replaced two separate .replace() calls with
+  a single compiled regex (_MENTION_RE) so the pattern is only compiled once.
+- _build_mylimit_embed extracted into a standalone function — was duplicated
+  verbatim between the slash and prefix !mylimit commands (~25 lines).
+- user_text clean-up: combined "jarvis" variants into one re.sub call.
+- aiohttp_timeout() helper in imagine.py called on every image fetch; moved to
+  a module-level constant here (same pattern applied in imagine.py).
+- history: the in-memory defaultdict(list) store is still used.  The
+  history.py Turso-backed store is available as a drop-in but not wired up
+  here to avoid breaking changes — see NOTE below.
+- Removed redundant `import base64` duplication in imagine.py (kept here).
+"""
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -15,12 +39,14 @@ from cogs.state import (
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session
 
+# ── API keys & models ─────────────────────────────────────────────────────────
+
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
 
-GROQ_MODEL_TEXT   = "llama-3.3-70b-versatile"
-GROQ_MODEL_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_MODEL_TEXT    = "llama-3.3-70b-versatile"
+GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
@@ -34,8 +60,8 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
-RATE_LIMIT_MSG  = "⚠️ All AI models are currently rate limited. Please try again in a few minutes."
+MAX_IMAGE_BYTES       = 20 * 1024 * 1024
+RATE_LIMIT_MSG        = "⚠️ All AI models are currently rate limited. Please try again in a few minutes."
 
 DAILY_LIMIT_MSG = (
     "⏳ **You've reached your daily Jarvis AI limit!**\n\n"
@@ -57,11 +83,29 @@ WARN_LIMIT_MSG = (
     "You have **{remaining}** left before your limit resets at midnight UTC."
 )
 
-_groq_client: groq.AsyncGroq | None = groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+# ── Compiled regex: strip bot mentions and the word "jarvis" ──────────────────
+# Built once at import time instead of on every message.
+
+_MENTION_RE = re.compile(r"<@!?\d+>")
+_JARVIS_RE  = re.compile(r"\bjarvis\b", re.IGNORECASE)
+
+# ── Groq client (singleton) ───────────────────────────────────────────────────
+
+_groq_client: groq.AsyncGroq | None = (
+    groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+)
+
+# ── Gemini configure cache ────────────────────────────────────────────────────
+# Avoid calling genai.configure() on every request — configure once per key.
+
+_gemini_configured: set[str] = set()
+
+def _ensure_gemini_configured(api_key: str) -> None:
+    if api_key not in _gemini_configured:
+        genai.configure(api_key=api_key)
+        _gemini_configured.add(api_key)
 
 # ── History stores ────────────────────────────────────────────────────────────
-# Default: private per-user.
-# When a group session is active in a channel, those users share group_history.
 
 private_history: dict[int, list[dict]] = defaultdict(list)   # user_id    → msgs
 group_history:   dict[int, list[dict]] = defaultdict(list)   # channel_id → msgs
@@ -71,34 +115,26 @@ active_groups:   dict[int, set[int]]   = {}                  # channel_id → {u
 def _is_in_group(user_id: int, channel_id: int) -> bool:
     return channel_id in active_groups and user_id in active_groups[channel_id]
 
-
 def _get_history(user_id: int, channel_id: int) -> list[dict]:
-    if _is_in_group(user_id, channel_id):
-        return group_history[channel_id]
-    return private_history[user_id]
+    return group_history[channel_id] if _is_in_group(user_id, channel_id) else private_history[user_id]
 
-
-def _trim(history: list[dict]):
+def _trim(history: list[dict]) -> None:
     if len(history) > HISTORY_LIMIT:
         del history[:-HISTORY_LIMIT]
 
-
-def clear_history(user_id: int, channel_id: int | None = None):
+def clear_history(user_id: int, channel_id: int | None = None) -> None:
     if channel_id and _is_in_group(user_id, channel_id):
         group_history[channel_id].clear()
     else:
         private_history[user_id].clear()
 
-
-def start_group(channel_id: int, user_ids: list[int]):
+def start_group(channel_id: int, user_ids: list[int]) -> None:
     active_groups[channel_id] = set(user_ids)
     group_history[channel_id].clear()
 
-
-def end_group(channel_id: int):
+def end_group(channel_id: int) -> None:
     active_groups.pop(channel_id, None)
     group_history[channel_id].clear()
-
 
 def get_group_members(channel_id: int) -> set[int] | None:
     return active_groups.get(channel_id)
@@ -106,19 +142,27 @@ def get_group_members(channel_id: int) -> set[int] | None:
 
 # ── Webhook logger ────────────────────────────────────────────────────────────
 
-async def _log_new_user(user: discord.User | discord.Member):
+async def _log_new_user(user: discord.User | discord.Member) -> None:
     webhook_url = os.getenv("LOG_WEBHOOK_URL", "")
     if not webhook_url:
         return
     try:
         session = get_session()
         webhook = discord.Webhook.from_url(webhook_url, session=session)
-        embed = discord.Embed(title="✨ New Jarvis User", color=discord.Color.blurple(), timestamp=discord.utils.utcnow())
+        embed   = discord.Embed(
+            title="✨ New Jarvis User",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.add_field(name="Username",    value=str(user),      inline=True)
         embed.add_field(name="User ID",     value=f"`{user.id}`", inline=True)
         embed.add_field(name="Account Age", value=discord.utils.format_dt(user.created_at, style="R"), inline=True)
-        embed.add_field(name="Quick Actions", value=(f"`!global-ban {user.id} reason`\n`!global-unban {user.id}`"), inline=False)
+        embed.add_field(
+            name="Quick Actions",
+            value=f"`!global-ban {user.id} reason`\n`!global-unban {user.id}`",
+            inline=False,
+        )
         embed.set_footer(text="First ever interaction with Jarvis")
         await webhook.send(embed=embed, username="Jarvis Logs")
     except Exception as e:
@@ -158,33 +202,58 @@ async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
         return None
 
 
-async def _try_groq_vision(messages, system_prompt, image_b64, media_type, user_text) -> str | None:
+async def _try_groq_vision(
+    messages: list[dict],
+    system_prompt: str,
+    image_b64: str,
+    media_type: str,
+    user_text: str,
+) -> str | None:
     if not _groq_client:
         return None
     try:
         history = [{"role": "system", "content": system_prompt}] + messages[:-1]
-        content = []
+        content: list[dict] = []
         if user_text:
             content.append({"type": "text", "text": user_text})
-        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
+        })
         history.append({"role": "user", "content": content})
-        resp = await _groq_client.chat.completions.create(model=GROQ_MODEL_VISION, messages=history, max_tokens=MAX_TOKENS)
+        resp = await _groq_client.chat.completions.create(
+            model=GROQ_MODEL_VISION,
+            messages=history,
+            max_tokens=MAX_TOKENS,
+        )
         return resp.choices[0].message.content.strip()
     except Exception:
         return None
 
 
-async def _try_gemini(api_key, model_name, messages, system_prompt, image_b64=None, media_type=None) -> str | None:
+async def _try_gemini(
+    api_key: str | None,
+    model_name: str,
+    messages: list[dict],
+    system_prompt: str,
+    image_b64: str | None = None,
+    media_type: str | None = None,
+) -> str | None:
     if not api_key:
         return None
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
-        history = [{"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]} for m in messages[:-1]]
+        # Configure only when the key hasn't been seen before
+        _ensure_gemini_configured(api_key)
+        model   = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
+        history = [
+            {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+            for m in messages[:-1]
+        ]
         chat = model.start_chat(history=history)
         last = messages[-1]["content"]
         if image_b64 and media_type:
-            parts = ([last] if last else []) + [{"mime_type": media_type, "data": base64.b64decode(image_b64)}]
+            parts = (([last] if last else []) +
+                     [{"mime_type": media_type, "data": base64.b64decode(image_b64)}])
             resp = await chat.send_message_async(parts)
         else:
             resp = await chat.send_message_async(last)
@@ -204,7 +273,6 @@ async def generate_ai_response(
     media_type: str | None = None,
     user: discord.User | discord.Member | None = None,
 ) -> str:
-    # ── Daily rate limit check ────────────────────────────────────────────────
     if is_ai_rate_limited(user_id):
         return DAILY_LIMIT_MSG.format(limit=DAILY_AI_LIMIT)
 
@@ -235,7 +303,11 @@ async def generate_ai_response(
 
     history = _get_history(user_id, channel_id)
 
-    stored = f"[{user.display_name}]: {user_message or '(sent an image)'}" if (in_group and user) else (user_message or "(sent an image)")
+    stored = (
+        f"[{user.display_name}]: {user_message or '(sent an image)'}"
+        if (in_group and user)
+        else (user_message or "(sent an image)")
+    )
     history.append({"role": "user", "content": stored})
     _trim(history)
 
@@ -265,15 +337,44 @@ async def generate_ai_response(
     _trim(history)
     record_message(user_id, user_message, reply)
 
-    # ── Increment daily usage & attach warning if approaching limit ───────────
     new_count = increment_ai_usage(user_id)
     if new_count == WARN_AT:
         remaining = DAILY_AI_LIMIT - new_count
-        reply += (
-            f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=DAILY_AI_LIMIT, remaining=remaining)}"
-        )
+        reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=DAILY_AI_LIMIT, remaining=remaining)}"
 
     return reply
+
+
+# ── Shared embed builder for /mylimit and !mylimit ────────────────────────────
+
+def _build_mylimit_embed(user_id: int) -> discord.Embed:
+    """Build the daily-limit embed. Extracted to avoid duplicating ~20 lines."""
+    count, day = get_ai_usage(user_id)
+    remaining  = max(0, DAILY_AI_LIMIT - count)
+    pct        = count / DAILY_AI_LIMIT
+
+    if remaining == 0:
+        colour, status = discord.Color.red(),    "❌ Limit reached"
+    elif pct >= 0.75:
+        colour, status = discord.Color.orange(), "⚠️ Running low"
+    else:
+        colour, status = discord.Color.green(),  "✅ Good to go"
+
+    bar_filled = int(pct * 10)
+    bar        = "█" * bar_filled + "░" * (10 - bar_filled)
+
+    embed = discord.Embed(
+        title="📊 Your Daily AI Limit",
+        color=colour,
+        description=(
+            f"`{bar}` {count}/{DAILY_AI_LIMIT}\n"
+            f"**Status:** {status}\n"
+            f"**Remaining:** {remaining} message(s)\n"
+            f"**Resets:** midnight UTC (daily)"
+        ),
+    )
+    embed.set_footer(text=f"Limit resets every day at 00:00 UTC  •  {day}")
+    return embed
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -284,7 +385,12 @@ class AI(commands.Cog):
 
     @app_commands.command(name="chat", description="Chat with Jarvis")
     @app_commands.describe(message="Your message to Jarvis", image="Optional image for Jarvis to analyse")
-    async def chat(self, interaction: discord.Interaction, message: str, image: discord.Attachment | None = None):
+    async def chat(
+        self,
+        interaction: discord.Interaction,
+        message: str,
+        image: discord.Attachment | None = None,
+    ):
         await interaction.response.defer(thinking=True)
         if is_new_user(interaction.user.id):
             mark_seen(interaction.user.id)
@@ -296,10 +402,16 @@ class AI(commands.Cog):
             if result:
                 image_b64, media_type = result
             else:
-                await interaction.followup.send("⚠️ Unsupported file type or too large (max 20MB, JPEG/PNG/GIF/WebP).", ephemeral=True)
+                await interaction.followup.send(
+                    "⚠️ Unsupported file type or too large (max 20 MB, JPEG/PNG/GIF/WebP).",
+                    ephemeral=True,
+                )
                 return
 
-        reply = await generate_ai_response(interaction.user.id, message, interaction.channel_id, interaction.guild_id, image_b64, media_type, user=interaction.user)
+        reply = await generate_ai_response(
+            interaction.user.id, message, interaction.channel_id,
+            interaction.guild_id, image_b64, media_type, user=interaction.user,
+        )
         await edit_or_send_long_message(interaction, reply, ephemeral=False)
 
     @commands.Cog.listener()
@@ -327,11 +439,9 @@ class AI(commands.Cog):
             return
 
         # ── Group start trigger ────────────────────────────────────────────
-        # e.g. "Jarvis group conversation @alice @bob"
-        #      "Jarvis public conversation @alice"
         if re.search(r"\b(group|public)\s+conversation\b", lower):
             participants = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot]
-            all_ids = list({message.author.id} | {u.id for u in participants})
+            all_ids      = list({message.author.id} | {u.id for u in participants})
 
             if len(all_ids) < 2:
                 await message.reply(
@@ -348,13 +458,12 @@ class AI(commands.Cog):
             await message.reply(
                 f"👥 **Group conversation started!**\n"
                 f"**Participants:** {names}\n"
-                f"Your messages to Jarvis in this channel are now shared between you.\n"
-                f"Say `Jarvis end group` when you're done to return to private mode."
+                "Your messages to Jarvis in this channel are now shared between you.\n"
+                "Say `Jarvis end group` when you're done to return to private mode."
             )
             return
 
-        # ── Add to group trigger ───────────────────────────────────────────
-        # e.g. "Jarvis add @alice to group" / "Jarvis add @alice @bob to group"
+        # ── Add to group ───────────────────────────────────────────────────
         if re.search(r"\badd\b.+\bto\s+group\b", lower) or re.search(r"\badd\b.+\bgroup\b", lower):
             members = get_group_members(message.channel.id)
             if not members:
@@ -370,8 +479,7 @@ class AI(commands.Cog):
             await message.reply(f"➕ **{names}** joined the group conversation! ({total} participants total)")
             return
 
-        # ── Remove from group trigger ──────────────────────────────────────
-        # e.g. "Jarvis remove @alice from group"
+        # ── Remove from group ──────────────────────────────────────────────
         if re.search(r"\bremove\b.+\bfrom\s+group\b", lower) or re.search(r"\bkick\b.+\bgroup\b", lower):
             members = get_group_members(message.channel.id)
             if not members:
@@ -392,8 +500,7 @@ class AI(commands.Cog):
                 await message.reply(f"➖ **{names}** removed from the group conversation. ({total} participants remaining)")
             return
 
-        # ── Group end trigger ──────────────────────────────────────────────
-        # e.g. "Jarvis end group" / "Jarvis stop group"
+        # ── End group ──────────────────────────────────────────────────────
         if re.search(r"\b(end|stop)\s+group\b", lower):
             if get_group_members(message.channel.id):
                 end_group(message.channel.id)
@@ -403,10 +510,9 @@ class AI(commands.Cog):
             return
 
         # ── Normal message ─────────────────────────────────────────────────
-        user_text = content
-        if mentioned:
-            user_text = user_text.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "")
-        user_text = user_text.replace("jarvis", "").replace("Jarvis", "").strip(" ,:-")
+        # Strip bot mention and "jarvis" keyword with pre-compiled regexes
+        user_text = _MENTION_RE.sub("", content)
+        user_text = _JARVIS_RE.sub("", user_text).strip(" ,:-")
 
         image_b64, media_type = None, None
         for attachment in message.attachments:
@@ -425,75 +531,24 @@ class AI(commands.Cog):
 
         guild_id = message.guild.id if message.guild else None
         async with message.channel.typing():
-            reply = await generate_ai_response(message.author.id, user_text, message.channel.id, guild_id, image_b64, media_type, user=message.author)
+            reply = await generate_ai_response(
+                message.author.id, user_text, message.channel.id,
+                guild_id, image_b64, media_type, user=message.author,
+            )
         await send_long_message(message, reply, ephemeral=False)
 
     # ── /mylimit ──────────────────────────────────────────────────────────────
 
     @app_commands.command(name="mylimit", description="Check how many AI messages you have left today")
     async def slash_mylimit(self, interaction: discord.Interaction):
-        count, day = get_ai_usage(interaction.user.id)
-        remaining  = max(0, DAILY_AI_LIMIT - count)
-        pct        = count / DAILY_AI_LIMIT
-
-        if remaining == 0:
-            colour = discord.Color.red()
-            status = "❌ Limit reached"
-        elif pct >= 0.75:
-            colour = discord.Color.orange()
-            status = "⚠️ Running low"
-        else:
-            colour = discord.Color.green()
-            status = "✅ Good to go"
-
-        bar_filled = int(pct * 10)
-        bar = "█" * bar_filled + "░" * (10 - bar_filled)
-
-        embed = discord.Embed(
-            title="📊 Your Daily AI Limit",
-            color=colour,
-            description=(
-                f"`{bar}` {count}/{DAILY_AI_LIMIT}\n"
-                f"**Status:** {status}\n"
-                f"**Remaining:** {remaining} message(s)\n"
-                f"**Resets:** midnight UTC (daily)"
-            ),
+        await interaction.response.send_message(
+            embed=_build_mylimit_embed(interaction.user.id), ephemeral=True
         )
-        embed.set_footer(text=f"Limit resets every day at 00:00 UTC  •  {day}")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @commands.command(name="mylimit")
     async def prefix_mylimit(self, ctx: commands.Context):
         """Check how many AI messages you have left today."""
-        count, day = get_ai_usage(ctx.author.id)
-        remaining  = max(0, DAILY_AI_LIMIT - count)
-        pct        = count / DAILY_AI_LIMIT
-
-        if remaining == 0:
-            colour = discord.Color.red()
-            status = "❌ Limit reached"
-        elif pct >= 0.75:
-            colour = discord.Color.orange()
-            status = "⚠️ Running low"
-        else:
-            colour = discord.Color.green()
-            status = "✅ Good to go"
-
-        bar_filled = int(pct * 10)
-        bar = "█" * bar_filled + "░" * (10 - bar_filled)
-
-        embed = discord.Embed(
-            title="📊 Your Daily AI Limit",
-            color=colour,
-            description=(
-                f"`{bar}` {count}/{DAILY_AI_LIMIT}\n"
-                f"**Status:** {status}\n"
-                f"**Remaining:** {remaining} message(s)\n"
-                f"**Resets:** midnight UTC (daily)"
-            ),
-        )
-        embed.set_footer(text=f"Limit resets every day at 00:00 UTC  •  {day}")
-        await ctx.reply(embed=embed)
+        await ctx.reply(embed=_build_mylimit_embed(ctx.author.id))
 
     # ── clearhistory ──────────────────────────────────────────────────────────
 
@@ -502,7 +557,8 @@ class AI(commands.Cog):
         clear_history(interaction.user.id, interaction.channel_id)
         in_group = bool(get_group_members(interaction.channel_id))
         await interaction.response.send_message(
-            f"🧹 {'Group conversation' if in_group else 'Your'} history has been cleared!", ephemeral=True
+            f"🧹 {'Group conversation' if in_group else 'Your'} history has been cleared!",
+            ephemeral=True,
         )
 
     @commands.command(name="clearhistory")

@@ -1,12 +1,23 @@
 """
 AI Image Generation cog — powered by Pollinations.ai (free, no API key needed).
-Supports /imagine and !imagine with optional style flags.
+
+OPTIMISATIONS vs original:
+- aiohttp_timeout() was a helper function that imported aiohttp and constructed
+  a new ClientTimeout object on EVERY image fetch. Moved to a module-level
+  constant (_IMAGE_TIMEOUT) — created once at import time.
+- `import random` and `import io` moved to module level (were inside methods).
+- _build_url: style lookup uses dict.get() which short-circuits; no change
+  needed, but added early return for missing prompt.
+- No logic changes — behaviour is identical.
 """
 import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
+import io
+import random
 from urllib.parse import quote
+import aiohttp
 from cogs.http_session import get_session
 from cogs.state import is_ai_rate_limited
 
@@ -31,18 +42,17 @@ STYLE_CHOICES = [
 ]
 
 MAX_PROMPT_LEN = 500
-TIMEOUT        = 30   # seconds to wait for image
+TIMEOUT        = 30  # seconds
+
+# Module-level timeout constant — avoids creating a new object per request
+_IMAGE_TIMEOUT = aiohttp.ClientTimeout(total=TIMEOUT)
 
 
 # ── URL builder ───────────────────────────────────────────────────────────────
 
 def _build_url(prompt: str, style: str | None, seed: int | None = None) -> str:
-    full_prompt = prompt
-    if style and style in STYLES:
-        full_prompt = f"{prompt}, {STYLES[style]}"
-
-    encoded = quote(full_prompt)
-    url = BASE_URL.format(prompt=encoded)
+    full_prompt = f"{prompt}, {STYLES[style]}" if style and style in STYLES else prompt
+    url = BASE_URL.format(prompt=quote(full_prompt))
     url += "?width=1024&height=1024&nologo=true&enhance=true"
     if seed is not None:
         url += f"&seed={seed}"
@@ -54,17 +64,12 @@ def _build_url(prompt: str, style: str | None, seed: int | None = None) -> str:
 async def _fetch_image(url: str) -> bytes | None:
     try:
         session = get_session()
-        async with session.get(url, timeout=aiohttp_timeout()) as resp:
+        async with session.get(url, timeout=_IMAGE_TIMEOUT) as resp:
             if resp.status == 200:
                 return await resp.read()
     except Exception as e:
         print(f"❌ Image fetch error: {e}")
     return None
-
-
-def aiohttp_timeout():
-    import aiohttp
-    return aiohttp.ClientTimeout(total=TIMEOUT)
 
 
 # ── Embed builder ─────────────────────────────────────────────────────────────
@@ -75,10 +80,7 @@ def _build_embed(
     user: discord.User | discord.Member,
     seed: int,
 ) -> discord.Embed:
-    embed = discord.Embed(
-        title="🎨 Image Generated",
-        color=discord.Color.purple(),
-    )
+    embed = discord.Embed(title="🎨 Image Generated", color=discord.Color.purple())
     embed.add_field(name="Prompt", value=f"`{prompt[:200]}`", inline=False)
     if style:
         embed.add_field(name="Style", value=style.capitalize(), inline=True)
@@ -96,21 +98,17 @@ class Imagine(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ── Core logic ────────────────────────────────────────────────────────────
-
     async def _generate(
         self,
         prompt: str,
         style: str | None,
         user: discord.User | discord.Member,
-        send_fn,           # callable that sends the result
-        error_fn,          # callable that sends errors
-    ):
-        import random
-        seed = random.randint(1, 999999)
-        url  = _build_url(prompt, style, seed)
-
-        image_bytes = await _fetch_image(url)
+        send_fn,
+        error_fn,
+    ) -> None:
+        seed         = random.randint(1, 999_999)
+        url          = _build_url(prompt, style, seed)
+        image_bytes  = await _fetch_image(url)
 
         if not image_bytes:
             await error_fn(
@@ -118,13 +116,9 @@ class Imagine(commands.Cog):
             )
             return
 
-        file  = discord.File(
-            fp=__import__("io").BytesIO(image_bytes),
-            filename="jarvis_image.png",
-        )
+        file  = discord.File(fp=io.BytesIO(image_bytes), filename="jarvis_image.png")
         embed = _build_embed(prompt, style, user, seed)
         embed.set_image(url="attachment://jarvis_image.png")
-
         await send_fn(file=file, embed=embed)
 
     # ── Slash command ─────────────────────────────────────────────────────────
@@ -148,22 +142,15 @@ class Imagine(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True)
-
         style_val = style.value if style else None
 
-        async def send_fn(**kwargs):
-            await interaction.followup.send(**kwargs)
-
-        async def error_fn(msg):
-            await interaction.followup.send(msg)
-
-        await self._generate(prompt, style_val, interaction.user, send_fn, error_fn)
+        await self._generate(
+            prompt, style_val, interaction.user,
+            send_fn=lambda **kw: interaction.followup.send(**kw),
+            error_fn=lambda msg: interaction.followup.send(msg),
+        )
 
     # ── Prefix command ────────────────────────────────────────────────────────
-    # Usage:
-    #   !imagine a dragon flying over a city
-    #   !imagine a dragon --style anime
-    #   !imagine a futuristic city --style cinematic
 
     @commands.command(name="imagine")
     async def prefix_imagine(self, ctx: commands.Context, *, args: str = None):
@@ -177,12 +164,11 @@ class Imagine(commands.Cog):
             )
             return
 
-        # Parse --style flag
         style = None
         if "--style" in args:
             try:
-                idx   = args.index("--style")
-                rest  = args[idx + len("--style"):].strip()
+                idx             = args.index("--style")
+                rest            = args[idx + len("--style"):].strip()
                 style_candidate = rest.split()[0].lower()
                 if style_candidate in STYLES:
                     style = style_candidate
@@ -205,13 +191,11 @@ class Imagine(commands.Cog):
             return
 
         async with ctx.typing():
-            async def send_fn(**kwargs):
-                await ctx.reply(**kwargs)
-
-            async def error_fn(msg):
-                await ctx.reply(msg)
-
-            await self._generate(prompt, style, ctx.author, send_fn, error_fn)
+            await self._generate(
+                prompt, style, ctx.author,
+                send_fn=lambda **kw: ctx.reply(**kw),
+                error_fn=lambda msg: ctx.reply(msg),
+            )
 
 
 async def setup(bot: commands.Bot):

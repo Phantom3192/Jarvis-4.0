@@ -1,49 +1,92 @@
+"""
+Admin cog — bot-ban management and admin utilities.
+
+OPTIMISATIONS vs original:
+- is_admin: precompute a frozenset of lowercase names instead of rebuilding
+  a list comprehension on every call (was O(n) per check, now O(1))
+- parse_duration: unchanged but moved multipliers to a module-level constant
+  so the dict is not rebuilt on every call
+- prefix_botbans / slash_botbans: shared helper _format_ban_lines() removes
+  ~20 lines of duplicated code between the two commands
+- import time moved to module level (was buried inside __init__ and two methods)
+- Removed bare `import json`, `import aiohttp` — neither was used in this file
+"""
 import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
-import json
 import os
-import aiohttp
+import time
 from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage
 
-# ── Config ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
-LOG_WEBHOOK_URL = os.getenv("LOG_WEBHOOK_URL", "")  # Webhook URL for new user alerts
+LOG_WEBHOOK_URL = os.getenv("LOG_WEBHOOK_URL", "")
 
-# ── Hardcoded admins ──────────────────────────────────────────────────────────
+ADMIN_USERNAMES: frozenset[str] = frozenset({
+    "phantom_3192",   # ← add more Discord usernames here (all lowercase)
+})
 
-ADMIN_USERNAMES = [
-    "phantom_3192",   # ← replace with your Discord username
-]
+# ── Duration parser ───────────────────────────────────────────────────────────
 
-# ── Ban state (shared via cogs.state) ────────────────────────────────────────
-# bot_bans, save_bans, is_bot_banned are all imported from cogs.state
+_UNIT_MULTIPLIERS: dict[str, int] = {
+    "minute": 60,    "minutes": 60,    "min": 60,   "m": 60,
+    "hour":   3600,  "hours":   3600,  "hr":  3600, "h": 3600,
+    "day":    86400, "days":    86400, "d":   86400,
+    "week":   604800,"weeks":   604800,"w":   604800,
+}
 
+def parse_duration(amount: int, unit: str) -> int:
+    return amount * _UNIT_MULTIPLIERS.get(unit.lower(), -1)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def is_admin(user: discord.User | discord.Member) -> bool:
-    return user.name.lower() in [u.lower() for u in ADMIN_USERNAMES]
+    """O(1) admin check using a pre-built frozenset."""
+    return user.name.lower() in ADMIN_USERNAMES
 
-
-def parse_duration(amount: int, unit: str) -> int:
-    unit = unit.lower()
-    multipliers = {
-        "minute": 60,    "minutes": 60,    "min": 60,   "m": 60,
-        "hour":   3600,  "hours":   3600,  "hr":  3600, "h": 3600,
-        "day":    86400, "days":    86400, "d":   86400,
-        "week":   604800,"weeks":   604800,"w":   604800,
-    }
-    return amount * multipliers.get(unit, -1)
-
-BAN_USAGE   = ("**Usage:** `!global-ban @user [duration unit] [reason]`\n"
-               "**Examples:**\n"
-               "`!global-ban @user spamming` — permanent ban\n"
-               "`!global-ban @user permanent abusing the bot` — permanent ban\n"
-               "`!global-ban @user 7 days flooding` — 7-day temp ban\n"
-               "`!global-ban @user 2 hours repeated spam` — 2-hour temp ban")
+BAN_USAGE = (
+    "**Usage:** `!global-ban @user [duration unit] [reason]`\n"
+    "**Examples:**\n"
+    "`!global-ban @user spamming` — permanent ban\n"
+    "`!global-ban @user permanent abusing the bot` — permanent ban\n"
+    "`!global-ban @user 7 days flooding` — 7-day temp ban\n"
+    "`!global-ban @user 2 hours repeated spam` — 2-hour temp ban"
+)
 UNBAN_USAGE = "**Usage:** `!global-unban <user_id>`"
+
+
+async def _format_ban_lines(bot: commands.Bot) -> list[str]:
+    """Build one display line per banned user. Shared by prefix and slash commands."""
+    lines = []
+    now = time.time()
+    for uid_str, data in bot_bans.items():
+        expires = data.get("expires")
+        if expires:
+            remaining = max(0, int(expires - now))
+            hrs, rem  = divmod(remaining, 3600)
+            mins      = rem // 60
+            duration_str = f"⏱️ {hrs}h {mins}m remaining"
+        else:
+            duration_str = "🔴 Permanent"
+        try:
+            user     = await bot.fetch_user(int(uid_str))
+            user_str = f"**{user.name}** (`{uid_str}`)"
+        except Exception:
+            user_str = f"Unknown User (`{uid_str}`)"
+        lines.append(
+            f"{user_str}\n"
+            f"  ↳ {duration_str} | Reason: {data.get('reason', 'None')}\n"
+            f"  ↳ Unban: `!global-unban {uid_str}`"
+        )
+    return lines
+
+
+def _ban_list_text(lines: list[str]) -> str:
+    chunk = "\n\n".join(lines[:20])
+    note  = f"\n*...and {len(lines) - 20} more.*" if len(lines) > 20 else ""
+    return f"🚫 **Bot-banned users ({len(bot_bans)}):**\n\n{chunk}{note}"
+
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
@@ -53,14 +96,12 @@ class Admin(commands.Cog):
         self.temp_ban_tasks: dict[int, asyncio.Task] = {}
 
         # Re-schedule any active temp bans that survived a restart
-        import time
         now = time.time()
         for uid_str, data in list(bot_bans.items()):
             expires = data.get("expires")
             if expires is not None:
                 remaining = expires - now
                 if remaining <= 0:
-                    # Already expired — remove
                     del bot_bans[uid_str]
                     save_bans()
                 else:
@@ -69,14 +110,16 @@ class Admin(commands.Cog):
                         self._unban_after(uid, remaining)
                     )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Shared core logic
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Shared core logic ─────────────────────────────────────────────────────
 
-    async def _do_botban(self, user: discord.User | discord.Member, reason, duration, unit, send_msg):
-        import time
-
-        # Permanent ban: duration is 0 OR unit is "permanent"
+    async def _do_botban(
+        self,
+        user: discord.User | discord.Member,
+        reason: str,
+        duration: int,
+        unit: str,
+        send_msg,
+    ) -> None:
         is_permanent = (duration == 0 or unit == "permanent")
 
         if is_permanent:
@@ -89,7 +132,10 @@ class Admin(commands.Cog):
                 )
             except discord.Forbidden:
                 pass
-            await send_msg(f"🚫 **{user}** has been permanently banned from using Jarvis.\n**Reason:** {reason}")
+            await send_msg(
+                f"🚫 **{user}** has been permanently banned from using Jarvis.\n"
+                f"**Reason:** {reason}"
+            )
         else:
             seconds = parse_duration(duration, unit)
             if seconds <= 0:
@@ -106,11 +152,15 @@ class Admin(commands.Cog):
                 )
             except discord.Forbidden:
                 pass
-            await send_msg(f"⏱️ **{user}** is banned from Jarvis for **{duration} {unit}**.\n**Reason:** {reason}")
-            task = asyncio.create_task(self._unban_after(user.id, seconds))
-            self.temp_ban_tasks[user.id] = task
+            await send_msg(
+                f"⏱️ **{user}** is banned from Jarvis for **{duration} {unit}**.\n"
+                f"**Reason:** {reason}"
+            )
+            self.temp_ban_tasks[user.id] = asyncio.create_task(
+                self._unban_after(user.id, seconds)
+            )
 
-    async def _do_botunban(self, user_id: int, send_msg):
+    async def _do_botunban(self, user_id: int, send_msg) -> None:
         uid_str = str(user_id)
         if uid_str not in bot_bans:
             await send_msg("❌ That user is not bot-banned.")
@@ -122,7 +172,7 @@ class Admin(commands.Cog):
             task.cancel()
         await send_msg(f"✅ User `{user_id}` has been unbanned from Jarvis.")
 
-    async def _unban_after(self, user_id: int, seconds: float):
+    async def _unban_after(self, user_id: int, seconds: float) -> None:
         await asyncio.sleep(seconds)
         uid_str = str(user_id)
         if uid_str in bot_bans:
@@ -135,12 +185,7 @@ class Admin(commands.Cog):
         except (discord.Forbidden, discord.NotFound):
             pass
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Global check — blocks banned users from ALL bot interactions
-    # ─────────────────────────────────────────────────────────────────────────
-
     async def cog_check(self, ctx: commands.Context) -> bool:
-        # Admins are never blocked
         if is_admin(ctx.author):
             return True
         if is_bot_banned(ctx.author.id):
@@ -148,9 +193,7 @@ class Admin(commands.Cog):
             return False
         return True
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Prefix commands
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Prefix commands ───────────────────────────────────────────────────────
 
     @commands.command(name="global-ban")
     async def prefix_botban(self, ctx: commands.Context, user: discord.User = None, *args):
@@ -170,29 +213,22 @@ class Admin(commands.Cog):
             await ctx.reply(f"⚠️ **{user}** is already banned from Jarvis.")
             return
 
-        duration = 0
-        unit = "permanent"
-        reason = "No reason provided"
+        duration, unit, reason = 0, "permanent", "No reason provided"
 
         if args:
             if args[0].lower() == "permanent":
-                # !global-ban @user permanent [reason]
                 reason = " ".join(args[1:]) or "No reason provided"
             elif args[0].isdigit() and len(args) >= 2:
-                # !global-ban @user 7 days [reason]
                 duration = int(args[0])
-                unit = args[1]
-                # Validate unit before proceeding
+                unit     = args[1]
                 if parse_duration(duration, unit) <= 0:
                     await ctx.reply(
                         f"❌ `{unit}` is not a valid time unit.\n"
-                        "Valid units: `minutes`, `hours`, `days`, `weeks`\n\n"
-                        + BAN_USAGE
+                        "Valid units: `minutes`, `hours`, `days`, `weeks`\n\n" + BAN_USAGE
                     )
                     return
                 reason = " ".join(args[2:]) or "No reason provided"
             else:
-                # No duration prefix — permanent ban with reason
                 reason = " ".join(args)
 
         await self._do_botban(user, reason, duration, unit, ctx.reply)
@@ -220,30 +256,22 @@ class Admin(commands.Cog):
         if not bot_bans:
             await ctx.reply("✅ No users are currently banned from Jarvis.")
             return
-        import time
-        lines = []
-        for uid_str, data in bot_bans.items():
-            expires = data.get("expires")
-            if expires:
-                remaining = int(expires - time.time())
-                hrs, rem = divmod(remaining, 3600)
-                mins = rem // 60
-                duration_str = f"⏱️ {hrs}h {mins}m remaining"
-            else:
-                duration_str = "🔴 Permanent"
-            try:
-                user = await self.bot.fetch_user(int(uid_str))
-                user_str = f"**{user.name}** (`{uid_str}`)"
-            except Exception:
-                user_str = f"Unknown User (`{uid_str}`)"
-            lines.append(f"{user_str}\n  ↳ {duration_str} | Reason: {data.get('reason', 'None')}\n  ↳ Unban: `!global-unban {uid_str}`")
-        chunk = "\n\n".join(lines[:20])
-        note  = f"\n*...and {len(lines) - 20} more.*" if len(lines) > 20 else ""
-        await ctx.reply(f"🚫 **Bot-banned users ({len(bot_bans)}):**\n\n{chunk}{note}")
+        lines = await _format_ban_lines(self.bot)
+        await ctx.reply(_ban_list_text(lines))
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Slash commands
-    # ─────────────────────────────────────────────────────────────────────────
+    @commands.command(name="resetlimit")
+    async def prefix_resetlimit(self, ctx: commands.Context, user: discord.User = None):
+        """Admin only — reset a user's daily AI message limit."""
+        if not is_admin(ctx.author):
+            await ctx.reply("🚫 You don't have permission to use this command.")
+            return
+        if user is None:
+            await ctx.reply("**Usage:** `!resetlimit @user`")
+            return
+        reset_ai_usage(user.id)
+        await ctx.reply(f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.")
+
+    # ── Slash commands ────────────────────────────────────────────────────────
 
     @app_commands.command(name="botban", description="Ban a user from using Jarvis")
     @app_commands.describe(
@@ -277,11 +305,15 @@ class Admin(commands.Cog):
             await interaction.response.send_message("❌ You can't ban another admin.", ephemeral=True)
             return
         if is_bot_banned(user.id):
-            await interaction.response.send_message(f"⚠️ **{user}** is already banned from Jarvis.", ephemeral=True)
+            await interaction.response.send_message(
+                f"⚠️ **{user}** is already banned from Jarvis.", ephemeral=True
+            )
             return
         await interaction.response.defer()
-        await self._do_botban(user, reason, duration, unit,
-                              lambda msg: interaction.followup.send(msg))
+        await self._do_botban(
+            user, reason, duration, unit,
+            lambda msg: interaction.followup.send(msg)
+        )
 
     @app_commands.command(name="botunban", description="Unban a user from Jarvis")
     @app_commands.describe(user_id="The Discord user ID to unban")
@@ -306,40 +338,8 @@ class Admin(commands.Cog):
         if not bot_bans:
             await interaction.followup.send("✅ No users are currently banned from Jarvis.")
             return
-        import time
-        lines = []
-        for uid_str, data in bot_bans.items():
-            expires = data.get("expires")
-            if expires:
-                remaining = int(expires - time.time())
-                hrs, rem = divmod(remaining, 3600)
-                mins = rem // 60
-                duration_str = f"⏱️ {hrs}h {mins}m remaining"
-            else:
-                duration_str = "🔴 Permanent"
-            try:
-                user = await self.bot.fetch_user(int(uid_str))
-                user_str = f"**{user.name}** (`{uid_str}`)"
-            except Exception:
-                user_str = f"Unknown User (`{uid_str}`)"
-            lines.append(f"{user_str}\n  ↳ {duration_str} | Reason: {data.get('reason', 'None')}\n  ↳ Unban: `!global-unban {uid_str}`")
-        chunk = "\n\n".join(lines[:20])
-        note  = f"\n*...and {len(lines) - 20} more.*" if len(lines) > 20 else ""
-        await interaction.followup.send(f"🚫 **Bot-banned users ({len(bot_bans)}):**\n\n{chunk}{note}")
-
-
-
-    @commands.command(name="resetlimit")
-    async def prefix_resetlimit(self, ctx: commands.Context, user: discord.User = None):
-        """Admin only — reset a user's daily AI message limit."""
-        if not is_admin(ctx.author):
-            await ctx.reply("🚫 You don't have permission to use this command.")
-            return
-        if user is None:
-            await ctx.reply("**Usage:** `!resetlimit @user`")
-            return
-        reset_ai_usage(user.id)
-        await ctx.reply(f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.")
+        lines = await _format_ban_lines(self.bot)
+        await interaction.followup.send(_ban_list_text(lines))
 
     @app_commands.command(name="resetlimit", description="Reset a user's daily AI message limit (admin only)")
     @app_commands.describe(user="The user whose limit to reset")
