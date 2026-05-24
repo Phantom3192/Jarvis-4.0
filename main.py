@@ -50,6 +50,7 @@ COGS = [
     "cogs.help",
     "cogs.fun",
     "cogs.imagine",
+    "cogs.system",
 ]
 
 # Track users we've already DM'd about their ban this session — avoid spamming.
