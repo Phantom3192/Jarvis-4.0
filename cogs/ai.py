@@ -315,8 +315,9 @@ async def _try_gemini(
     if not api_key or not genai:
         return None
     try:
-        # Use the available Google GenAI API — pass api_key directly to GenerativeModel
-        model   = genai.GenerativeModel(model_name=model_name, api_key=api_key, system_instruction=system_prompt)
+        # Configure API key before creating the model (google.generativeai requires this)
+        genai.configure(api_key=api_key)
+        model   = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
         history = [
             {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
             for m in messages[:-1]
