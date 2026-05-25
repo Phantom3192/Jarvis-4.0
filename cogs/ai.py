@@ -19,7 +19,10 @@ import asyncio
 import time
 from collections import defaultdict
 import groq
-import google.genai as genai
+try:
+    import google.generativeai as genai
+except ImportError:
+    import google.genai as genai
 import base64
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
