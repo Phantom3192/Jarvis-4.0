@@ -42,6 +42,7 @@ GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
 HISTORY_LIMIT = 5   # Reduced for ultra-fast API responses
 MAX_TOKENS    = 512 # Reduced for snappier responses (~2 paragraphs)
+PROVIDER_TIMEOUT = 12  # seconds per provider call
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
@@ -97,7 +98,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 MAX_IMAGE_BYTES       = 20 * 1024 * 1024
-RATE_LIMIT_MSG        = "⚠️ All AI models are currently rate limited. Please try again in a few minutes."
+AI_UNAVAILABLE_MSG    = "⚠️ AI providers are currently unavailable. Please try again in a few minutes."
 
 DAILY_LIMIT_MSG = (
     "⏳ **You've reached your daily Jarvis AI limit!**\n\n"
@@ -230,15 +231,21 @@ async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
     if not _groq_client:
         return None
     try:
-        resp = await _groq_client.chat.completions.create(
-            model=GROQ_MODEL_TEXT,
-            messages=[{"role": "system", "content": system_prompt}] + messages,
-            max_tokens=MAX_TOKENS,
+        resp = await asyncio.wait_for(
+            _groq_client.chat.completions.create(
+                model=GROQ_MODEL_TEXT,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+                max_tokens=MAX_TOKENS,
+            ),
+            timeout=PROVIDER_TIMEOUT,
         )
         return resp.choices[0].message.content.strip()
+    except asyncio.TimeoutError:
+        print(f"[Groq API Error] Timeout after {PROVIDER_TIMEOUT}s")
+        return None
     except Exception as e:
         error_type = type(e).__name__
-        error_msg = str(e)[:100]  # First 100 chars
+        error_msg = str(e)[:100]
         print(f"[Groq API Error] {error_type}: {error_msg}")
         return None
 
@@ -262,15 +269,21 @@ async def _try_groq_vision(
             "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
         })
         history.append({"role": "user", "content": content})
-        resp = await _groq_client.chat.completions.create(
-            model=GROQ_MODEL_VISION,
-            messages=history,
-            max_tokens=MAX_TOKENS,
+        resp = await asyncio.wait_for(
+            _groq_client.chat.completions.create(
+                model=GROQ_MODEL_VISION,
+                messages=history,
+                max_tokens=MAX_TOKENS,
+            ),
+            timeout=PROVIDER_TIMEOUT,
         )
         return resp.choices[0].message.content.strip()
+    except asyncio.TimeoutError:
+        print(f"[Groq Vision Error] Timeout after {PROVIDER_TIMEOUT}s")
+        return None
     except Exception as e:
         error_type = type(e).__name__
-        error_msg = str(e)[:100]  # First 100 chars
+        error_msg = str(e)[:100]
         print(f"[Groq Vision Error] {error_type}: {error_msg}")
         return None
 
@@ -297,13 +310,16 @@ async def _try_gemini(
         if image_b64 and media_type:
             parts = (([last] if last else []) +
                      [{"mime_type": media_type, "data": base64.b64decode(image_b64)}])
-            resp = await chat.send_message_async(parts)
+            resp = await asyncio.wait_for(chat.send_message_async(parts), timeout=PROVIDER_TIMEOUT)
         else:
-            resp = await chat.send_message_async(last)
+            resp = await asyncio.wait_for(chat.send_message_async(last), timeout=PROVIDER_TIMEOUT)
         return resp.text.strip()
+    except asyncio.TimeoutError:
+        print(f"[Gemini {model_name} Error] Timeout after {PROVIDER_TIMEOUT}s")
+        return None
     except Exception as e:
         error_type = type(e).__name__
-        error_msg = str(e)[:100]  # First 100 chars
+        error_msg = str(e)[:100]
         print(f"[Gemini {model_name} Error] {error_type}: {error_msg}")
         return None
 
@@ -474,7 +490,7 @@ async def generate_ai_response(
     if not reply:
         history.pop()
         print(f"[AI Response] All providers failed for user {user_id} in channel {channel_id}")
-        return RATE_LIMIT_MSG
+        return AI_UNAVAILABLE_MSG
 
     history.append({"role": "assistant", "content": reply})
     
