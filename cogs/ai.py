@@ -469,62 +469,69 @@ async def generate_ai_response(
     history.append({"role": "user", "content": stored})
     _trim(history)
 
-    # ── Route based on user's preferred model with PARALLEL fallbacks ──────────
+    # ── Route based on user's preferred model ─────────────────────────────────
+    # Strategy: try the preferred/primary provider first with a short timeout.
+    # Only call Gemini if Groq fails, and only if Gemini keys aren't backed off.
+    # This keeps responses fast (Groq ~1s) and avoids wasting time on 429s.
     preferred = get_user_model(user_id)
+    reply = None
 
-    if preferred == "groq":
-        if has_image:
-            # Groq vision + Gemini in parallel
-            tasks = [
-                asyncio.create_task(_try_groq_vision(history, system_prompt, image_b64, media_type, user_message)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-            ]
-            reply = await _race_providers(*tasks)
-        else:
-            # Groq + Gemini in parallel
-            tasks = [
-                asyncio.create_task(_try_groq(history, system_prompt)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)),
-            ]
-            reply = await _race_providers(*tasks)
+    gemini_keys_available = (
+        genai is not None and
+        (
+            (GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY)) or
+            (GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2))
+        )
+    )
 
-    elif preferred == "gemini-flash":
-        tasks = [
-            asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-            asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-            asyncio.create_task(_try_groq(history, system_prompt)),
-        ]
-        reply = await _race_providers(*tasks)
+    if preferred == "gemini-flash":
+        # Try Gemini first, fall back to Groq
+        tasks = []
+        if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
+            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+        if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
+            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+        if tasks:
+            reply = await _race_providers(*tasks)
+        if not reply:
+            reply = await _try_groq(history, system_prompt)
 
     elif preferred == "gemini-lite":
-        tasks = [
-            asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)),
-            asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)),
-            asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-            asyncio.create_task(_try_groq(history, system_prompt)),
-        ]
-        reply = await _race_providers(*tasks)
+        # Try Gemini lite first, fall back to flash, then Groq
+        tasks = []
+        if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
+            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)))
+        if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
+            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)))
+        if tasks:
+            reply = await _race_providers(*tasks)
+        if not reply and gemini_keys_available:
+            flash_tasks = []
+            if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
+                flash_tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+            if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
+                flash_tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+            if flash_tasks:
+                reply = await _race_providers(*flash_tasks)
+        if not reply:
+            reply = await _try_groq(history, system_prompt)
 
-    else:  # "auto" — all providers in parallel for fastest response
+    else:
+        # "groq" or "auto" — Groq first (fastest), Gemini only as fallback
         if has_image:
-            tasks = [
-                asyncio.create_task(_try_groq_vision(history, system_prompt, image_b64, media_type, user_message)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)),
-            ]
+            reply = await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
         else:
-            tasks = [
-                asyncio.create_task(_try_groq(history, system_prompt)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt)),
-                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt)),
-            ]
-        reply = await _race_providers(*tasks)
+            reply = await _try_groq(history, system_prompt)
+
+        # Groq failed — try Gemini if keys are available and not backed off
+        if not reply and gemini_keys_available:
+            tasks = []
+            if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
+                tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+            if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
+                tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+            if tasks:
+                reply = await _race_providers(*tasks)
 
     if not reply:
         history.pop()

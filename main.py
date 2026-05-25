@@ -146,24 +146,11 @@ async def main():
             print("❌ Invalid DISCORD_TOKEN — check your .env file. Not retrying.")
             break
 
-        except asyncio.CancelledError:
-            if attempt < MAX_RETRIES:
-                delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
-                print(
-                    f"⚠️  Websocket connection cancelled (attempt {attempt}/{MAX_RETRIES}). "
-                    f"This may indicate network issues or the host stopping the bot.\n"
-                    f"   Retrying in {delay}s…"
-                )
-                await asyncio.sleep(delay)
-            else:
-                print(f"❌ Websocket cancelled {MAX_RETRIES} times. Giving up.")
-                raise
-
         except Exception as e:
             if attempt < MAX_RETRIES:
                 delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
                 print(
-                    f"❌ Unexpected error (attempt {attempt}/{MAX_RETRIES}): {type(e).__name__}: {e}\n"
+                    f"❌ Unexpected error (attempt {attempt}/{MAX_RETRIES}): {e}\n"
                     f"   Retrying in {delay}s…"
                 )
                 await asyncio.sleep(delay)
