@@ -464,65 +464,6 @@ def _build_model_embed(user_id: int) -> discord.Embed:
     return embed
 
 
-# ── Intent classifier ────────────────────────────────────────────────────────
-# Uses a tiny Groq call (fast + cheap) to understand what the user actually
-# wants, no matter how they phrase it. Returns one of these string labels:
-#
-#   "usage"         — asking about daily message limit / remaining quota / status
-#   "model"         — asking which AI model Jarvis is using
-#   "clear_history" — asking to clear / reset / wipe conversation history
-#   "none"          — anything else (pass to normal AI response)
-
-_INTENT_SYSTEM = """\
-You are an intent classifier for a Discord bot called Jarvis.
-Classify the user's message into exactly one of these intents:
-
-  usage         — user is asking about their daily AI message limit, quota,
-                  how many messages they have left, usage stats, or the bot's
-                  current status/health in a way that means "am I close to the limit?".
-                  Examples: "what's my usage", "how many messages do i have left",
-                  "what's the status rn", "am i near my limit", "how much quota left",
-                  "what's the deal with my limit", "yo how many left",
-                  "how's my usage going", "check my status", "give me my stats"
-
-  model         — user is asking which AI model Jarvis is currently using, or
-                  wants to know about the active AI behind the bot.
-                  Examples: "what model are you", "which ai are you using",
-                  "what's powering you", "are you gpt or gemini", "what ai is this"
-
-  clear_history — user wants to clear, reset, wipe or forget the conversation
-                  history / memory.
-                  Examples: "forget everything", "start over", "wipe our chat",
-                  "reset memory", "clear chat", "pretend we never spoke"
-
-  none          — anything else: questions, tasks, conversation, etc.
-
-Reply with ONLY the single intent word. No punctuation. No explanation."""
-
-
-async def _classify_intent(text: str) -> str:
-    """
-    Run a fast Groq classification call.
-    Falls back to "none" on any error so the normal AI path always works.
-    """
-    if not _groq_client:
-        return "none"
-    try:
-        resp = await _groq_client.chat.completions.create(
-            model=GROQ_MODEL_TEXT,
-            messages=[
-                {"role": "system", "content": _INTENT_SYSTEM},
-                {"role": "user",   "content": text},
-            ],
-            max_tokens=5,          # we only need one word back
-            temperature=0,         # deterministic
-        )
-        label = resp.choices[0].message.content.strip().lower()
-        return label if label in ("usage", "model", "clear_history") else "none"
-    except Exception:
-        return "none"
-
-
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class AI(commands.Cog):
@@ -656,27 +597,6 @@ class AI(commands.Cog):
             else:
                 await message.reply("ℹ️ There's no active group conversation in this channel.")
             return
-
-        # ── Natural-language intent detection ─────────────────────────────
-        # Strip the Jarvis mention/name to get just what the user actually
-        # said, then ask the classifier what they want. Falls back to "none"
-        # on any error so the normal AI path is always the safe default.
-        clean_for_intent = _JARVIS_RE.sub("", _MENTION_RE.sub("", content)).strip(" ,:-")
-        if clean_for_intent:
-            intent = await _classify_intent(clean_for_intent)
-            if intent == "usage":
-                await message.reply(embed=_build_mylimit_embed(message.author.id))
-                return
-            if intent == "model":
-                await message.reply(embed=_build_model_embed(message.author.id))
-                return
-            if intent == "clear_history":
-                clear_history(message.author.id, message.channel.id)
-                in_group = bool(get_group_members(message.channel.id))
-                await message.reply(
-                    f"🧹 {'Group conversation' if in_group else 'Your'} history has been cleared!"
-                )
-                return
 
         # ── Normal message ─────────────────────────────────────────────────
         user_text = _MENTION_RE.sub("", content)
