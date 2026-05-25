@@ -9,33 +9,12 @@ CHANGES vs previous version:
   to that provider first, falling back to others if it fails.
 - MODELS dict is the single source of truth for available choices.
 - !ping / !uptime moved to system.py — not duplicated here.
-
-NEW in this version:
-- Smarter "jarvis" trigger: only fires when "jarvis" is addressed at the
-  start of the message (with optional greeting prefix like "hey", "yo").
-  Stops mid-sentence casual mentions like "my friend jarvis said..." from
-  waking the bot up.
-- Live bot context injection: when a user asks about bot status/health
-  (ping, uptime, RAM, users, etc.), real-time numbers are injected into
-  the system prompt so the AI answers with actual data instead of generic
-  "everything is fine" replies.
-- _bot_ref: module-level bot reference set by AI.__init__ so the module-
-  level generate_ai_response() can access live bot state.
-- Double-fire dedup: _processing set guards against the same message being
-  handled twice. This happens when the cog is reloaded (via !reload) while
-  a previous instance's listener is still registered — discord.py stacks
-  listeners on reload instead of replacing them. The set ensures exactly
-  one response per message ID regardless of how many listener copies exist.
-- _logged_users set: prevents _log_new_user webhook from firing more than
-  once per user per session, even if on_message somehow fires twice before
-  the first async mark_seen call completes.
 """
 import discord
 from discord.ext import commands
 from discord import app_commands
 import os
 import re
-import time
 from collections import defaultdict
 import groq
 import google.genai as genai
@@ -47,13 +26,6 @@ from cogs.state import (
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session
-
-# Optional psutil for live resource stats
-try:
-    import psutil as _psutil
-    _HAS_PSUTIL = True
-except ImportError:
-    _HAS_PSUTIL = False
 
 # ── API keys & models ─────────────────────────────────────────────────────────
 
@@ -70,6 +42,10 @@ HISTORY_LIMIT = 10
 MAX_TOKENS    = 800
 
 # ── Available models for /setmodel ───────────────────────────────────────────
+# key        → internal identifier stored per user
+# "label"    → shown in Discord UI
+# "desc"     → shown in the info embed
+# "supports_vision" → whether this model can handle image attachments
 
 MODELS: dict[str, dict] = {
     "auto": {
@@ -100,7 +76,7 @@ MODEL_CHOICES = [
 ]
 
 # ── Per-user model preference (in-memory) ─────────────────────────────────────
-
+# Resets on restart — intentional, no DB overhead needed for a UI preference.
 _user_model: dict[int, str] = {}
 
 def get_user_model(user_id: int) -> str:
@@ -108,32 +84,6 @@ def get_user_model(user_id: int) -> str:
 
 def set_user_model(user_id: int, model_key: str) -> None:
     _user_model[user_id] = model_key
-
-
-# ── Bot reference ─────────────────────────────────────────────────────────────
-# Set by AI.__init__ so module-level generate_ai_response() can access live
-# bot state for context injection without changing any call sites.
-_bot_ref: commands.Bot | None = None
-
-
-# ── Double-fire dedup ─────────────────────────────────────────────────────────
-# discord.py STACKS event listeners on cog reload — it does not replace the
-# old listener with the new one. After one !reload, on_message fires TWICE for
-# every message: once from the old cog instance, once from the new one.
-# This causes double replies AND double mark_seen / webhook calls.
-#
-# _processing holds message IDs currently being handled. The first listener
-# instance to claim an ID wins; any subsequent fires for the same ID return
-# immediately. IDs are removed once the response is fully sent.
-#
-# MODULE-LEVEL so the set is shared across all cog instances after a reload —
-# that is exactly the behaviour we need.
-_processing: set[int] = set()
-
-# Prevents the new-user webhook from firing more than once per user per
-# session, even if on_message fires twice before mark_seen completes.
-_logged_users: set[int] = set()
-
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -171,99 +121,6 @@ WARN_LIMIT_MSG = (
 
 _MENTION_RE = re.compile(r"<@!?\d+>")
 _JARVIS_RE  = re.compile(r"\bjarvis\b", re.IGNORECASE)
-
-# Matches "jarvis" only when it is being directly addressed at the START of a
-# message, optionally preceded by a greeting word. Examples that DO match:
-#   "jarvis what's up"   "hey jarvis"   "yo jarvis, help me"   "ok jarvis?"
-# Examples that do NOT match (casual mid-sentence mentions):
-#   "my mate jarvis said..."   "imagine if jarvis was here"   "lol jarvis cocker"
-_JARVIS_ADDRESSED_RE = re.compile(
-    r"^(?:hey|yo|ok|okay|oi|sup|hiya|hi|hello|alright|right)?\s*jarvis[\s,!?:]?",
-    re.IGNORECASE,
-)
-
-# ── Live context — keywords that suggest a status/health question ─────────────
-
-_STATUS_KEYWORDS = frozenset({
-    "status", "ping", "latency", "uptime", "ram", "memory", "cpu",
-    "how are you", "how r you", "you doing", "you ok", "you good",
-    "are you ok", "u ok", "u good", "alive", "online", "working",
-    "users", "servers", "guilds", "how many", "usage", "health",
-    "resources", "load", "performance", "speed", "slow", "fast",
-    "running", "everything ok", "all good", "doing well",
-})
-
-def _wants_bot_context(text: str) -> bool:
-    t = text.lower()
-    return any(kw in t for kw in _STATUS_KEYWORDS)
-
-
-def _get_live_context(bot: commands.Bot) -> str:
-    """
-    Build a compact real-time status string to inject into the system prompt.
-    Imports helpers from system.py so formatting logic is never duplicated.
-    Returns an empty string on any failure so it never breaks a response.
-    """
-    try:
-        from cogs.system import _START_TIME, _fmt_uptime, _fmt_bytes, _container_memory
-        from cogs.state import seen_users
-
-        lines = [
-            "[LIVE BOT STATUS — use these real numbers naturally in your reply, "
-            "don't just dump them as a list unless the user explicitly asked for stats]"
-        ]
-
-        uptime_str = _fmt_uptime(time.monotonic() - _START_TIME)
-        lines.append(f"Uptime: {uptime_str}")
-
-        ws_ms = round(bot.latency * 1000)
-        latency_feel = (
-            "excellent" if ws_ms < 80 else
-            "good"      if ws_ms < 150 else
-            "okay"      if ws_ms < 250 else
-            "a bit high"
-        )
-        lines.append(f"WebSocket latency: {ws_ms} ms ({latency_feel})")
-        lines.append(f"Guilds (servers): {len(bot.guilds)}")
-        lines.append(f"Seen users (total ever): {len(seen_users):,}")
-
-        if _HAS_PSUTIL:
-            try:
-                proc = _psutil.Process(os.getpid())
-                cpu  = _psutil.cpu_percent(interval=None)
-
-                cgroup = _container_memory()
-                if cgroup:
-                    ram_used, ram_total = cgroup
-                    ram_pct = ram_used / ram_total * 100
-                    lines.append(
-                        f"Container RAM: {_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)} "
-                        f"({ram_pct:.1f}% used)"
-                    )
-                else:
-                    vm = _psutil.virtual_memory()
-                    lines.append(
-                        f"Host RAM: {_fmt_bytes(vm.used)} / {_fmt_bytes(vm.total)} "
-                        f"({vm.percent:.1f}% used)"
-                    )
-
-                lines.append(f"Bot process RAM (RSS): {_fmt_bytes(proc.memory_info().rss)}")
-                lines.append(f"CPU usage: {cpu:.1f}%")
-            except Exception:
-                lines.append("(resource stats unavailable)")
-        else:
-            lines.append("(psutil not installed — CPU/RAM stats unavailable)")
-
-        lines.append(
-            "Weave these numbers into a natural, conversational reply. "
-            "If the user asked a casual 'how are you' style question, give a brief "
-            "human-feeling answer that mentions the key numbers without sounding robotic."
-        )
-        return "\n".join(lines)
-
-    except Exception:
-        return ""
-
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
@@ -475,15 +332,7 @@ async def generate_ai_response(
     else:
         system_prompt = base_prompt
 
-    # Inject live bot context when the message is asking about status/health.
-    # This gives the AI real numbers so it can give a proper answer instead
-    # of a generic "everything is fine" reply.
-    if user_message and _wants_bot_context(user_message) and _bot_ref is not None:
-        live_ctx = _get_live_context(_bot_ref)
-        if live_ctx:
-            system_prompt += "\n\n" + live_ctx
-
-    history   = _get_history(user_id, channel_id)
+    history  = _get_history(user_id, channel_id)
     has_image = bool(image_b64 and media_type)
 
     stored = (
@@ -499,30 +348,31 @@ async def generate_ai_response(
 
     if preferred == "groq":
         if has_image:
+            # Groq vision → Gemini fallback
             reply = (
                 await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-                or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
                 or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
             )
         else:
             reply = (
                 await _try_groq(history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)
                 or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)
             )
 
     elif preferred == "gemini-flash":
         reply = (
-            await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+            await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
             or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            or await _try_groq(history, system_prompt)
+            or await _try_groq(history, system_prompt)   # text fallback only
         )
 
     elif preferred == "gemini-lite":
         reply = (
-            await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+            await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
+            or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
+            or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
             or await _try_groq(history, system_prompt)
         )
 
@@ -530,17 +380,17 @@ async def generate_ai_response(
         if has_image:
             reply = (
                 await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-                or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
                 or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-                or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
                 or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
             )
         else:
             reply = (
                 await _try_groq(history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_FLASH, history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)
                 or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY,   GEMINI_MODEL_LITE,  history, system_prompt)
+                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt)
                 or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt)
             )
 
@@ -619,10 +469,6 @@ def _build_model_embed(user_id: int) -> discord.Embed:
 class AI(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Store bot reference at module level so generate_ai_response()
-        # (called from fun.py roast/compliment too) can access live bot state.
-        global _bot_ref
-        _bot_ref = bot
 
     # ── /chat ─────────────────────────────────────────────────────────────────
 
@@ -664,24 +510,6 @@ class AI(commands.Cog):
         if message.author.bot:
             return
 
-        # ── Double-fire dedup ─────────────────────────────────────────────────
-        # If this message ID is already being processed (by a stale listener
-        # left over from a previous cog reload), bail out immediately.
-        # The `in` check + `add` is effectively atomic inside a single-threaded
-        # asyncio event loop — no race condition possible here.
-        if message.id in _processing:
-            return
-        _processing.add(message.id)
-
-        try:
-            await self._handle_message(message)
-        finally:
-            # Always remove from the set, even if an exception occurs, so we
-            # don't permanently block that message ID.
-            _processing.discard(message.id)
-
-    async def _handle_message(self, message: discord.Message) -> None:
-        """Core message handling logic, separated so the dedup wrapper stays clean."""
         content = message.content.strip()
         lower   = content.lower()
 
@@ -692,12 +520,7 @@ class AI(commands.Cog):
             and isinstance(message.reference.resolved, discord.Message)
             and message.reference.resolved.author == self.bot.user
         )
-
-        # Only trigger on "jarvis" when it is being directly addressed at the
-        # START of the message (with optional greeting prefix).
-        # TRIGGERS:    "jarvis what's up" / "hey jarvis" / "yo jarvis, help"
-        # NO TRIGGER:  "my friend jarvis said" / "imagine jarvis was here"
-        named = bool(_JARVIS_ADDRESSED_RE.match(lower))
+        named = "jarvis" in lower
 
         if not (mentioned or replied_to_me or named):
             return
@@ -790,10 +613,7 @@ class AI(commands.Cog):
             await message.reply("Yes? What can I help you with?")
             return
 
-        # New-user check — guarded by _logged_users so the webhook never fires
-        # twice even if this function somehow runs concurrently for the same user.
-        if is_new_user(message.author.id) and message.author.id not in _logged_users:
-            _logged_users.add(message.author.id)
+        if is_new_user(message.author.id):
             mark_seen(message.author.id)
             await _log_new_user(message.author)
 
@@ -843,6 +663,7 @@ class AI(commands.Cog):
     @app_commands.choices(model=MODEL_CHOICES)
     async def slash_setmodel(self, interaction: discord.Interaction, model: app_commands.Choice[str]):
         set_user_model(interaction.user.id, model.value)
+        info = MODELS[model.value]
         await interaction.response.send_message(
             embed=_build_model_embed(interaction.user.id), ephemeral=True
         )
