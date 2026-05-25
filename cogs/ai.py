@@ -618,7 +618,15 @@ class AI(commands.Cog):
             await _log_new_user(message.author)
 
         guild_id = message.guild.id if message.guild else None
-        async with message.channel.typing():
+        try:
+            async with message.channel.typing():
+                reply = await generate_ai_response(
+                    message.author.id, user_text, message.channel.id,
+                    guild_id, image_b64, media_type, user=message.author,
+                )
+        except Exception as e:
+            # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
+            print(f"[Warning] Failed to show typing indicator: {type(e).__name__}: {e}")
             reply = await generate_ai_response(
                 message.author.id, user_text, message.channel.id,
                 guild_id, image_b64, media_type, user=message.author,
