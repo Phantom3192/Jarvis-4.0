@@ -15,6 +15,8 @@ from discord.ext import commands
 from discord import app_commands
 import os
 import re
+import asyncio
+import time
 from collections import defaultdict
 import groq
 import google.genai as genai
@@ -38,8 +40,8 @@ GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
-HISTORY_LIMIT = 10
-MAX_TOKENS    = 800
+HISTORY_LIMIT = 5   # Reduced for ultra-fast API responses
+MAX_TOKENS    = 512 # Reduced for snappier responses (~2 paragraphs)
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
@@ -137,6 +139,8 @@ _gemini_clients: dict[str, object] = {}
 private_history: dict[int, list[dict]] = defaultdict(list)
 group_history:   dict[int, list[dict]] = defaultdict(list)
 active_groups:   dict[int, set[int]]   = {}
+_system_prompt_cache: dict[tuple, str] = {}  # Cache system prompts to avoid reconstruction
+_response_cache: dict[tuple, tuple[str, float]] = {}  # Cache responses for 60s (message_hash, timestamp, response)
 
 
 def _is_in_group(user_id: int, channel_id: int) -> bool:
@@ -148,6 +152,13 @@ def _get_history(user_id: int, channel_id: int) -> list[dict]:
 def _trim(history: list[dict]) -> None:
     if len(history) > HISTORY_LIMIT:
         del history[:-HISTORY_LIMIT]
+
+def _background_record(user_id: int, user_message: str, reply: str) -> None:
+    """Fire-and-forget task to record message to DB without blocking response."""
+    try:
+        record_message(user_id, user_message, reply)
+    except Exception as e:
+        print(f"[Background Task] DB record error: {e}")
 
 def clear_history(user_id: int, channel_id: int | None = None) -> None:
     if channel_id and _is_in_group(user_id, channel_id):
@@ -297,6 +308,48 @@ async def _try_gemini(
         return None
 
 
+async def _race_providers(*tasks: asyncio.Task) -> str | None:
+    """
+    Race multiple API calls. Returns the first successful response.
+    Cancels remaining tasks after first success.
+    """
+    if not tasks:
+        return None
+    
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=15
+        )
+    except Exception:
+        return None
+    
+    # Cancel pending tasks
+    for task in pending:
+        task.cancel()
+    
+    # Get the first successful result
+    for task in done:
+        try:
+            result = task.result()
+            if result:
+                return result
+        except (asyncio.CancelledError, Exception):
+            continue
+    
+    # All failed, wait for remaining before timeout
+    for task in pending:
+        try:
+            result = await asyncio.wait_for(task, timeout=5)
+            if result:
+                return result
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            continue
+    
+    return None
+
+
 # ── Core response ─────────────────────────────────────────────────────────────
 
 async def generate_ai_response(
@@ -311,6 +364,14 @@ async def generate_ai_response(
     if is_ai_rate_limited(user_id):
         return DAILY_LIMIT_MSG.format(limit=DAILY_AI_LIMIT)
 
+    # Quick cache check — if same message asked within 60s, return cached response
+    if not image_b64:  # Only cache text responses
+        cache_key = (user_id, channel_id, user_message)
+        if cache_key in _response_cache:
+            cached_response, cache_time = _response_cache[cache_key]
+            if time.time() - cache_time < 60:  # Cache for 60 seconds
+                return cached_response
+
     base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
     in_group    = _is_in_group(user_id, channel_id)
 
@@ -319,20 +380,26 @@ async def generate_ai_response(
         username = user.name
         if in_group:
             n = len(active_groups[channel_id])
-            system_prompt = (
-                base_prompt +
-                f"\n\nThis is a shared group conversation between {n} people. "
-                f"Messages are prefixed with the sender's name so you know who said what. "
-                f"The person who just sent this message is {name} (username: {username}). "
-                f"Only mention their name/username if they directly ask about their own identity."
-            )
+            cache_key = (user_id, "group", n)
+            if cache_key not in _system_prompt_cache:
+                _system_prompt_cache[cache_key] = (
+                    base_prompt +
+                    f"\n\nThis is a shared group conversation between {n} people. "
+                    f"Messages are prefixed with the sender's name so you know who said what. "
+                    f"The person who just sent this message is {name} (username: {username}). "
+                    f"Only mention their name/username if they directly ask about their own identity."
+                )
+            system_prompt = _system_prompt_cache[cache_key]
         else:
-            system_prompt = (
-                base_prompt +
-                f"\n\nThe person messaging you is {name} (username: {username}). "
-                f"Only reveal this if they directly ask who they are. "
-                f"Never volunteer their name or username unprompted."
-            )
+            cache_key = (user_id, "private")
+            if cache_key not in _system_prompt_cache:
+                _system_prompt_cache[cache_key] = (
+                    base_prompt +
+                    f"\n\nThe person messaging you is {name} (username: {username}). "
+                    f"Only reveal this if they directly ask who they are. "
+                    f"Never volunteer their name or username unprompted."
+                )
+            system_prompt = _system_prompt_cache[cache_key]
     else:
         system_prompt = base_prompt
 
@@ -347,56 +414,62 @@ async def generate_ai_response(
     history.append({"role": "user", "content": stored})
     _trim(history)
 
-    # ── Route based on user's preferred model ─────────────────────────────────
+    # ── Route based on user's preferred model with PARALLEL fallbacks ──────────
     preferred = get_user_model(user_id)
 
     if preferred == "groq":
         if has_image:
-            # Groq vision → Gemini fallback
-            reply = (
-                await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            )
+            # Groq vision + Gemini in parallel
+            tasks = [
+                asyncio.create_task(_try_groq_vision(history, system_prompt, image_b64, media_type, user_message)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+            ]
+            reply = await _race_providers(*tasks)
         else:
-            reply = (
-                await _try_groq(history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)
-            )
+            # Groq + Gemini in parallel
+            tasks = [
+                asyncio.create_task(_try_groq(history, system_prompt)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)),
+            ]
+            reply = await _race_providers(*tasks)
 
     elif preferred == "gemini-flash":
-        reply = (
-            await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            or await _try_groq(history, system_prompt)   # text fallback only
-        )
+        tasks = [
+            asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+            asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+            asyncio.create_task(_try_groq(history, system_prompt)),
+        ]
+        reply = await _race_providers(*tasks)
 
     elif preferred == "gemini-lite":
-        reply = (
-            await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
-            or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-            or await _try_groq(history, system_prompt)
-        )
+        tasks = [
+            asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)),
+            asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)),
+            asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+            asyncio.create_task(_try_groq(history, system_prompt)),
+        ]
+        reply = await _race_providers(*tasks)
 
-    else:  # "auto" — original waterfall
+    else:  # "auto" — all providers in parallel for fastest response
         if has_image:
-            reply = (
-                await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
-                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
-                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)
-            )
+            tasks = [
+                asyncio.create_task(_try_groq_vision(history, system_prompt, image_b64, media_type, user_message)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)),
+            ]
         else:
-            reply = (
-                await _try_groq(history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt)
-                or await _try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt)
-            )
+            tasks = [
+                asyncio.create_task(_try_groq(history, system_prompt)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE,  history, system_prompt)),
+                asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE,  history, system_prompt)),
+            ]
+        reply = await _race_providers(*tasks)
 
     if not reply:
         history.pop()
@@ -404,13 +477,23 @@ async def generate_ai_response(
         return RATE_LIMIT_MSG
 
     history.append({"role": "assistant", "content": reply})
-    _trim(history)
-    record_message(user_id, user_message, reply)
+    
+    # Only trim if necessary (avoid unnecessary list operations)
+    if len(history) > HISTORY_LIMIT:
+        _trim(history)
+    
+    # Fire-and-forget: record to DB in background, don't block response
+    asyncio.create_task(asyncio.to_thread(_background_record, user_id, user_message, reply))
 
     new_count = increment_ai_usage(user_id)
     if new_count == WARN_AT:
         remaining = DAILY_AI_LIMIT - new_count
         reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=DAILY_AI_LIMIT, remaining=remaining)}"
+
+    # Cache text responses for 60 seconds (skip if has image)
+    if not image_b64:
+        cache_key = (user_id, channel_id, user_message)
+        _response_cache[cache_key] = (reply, time.time())
 
     return reply
 
