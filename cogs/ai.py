@@ -343,43 +343,47 @@ async def _try_gemini(
 
 async def _race_providers(*tasks: asyncio.Task) -> str | None:
     """
-    Race multiple API calls. Returns the first successful response.
-    Cancels remaining tasks after first success.
+    Race multiple API calls. Returns the first SUCCESSFUL (non-None) response.
+    Keeps waiting for remaining tasks if early completions return None (e.g. 429s).
+    Cancels remaining tasks only after a valid result is found.
     """
     if not tasks:
         return None
-    
-    try:
-        done, pending = await asyncio.wait(
-            tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-            timeout=15
-        )
-    except Exception:
-        return None
-    
-    # Cancel pending tasks
-    for task in pending:
-        task.cancel()
-    
-    # Get the first successful result
-    for task in done:
+
+    remaining = set(tasks)
+    deadline = asyncio.get_event_loop().time() + 20  # overall timeout
+
+    while remaining:
+        time_left = deadline - asyncio.get_event_loop().time()
+        if time_left <= 0:
+            break
         try:
-            result = task.result()
-            if result:
-                return result
-        except (asyncio.CancelledError, Exception):
-            continue
-    
-    # All failed, wait for remaining before timeout
-    for task in pending:
-        try:
-            result = await asyncio.wait_for(task, timeout=5)
-            if result:
-                return result
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            continue
-    
+            done, remaining = await asyncio.wait(
+                remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=time_left,
+            )
+        except Exception:
+            break
+
+        if not done:
+            break  # timeout hit with nothing completing
+
+        for task in done:
+            try:
+                result = task.result()
+                if result:
+                    # Got a valid response — cancel everything still running
+                    for t in remaining:
+                        t.cancel()
+                    return result
+            except Exception:
+                continue
+        # All completed tasks returned None — loop and wait for the rest
+
+    # Nothing succeeded — cancel any stragglers
+    for t in remaining:
+        t.cancel()
     return None
 
 
