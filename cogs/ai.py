@@ -128,14 +128,9 @@ _groq_client: groq.AsyncGroq | None = (
     groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 )
 
-# ── Gemini configure cache ────────────────────────────────────────────────────
-
-_gemini_configured: set[str] = set()
-
-def _ensure_gemini_configured(api_key: str) -> None:
-    if api_key not in _gemini_configured:
-        genai.configure(api_key=api_key)
-        _gemini_configured.add(api_key)
+# ── Gemini client cache (new google-generativeai API) ──────────────────────
+# The newer SDK doesn't use configure() — we pass api_key directly to GenerativeModel
+_gemini_clients: dict[str, object] = {}
 
 # ── History stores ────────────────────────────────────────────────────────────
 
@@ -280,8 +275,8 @@ async def _try_gemini(
     if not api_key:
         return None
     try:
-        _ensure_gemini_configured(api_key)
-        model   = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
+        # Use the newer google-generativeai API — pass api_key directly to GenerativeModel
+        model   = genai.GenerativeModel(model_name=model_name, api_key=api_key, system_instruction=system_prompt)
         history = [
             {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
             for m in messages[:-1]
