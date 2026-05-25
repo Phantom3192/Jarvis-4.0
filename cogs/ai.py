@@ -151,6 +151,17 @@ else:
 
 _gemini_clients: dict[str, object] = {}
 
+# ── Gemini circuit breaker ─────────────────────────────────────────────────────
+# When a key hits 429, skip it for _GEMINI_BACKOFF seconds so Groq responds fast.
+_GEMINI_BACKOFF = 60  # seconds
+_gemini_backoff_until: dict[str, float] = {}
+
+def _gemini_is_backed_off(api_key: str) -> bool:
+    return time.time() < _gemini_backoff_until.get(api_key, 0)
+
+def _gemini_set_backoff(api_key: str) -> None:
+    _gemini_backoff_until[api_key] = time.time() + _GEMINI_BACKOFF
+
 # ── History stores ────────────────────────────────────────────────────────────
 
 private_history: dict[int, list[dict]] = defaultdict(list)
@@ -314,6 +325,9 @@ async def _try_gemini(
 ) -> str | None:
     if not api_key or not genai:
         return None
+    # Skip immediately if this key is in backoff (recently 429'd)
+    if _gemini_is_backed_off(api_key):
+        return None
     try:
         # Configure API key before creating the model (google.generativeai requires this)
         genai.configure(api_key=api_key)
@@ -332,12 +346,16 @@ async def _try_gemini(
             resp = await asyncio.wait_for(chat.send_message_async(last), timeout=PROVIDER_TIMEOUT)
         return resp.text.strip()
     except asyncio.TimeoutError:
-        print(f"[Gemini {model_name} Error] Timeout after {PROVIDER_TIMEOUT}s")
+        print(f"[Gemini {model_name}] Timeout after {PROVIDER_TIMEOUT}s")
         return None
     except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)[:100]
-        print(f"[Gemini {model_name} Error] {error_type}: {error_msg}")
+        error_msg = str(e)
+        # 429 quota exceeded — back off silently, no spam
+        if "429" in error_msg or "ResourceExhausted" in type(e).__name__ or "ResourceExhausted" in error_msg:
+            _gemini_set_backoff(api_key)
+            print(f"[Gemini {model_name}] 429 quota hit — pausing this key for {_GEMINI_BACKOFF}s, falling back to Groq.")
+            return None
+        print(f"[Gemini {model_name} Error] {type(e).__name__}: {error_msg[:100]}")
         return None
 
 
