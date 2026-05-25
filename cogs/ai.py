@@ -230,7 +230,10 @@ async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
             max_tokens=MAX_TOKENS,
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)[:100]  # First 100 chars
+        print(f"[Groq API Error] {error_type}: {error_msg}")
         return None
 
 
@@ -259,7 +262,10 @@ async def _try_groq_vision(
             max_tokens=MAX_TOKENS,
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)[:100]  # First 100 chars
+        print(f"[Groq Vision Error] {error_type}: {error_msg}")
         return None
 
 
@@ -289,7 +295,10 @@ async def _try_gemini(
         else:
             resp = await chat.send_message_async(last)
         return resp.text.strip()
-    except Exception:
+    except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)[:100]  # First 100 chars
+        print(f"[Gemini {model_name} Error] {error_type}: {error_msg}")
         return None
 
 
@@ -396,6 +405,7 @@ async def generate_ai_response(
 
     if not reply:
         history.pop()
+        print(f"[AI Response] All providers failed for user {user_id} in channel {channel_id}")
         return RATE_LIMIT_MSG
 
     history.append({"role": "assistant", "content": reply})
