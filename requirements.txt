@@ -1,7 +1,7 @@
 discord.py
 python-dotenv
 groq
-google-generativeai
+google-genai
 aiohttp
 libsql-experimental
 psutil 

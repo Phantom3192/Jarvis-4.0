@@ -19,10 +19,7 @@ import asyncio
 import time
 from collections import defaultdict
 import groq
-try:
-    import google.generativeai as genai
-except ImportError:
-    import google.genai as genai
+import importlib
 import base64
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
@@ -134,8 +131,24 @@ _groq_client: groq.AsyncGroq | None = (
     groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 )
 
-# ── Gemini client cache (new google-generativeai API) ──────────────────────
-# The newer SDK doesn't use configure() — we pass api_key directly to GenerativeModel
+# ── Gemini package detection ───────────────────────────────────────────────
+_GENAI_PACKAGE: str | None = None
+genai = None
+for _name in ("google.genai", "google.generativeai"):
+    try:
+        module = importlib.import_module(_name)
+        if hasattr(module, "GenerativeModel"):
+            genai = module
+            _GENAI_PACKAGE = _name
+            break
+    except ImportError:
+        continue
+
+if genai is None:
+    print("⚠️ Warning: No supported Google GenAI package available. Gemini will be disabled.")
+else:
+    print(f"✅ Using Google GenAI package: {_GENAI_PACKAGE}")
+
 _gemini_clients: dict[str, object] = {}
 
 # ── History stores ────────────────────────────────────────────────────────────
@@ -299,10 +312,10 @@ async def _try_gemini(
     image_b64: str | None = None,
     media_type: str | None = None,
 ) -> str | None:
-    if not api_key:
+    if not api_key or not genai:
         return None
     try:
-        # Use the newer google-generativeai API — pass api_key directly to GenerativeModel
+        # Use the available Google GenAI API — pass api_key directly to GenerativeModel
         model   = genai.GenerativeModel(model_name=model_name, api_key=api_key, system_instruction=system_prompt)
         history = [
             {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
