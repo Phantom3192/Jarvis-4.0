@@ -232,6 +232,18 @@ def record_message(user_id: int, user_text: str, reply_text: str) -> None:
 def get_stats(user_id: int) -> dict | None:
     return _data["stats"].get(str(user_id))
 
+def get_all_stats() -> dict[str, dict]:
+    """Return a copy of all user stats, keyed by str(user_id)."""
+    return dict(_data["stats"])
+
+def get_all_bans() -> dict[str, dict]:
+    """Return a copy of all active bans, keyed by str(user_id)."""
+    return dict(_data["bans"])
+
+def get_all_rate_limits() -> dict[str, dict]:
+    """Return a copy of all rate limit entries, keyed by str(user_id)."""
+    return dict(_data["rate_limits"])
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GUILD PROMPTS
