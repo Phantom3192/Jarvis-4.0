@@ -24,7 +24,7 @@ import base64
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
     is_ai_rate_limited, increment_ai_usage, get_ai_usage,
-    DAILY_AI_LIMIT, WARN_AT, check_burst_and_maybe_timeout,
+    DAILY_AI_LIMIT, WARN_AT, check_burst_and_maybe_timeout, check_cooldown, get_setting,
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session
@@ -685,6 +685,10 @@ class AI(commands.Cog):
                 await message.reply(
                     f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to flooding."
                 )
+                return
+
+            if not check_cooldown(message.author.id):
+                await message.add_reaction("⏳")
                 return
 
         # ── Group start ────────────────────────────────────────────────────

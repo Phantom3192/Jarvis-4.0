@@ -345,3 +345,22 @@ def check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
         return False, timeout
 
     return True, None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMAND COOLDOWN
+# ══════════════════════════════════════════════════════════════════════════════
+
+_last_command_time: dict[int, float] = {}
+
+def check_cooldown(user_id: int) -> bool:
+    """Check if user has waited long enough since last command/message.
+    Returns True if cooldown passed, False if still cooling down.
+    """
+    now = time.monotonic()
+    last = _last_command_time.get(user_id)
+    cooldown = float(get_setting("user_command_cooldown", 2.0))
+    if last is None or (now - last) >= cooldown:
+        _last_command_time[user_id] = now
+        return True
+    return False
