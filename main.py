@@ -19,6 +19,7 @@ from discord.ext import commands
 import os
 import asyncio
 import logging
+import time
 from dotenv import load_dotenv
 from cogs.state import is_bot_banned
 import cogs.http_session as http_session
@@ -56,6 +57,19 @@ COGS = [
 # Track users we've already DM'd about their ban this session — avoid spamming.
 _dm_sent_bans: set[int] = set()
 
+# Simple per-user command cooldown to prevent spam.
+USER_COMMAND_COOLDOWN = 2.0  # seconds
+_last_command_time: dict[int, float] = {}
+
+
+def _command_cooldown_check(user_id: int) -> bool:
+    now = time.monotonic()
+    last = _last_command_time.get(user_id)
+    if last is None or (now - last) >= USER_COMMAND_COOLDOWN:
+        _last_command_time[user_id] = now
+        return True
+    return False
+
 
 async def _notify_banned(user: discord.User | discord.Member) -> None:
     """DM a banned user once per session to inform them."""
@@ -74,6 +88,11 @@ async def global_ban_check(ctx: commands.Context) -> bool:
         await ctx.reply("🚫 You are banned from using Jarvis.")
         await _notify_banned(ctx.author)
         return False
+    if not _command_cooldown_check(ctx.author.id):
+        await ctx.reply(
+            f"⚠️ Please wait {int(USER_COMMAND_COOLDOWN)} seconds before sending another Jarvis command."
+        )
+        return False
     return True
 
 
@@ -84,7 +103,18 @@ async def slash_ban_check(interaction: discord.Interaction) -> bool:
         return False
     return True
 
-bot.tree.interaction_check = slash_ban_check
+async def slash_interaction_check(interaction: discord.Interaction) -> bool:
+    if not await slash_ban_check(interaction):
+        return False
+    if not _command_cooldown_check(interaction.user.id):
+        await interaction.response.send_message(
+            f"⚠️ Please wait {int(USER_COMMAND_COOLDOWN)} seconds before sending another Jarvis command.",
+            ephemeral=True,
+        )
+        return False
+    return True
+
+bot.tree.interaction_check = slash_interaction_check
 
 
 @bot.event

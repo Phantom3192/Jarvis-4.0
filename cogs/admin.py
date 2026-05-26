@@ -82,10 +82,19 @@ async def _format_ban_lines(bot: commands.Bot) -> list[str]:
     return lines
 
 
-def _ban_list_text(lines: list[str]) -> str:
+def _build_ban_list_embed(lines: list[str]) -> discord.Embed:
     chunk = "\n\n".join(lines[:20])
     note  = f"\n*...and {len(lines) - 20} more.*" if len(lines) > 20 else ""
-    return f"🚫 **Bot-banned users ({len(bot_bans)}):**\n\n{chunk}{note}"
+    description = f"{chunk}{note}"
+    if len(description) > 4000:
+        description = description[:3997] + "..."
+    embed = discord.Embed(
+        title=f"🚫 Bot-banned users ({len(bot_bans)})",
+        description=description,
+        color=discord.Color.red(),
+    )
+    embed.set_footer(text="Use !global-unban <user_id> to unban a user.")
+    return embed
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -257,7 +266,7 @@ class Admin(commands.Cog):
             await ctx.reply("✅ No users are currently banned from Jarvis.")
             return
         lines = await _format_ban_lines(self.bot)
-        await ctx.reply(_ban_list_text(lines))
+        await ctx.reply(embed=_build_ban_list_embed(lines))
 
     @commands.command(name="resetlimit")
     async def prefix_resetlimit(self, ctx: commands.Context, user: discord.User = None):
@@ -339,7 +348,7 @@ class Admin(commands.Cog):
             await interaction.followup.send("✅ No users are currently banned from Jarvis.")
             return
         lines = await _format_ban_lines(self.bot)
-        await interaction.followup.send(_ban_list_text(lines))
+        await interaction.followup.send(embed=_build_ban_list_embed(lines))
 
     @app_commands.command(name="resetlimit", description="Reset a user's daily AI message limit (admin only)")
     @app_commands.describe(user="The user whose limit to reset")
