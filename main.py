@@ -81,13 +81,16 @@ def _check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
     while dq and dq[0] < cutoff:
         dq.popleft()
 
-    if len(dq) > limit:
+    if len(dq) >= limit:
         # Timeout user at bot-level (temporary bot ban)
         bot_bans[str(user_id)] = {
             "reason": f"Flooding commands ({len(dq)} in {int(window)}s)",
             "expires": time.time() + timeout,
         }
         save_bans()
+        # clear record so we don't repeatedly re-timeout while banned
+        dq.clear()
+        print(f"[burst] Timed out user {user_id}: {len(dq)} hits (limit={limit}, window={window}s, timeout={timeout}s)")
         return False, timeout
     return True, None
 
