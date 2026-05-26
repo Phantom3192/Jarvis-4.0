@@ -18,6 +18,7 @@ import os
 import time
 import asyncio
 import json
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -310,3 +311,37 @@ def set_setting(key: str, value) -> None:
         _data["settings"] = {}
     _data["settings"][key] = value
     _schedule_save("settings")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BURST PROTECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+_burst_records: dict[int, deque] = {}
+
+
+def check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
+    now = time.monotonic()
+    window = float(get_setting("burst_window_seconds", 60.0))
+    limit = int(get_setting("burst_limit_count", 20))
+    timeout = float(get_setting("burst_timeout_seconds", 300.0))
+
+    dq = _burst_records.setdefault(user_id, deque())
+    dq.append(now)
+    cutoff = now - window
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+    print(f"[burst] user {user_id} count={len(dq)} (limit={limit})")
+
+    if len(dq) >= limit:
+        bot_bans[str(user_id)] = {
+            "reason": f"Flooding commands ({len(dq)} in {int(window)}s)",
+            "expires": time.time() + timeout,
+        }
+        save_bans()
+        dq.clear()
+        print(f"[burst] Timed out user {user_id}: {limit} hits (limit={limit}, window={window}s, timeout={timeout}s)")
+        return False, timeout
+
+    return True, None

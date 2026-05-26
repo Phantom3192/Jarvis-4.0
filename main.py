@@ -21,8 +21,7 @@ import asyncio
 import logging
 import time
 from dotenv import load_dotenv
-from collections import deque
-from cogs.state import is_bot_banned, init_db, get_setting, set_setting, bot_bans, save_bans
+from cogs.state import is_bot_banned, init_db, get_setting, set_setting, check_burst_and_maybe_timeout
 import cogs.http_session as http_session
 from cogs.history import init_history
 
@@ -62,41 +61,6 @@ _dm_sent_bans: set[int] = set()
 USER_COMMAND_COOLDOWN = 2.0  # default seconds
 _last_command_time: dict[int, float] = {}
 
-# Burst tracking: per-user deque of recent command timestamps (monotonic seconds)
-_burst_records: dict[int, deque] = {}
-
-
-def _check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
-    """Record a command for user and timeout them if they exceed burst limits.
-    Returns (allowed, timeout_seconds_if_timed_out).
-    """
-    now = time.monotonic()
-    window = float(get_setting("burst_window_seconds", 60.0))
-    limit  = int(get_setting("burst_limit_count", 20))
-    timeout = float(get_setting("burst_timeout_seconds", 300.0))
-
-    dq = _burst_records.setdefault(user_id, deque())
-    dq.append(now)
-    cutoff = now - window
-    while dq and dq[0] < cutoff:
-        dq.popleft()
-    # debug: show current burst count for this user
-    print(f"[burst] user {user_id} count={len(dq)} (limit={limit})")
-
-    if len(dq) >= limit:
-        # Timeout user at bot-level (temporary bot ban)
-        bot_bans[str(user_id)] = {
-            "reason": f"Flooding commands ({len(dq)} in {int(window)}s)",
-            "expires": time.time() + timeout,
-        }
-        save_bans()
-        # clear record so we don't repeatedly re-timeout while banned
-        dq.clear()
-        print(f"[burst] Timed out user {user_id}: {len(dq)} hits (limit={limit}, window={window}s, timeout={timeout}s)")
-        return False, timeout
-    return True, None
-
-
 def _command_cooldown_check(user_id: int) -> bool:
     now = time.monotonic()
     last = _last_command_time.get(user_id)
@@ -124,10 +88,16 @@ async def global_ban_check(ctx: commands.Context) -> bool:
         await ctx.reply("🚫 You are banned from using Jarvis.")
         await _notify_banned(ctx.author)
         return False
+
+    if await bot.is_owner(ctx.author):
+        return True
+
     # Burst/timeout check
-    allowed, t = _check_burst_and_maybe_timeout(ctx.author.id)
+    allowed, t = check_burst_and_maybe_timeout(ctx.author.id)
     if not allowed:
-        await ctx.reply(f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding.")
+        await ctx.reply(
+            f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding."
+        )
         await _notify_banned(ctx.author)
         return False
     if not _command_cooldown_check(ctx.author.id):
@@ -149,8 +119,12 @@ async def slash_ban_check(interaction: discord.Interaction) -> bool:
 async def slash_interaction_check(interaction: discord.Interaction) -> bool:
     if not await slash_ban_check(interaction):
         return False
+
+    if await bot.is_owner(interaction.user):
+        return True
+
     # Burst/timeout check for interactions
-    allowed, t = _check_burst_and_maybe_timeout(interaction.user.id)
+    allowed, t = check_burst_and_maybe_timeout(interaction.user.id)
     if not allowed:
         await interaction.response.send_message(
             f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding.",

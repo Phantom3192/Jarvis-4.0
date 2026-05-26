@@ -24,7 +24,7 @@ import base64
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
     is_ai_rate_limited, increment_ai_usage, get_ai_usage,
-    DAILY_AI_LIMIT, WARN_AT,
+    DAILY_AI_LIMIT, WARN_AT, check_burst_and_maybe_timeout,
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session
@@ -678,6 +678,14 @@ class AI(commands.Cog):
         if is_bot_banned(message.author.id):
             await message.reply("🚫 You've been banned from Jarvis. Contact the bot owner if you think this is a mistake.")
             return
+
+        if not await self.bot.is_owner(message.author):
+            allowed, t = check_burst_and_maybe_timeout(message.author.id)
+            if not allowed:
+                await message.reply(
+                    f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to flooding."
+                )
+                return
 
         # ── Group start ────────────────────────────────────────────────────
         if re.search(r"\b(group|public)\s+conversation\b", lower):
