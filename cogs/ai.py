@@ -31,7 +31,24 @@ from cogs.http_session import get_session
 
 # ── API keys & models ─────────────────────────────────────────────────────────
 
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
+# Groq — dynamic multi-key pool.
+# Add keys to .env as GROQ_API_KEY, GROQ_API_KEY_1, GROQ_API_KEY_2, GROQ_API_KEY_3 ...
+# The bot picks them all up automatically — no code changes needed.
+def _load_groq_keys() -> list[str]:
+    keys = []
+    # Accept bare GROQ_API_KEY for backward compat
+    base = os.getenv("GROQ_API_KEY", "").strip()
+    if base:
+        keys.append(base)
+    # Scan GROQ_API_KEY_1, GROQ_API_KEY_2, ... up to 20
+    for i in range(1, 21):
+        k = os.getenv(f"GROQ_API_KEY_{i}", "").strip()
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+GROQ_API_KEYS: list[str] = _load_groq_keys()
+
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
 
@@ -42,7 +59,8 @@ GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
 HISTORY_LIMIT = 5   # Reduced for ultra-fast API responses
 MAX_TOKENS    = 400 # Snappier responses — still ~2 solid paragraphs
-PROVIDER_TIMEOUT = 8   # seconds per provider call — Groq rarely needs more than 3s
+PROVIDER_TIMEOUT = 15  # seconds per provider call — increased from 8s to handle Groq slowness
+GROQ_RETRIES  = 2   # how many times to retry Groq on timeout before giving up
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
@@ -125,11 +143,42 @@ WARN_LIMIT_MSG = (
 _MENTION_RE = re.compile(r"<@!?\d+>")
 _JARVIS_RE  = re.compile(r"\bjarvis\b", re.IGNORECASE)
 
-# ── Groq client ───────────────────────────────────────────────────────────────
+# ── Groq client pool ──────────────────────────────────────────────────────────
+# One AsyncGroq client per key. Keys are rotated round-robin and backed off
+# individually on rate limit / repeated timeout — same pattern as Gemini.
 
-_groq_client: groq.AsyncGroq | None = (
-    groq.AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-)
+_groq_clients: list[tuple[str, groq.AsyncGroq]] = [
+    (key, groq.AsyncGroq(api_key=key)) for key in GROQ_API_KEYS
+]
+
+_GROQ_BACKOFF   = 30  # seconds a Groq key is skipped after rate-limit / repeated timeout
+_groq_backoff_until: dict[str, float] = {}
+_groq_rr_index  = 0   # round-robin cursor
+
+if _groq_clients:
+    print(f"✅ Groq pool: {len(_groq_clients)} key(s) loaded")
+else:
+    print("⚠️  No GROQ_API_KEY* found — Groq disabled")
+
+def _groq_is_backed_off(api_key: str) -> bool:
+    return time.time() < _groq_backoff_until.get(api_key, 0)
+
+def _groq_set_backoff(api_key: str) -> None:
+    _groq_backoff_until[api_key] = time.time() + _GROQ_BACKOFF
+    print(f"[Groq] Key …{api_key[-6:]} backed off for {_GROQ_BACKOFF}s")
+
+def _next_groq_client() -> tuple[str, groq.AsyncGroq] | None:
+    """Return the next available (non-backed-off) Groq client, round-robin."""
+    global _groq_rr_index
+    if not _groq_clients:
+        return None
+    n = len(_groq_clients)
+    for _ in range(n):
+        key, client = _groq_clients[_groq_rr_index % n]
+        _groq_rr_index = (_groq_rr_index + 1) % n
+        if not _groq_is_backed_off(key):
+            return key, client
+    return None  # all keys backed off
 
 # ── Gemini package detection ───────────────────────────────────────────────
 _GENAI_PACKAGE: str | None = None
@@ -153,7 +202,7 @@ _gemini_clients: dict[str, object] = {}
 
 # ── Gemini circuit breaker ─────────────────────────────────────────────────────
 # When a key hits 429, skip it for _GEMINI_BACKOFF seconds so Groq responds fast.
-_GEMINI_BACKOFF = 60  # seconds
+_GEMINI_BACKOFF = 20  # seconds — reduced from 60s; keys recover faster, Lite model is separate quota
 _gemini_backoff_until: dict[str, float] = {}
 
 def _gemini_is_backed_off(api_key: str) -> bool:
@@ -255,26 +304,42 @@ async def _fetch_image(attachment: discord.Attachment) -> tuple[str, str] | None
 # ── AI providers ──────────────────────────────────────────────────────────────
 
 async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
-    if not _groq_client:
+    """Try all available Groq keys round-robin until one succeeds or all fail."""
+    if not _groq_clients:
         return None
-    try:
-        resp = await asyncio.wait_for(
-            _groq_client.chat.completions.create(
-                model=GROQ_MODEL_TEXT,
-                messages=[{"role": "system", "content": system_prompt}] + messages,
-                max_tokens=MAX_TOKENS,
-            ),
-            timeout=PROVIDER_TIMEOUT,
-        )
-        return resp.choices[0].message.content.strip()
-    except asyncio.TimeoutError:
-        print(f"[Groq API Error] Timeout after {PROVIDER_TIMEOUT}s")
-        return None
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)[:100]
-        print(f"[Groq API Error] {error_type}: {error_msg}")
-        return None
+    tried: set[str] = set()
+    while True:
+        pick = _next_groq_client()
+        if pick is None or pick[0] in tried:
+            break  # all keys exhausted or backed off
+        api_key, client = pick
+        tried.add(api_key)
+        for attempt in range(1, GROQ_RETRIES + 1):
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=GROQ_MODEL_TEXT,
+                        messages=[{"role": "system", "content": system_prompt}] + messages,
+                        max_tokens=MAX_TOKENS,
+                    ),
+                    timeout=PROVIDER_TIMEOUT,
+                )
+                return resp.choices[0].message.content.strip()
+            except asyncio.TimeoutError:
+                print(f"[Groq …{api_key[-6:]}] Timeout after {PROVIDER_TIMEOUT}s (attempt {attempt}/{GROQ_RETRIES})")
+                if attempt == GROQ_RETRIES:
+                    _groq_set_backoff(api_key)  # repeated timeout → back off this key
+                else:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                error_msg = str(e)[:120]
+                if "429" in error_msg or "rate" in error_msg.lower():
+                    print(f"[Groq …{api_key[-6:]}] Rate limited — backing off: {error_msg}")
+                    _groq_set_backoff(api_key)
+                else:
+                    print(f"[Groq …{api_key[-6:]}] {type(e).__name__}: {error_msg}")
+                break  # move to next key
+    return None
 
 
 async def _try_groq_vision(
@@ -284,35 +349,47 @@ async def _try_groq_vision(
     media_type: str,
     user_text: str,
 ) -> str | None:
-    if not _groq_client:
+    """Try vision model across all available Groq keys."""
+    if not _groq_clients:
         return None
-    try:
-        history = [{"role": "system", "content": system_prompt}] + messages[:-1]
-        content: list[dict] = []
-        if user_text:
-            content.append({"type": "text", "text": user_text})
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
-        })
-        history.append({"role": "user", "content": content})
-        resp = await asyncio.wait_for(
-            _groq_client.chat.completions.create(
-                model=GROQ_MODEL_VISION,
-                messages=history,
-                max_tokens=MAX_TOKENS,
-            ),
-            timeout=PROVIDER_TIMEOUT,
-        )
-        return resp.choices[0].message.content.strip()
-    except asyncio.TimeoutError:
-        print(f"[Groq Vision Error] Timeout after {PROVIDER_TIMEOUT}s")
-        return None
-    except Exception as e:
-        error_type = type(e).__name__
-        error_msg = str(e)[:100]
-        print(f"[Groq Vision Error] {error_type}: {error_msg}")
-        return None
+    tried: set[str] = set()
+    while True:
+        pick = _next_groq_client()
+        if pick is None or pick[0] in tried:
+            break
+        api_key, client = pick
+        tried.add(api_key)
+        try:
+            history = [{"role": "system", "content": system_prompt}] + messages[:-1]
+            content: list[dict] = []
+            if user_text:
+                content.append({"type": "text", "text": user_text})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{image_b64}"},
+            })
+            history.append({"role": "user", "content": content})
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=GROQ_MODEL_VISION,
+                    messages=history,
+                    max_tokens=MAX_TOKENS,
+                ),
+                timeout=PROVIDER_TIMEOUT,
+            )
+            return resp.choices[0].message.content.strip()
+        except asyncio.TimeoutError:
+            print(f"[Groq Vision …{api_key[-6:]}] Timeout after {PROVIDER_TIMEOUT}s — trying next key")
+            _groq_set_backoff(api_key)
+        except Exception as e:
+            error_msg = str(e)[:120]
+            if "429" in error_msg or "rate" in error_msg.lower():
+                print(f"[Groq Vision …{api_key[-6:]}] Rate limited — backing off")
+                _groq_set_backoff(api_key)
+            else:
+                print(f"[Groq Vision …{api_key[-6:]}] {type(e).__name__}: {error_msg}")
+            break
+    return None
 
 
 async def _try_gemini(
@@ -523,13 +600,13 @@ async def generate_ai_response(
         else:
             reply = await _try_groq(history, system_prompt)
 
-        # Groq failed — try Gemini if keys are available and not backed off
-        if not reply and gemini_keys_available:
+        # Groq failed — try Gemini Flash + Lite together across both keys
+        if not reply and genai is not None:
             tasks = []
-            if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
-                tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
-            if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
-                tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+            for key in filter(None, [GEMINI_API_KEY, GEMINI_API_KEY_2]):
+                if not _gemini_is_backed_off(key):
+                    tasks.append(asyncio.create_task(_try_gemini(key, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
+                    tasks.append(asyncio.create_task(_try_gemini(key, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)))
             if tasks:
                 reply = await _race_providers(*tasks)
 
