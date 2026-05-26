@@ -271,8 +271,8 @@ def reset_guild_prompt(guild_id: int) -> bool:
 # AI RATE LIMITING
 # ══════════════════════════════════════════════════════════════════════════════
 
-DAILY_AI_LIMIT = 50
-WARN_AT        = 40
+DAILY_AI_LIMIT = 200
+WARN_AT        = 100
 
 # Simple 1-second cache for today's UTC date string — avoids repeated datetime
 # formatting on every single AI message.
