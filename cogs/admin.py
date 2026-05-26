@@ -17,7 +17,7 @@ from discord import app_commands
 import asyncio
 import os
 import time
-from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage
+from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage, get_setting, set_setting
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -279,6 +279,65 @@ class Admin(commands.Cog):
             return
         reset_ai_usage(user.id)
         await ctx.reply(f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.")
+
+    @commands.command(name="set-cooldown")
+    @commands.is_owner()
+    async def prefix_set_cooldown(self, ctx: commands.Context, seconds: str = None):
+        """Bot owner only: set per-user command cooldown in seconds."""
+        if seconds is None:
+            current = get_setting("user_command_cooldown", 2.0)
+            await ctx.reply(
+                f"**Usage:** `!set-cooldown <seconds>`\nCurrent cooldown: {current} seconds"
+            )
+            return
+        try:
+            sec = float(seconds)
+        except ValueError:
+            await ctx.reply("❌ Invalid number.")
+            return
+        if sec < 0:
+            await ctx.reply("❌ Cooldown must be >= 0.")
+            return
+        set_setting("user_command_cooldown", sec)
+        await ctx.reply(f"✅ Command cooldown set to {sec} seconds.")
+
+    @commands.command(name="set-burst")
+    @commands.is_owner()
+    async def prefix_set_burst(self, ctx: commands.Context, limit: str = None, window: str = None, timeout: str = None):
+        """Bot owner only: configure burst protection.
+        Usage: `!set-burst [limit] [window_seconds] [timeout_seconds]`
+        Running without args shows current values.
+        """
+        if limit is None and window is None and timeout is None:
+            cur_limit = get_setting("burst_limit_count", 20)
+            cur_window = get_setting("burst_window_seconds", 60.0)
+            cur_timeout = get_setting("burst_timeout_seconds", 300.0)
+            await ctx.reply(
+                f"Current burst settings:\n- Limit: {cur_limit} commands\n- Window: {cur_window} seconds\n- Timeout: {cur_timeout} seconds"
+            )
+            return
+
+        try:
+            if limit is not None:
+                l = int(limit)
+                if l < 1:
+                    raise ValueError
+                set_setting("burst_limit_count", l)
+            if window is not None:
+                w = float(window)
+                if w <= 0:
+                    raise ValueError
+                set_setting("burst_window_seconds", w)
+            if timeout is not None:
+                t = float(timeout)
+                if t < 0:
+                    raise ValueError
+                set_setting("burst_timeout_seconds", t)
+        except ValueError:
+            await ctx.reply("❌ Invalid arguments. Usage: `!set-burst [limit] [window_seconds] [timeout_seconds]`")
+            return
+
+        await ctx.reply("✅ Burst settings updated.")
 
     # ── Slash commands ────────────────────────────────────────────────────────
 

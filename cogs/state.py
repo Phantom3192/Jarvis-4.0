@@ -31,6 +31,7 @@ _data: dict[str, Any] = {
     "stats":       {},    # str(user_id) → {"messages", "tokens_est", "first_seen", "last_seen"}
     "prompts":     {},    # str(guild_id) → prompt string
     "rate_limits": {},    # str(user_id)  → {"count": int, "day": "YYYY-MM-DD"}
+    "settings":   {},    # arbitrary bot settings persisted (e.g. cooldowns)
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -40,6 +41,7 @@ _SERIALISE: dict[str, Any] = {
     "stats":       lambda: _data["stats"],
     "prompts":     lambda: _data["prompts"],
     "rate_limits": lambda: _data["rate_limits"],
+    "settings":    lambda: _data["settings"],
 }
 
 
@@ -79,6 +81,7 @@ async def init_db():
         if "seen"        in db: _data["seen"]         = set(db["seen"])
         if "stats"       in db: _data["stats"]        = db["stats"]
         if "prompts"     in db: _data["prompts"]      = db["prompts"]
+        if "settings"    in db: _data["settings"]     = db["settings"]
         if "rate_limits" in db: _data["rate_limits"]  = db["rate_limits"]
 
         print("✅ Turso state DB connected")
@@ -294,3 +297,16 @@ def reset_ai_usage(user_id: int) -> None:
     uid = str(user_id)
     _data["rate_limits"][uid] = {"count": 0, "day": _today_utc()}
     _schedule_save("rate_limits")
+
+
+# ── Generic settings storage ──────────────────────────────────────────────────
+def get_setting(key: str, default=None):
+    s = _data.get("settings", {})
+    return s.get(key, default)
+
+
+def set_setting(key: str, value) -> None:
+    if "settings" not in _data:
+        _data["settings"] = {}
+    _data["settings"][key] = value
+    _schedule_save("settings")

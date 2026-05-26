@@ -21,9 +21,9 @@ import asyncio
 import logging
 import time
 from dotenv import load_dotenv
-from cogs.state import is_bot_banned
+from collections import deque
+from cogs.state import is_bot_banned, init_db, get_setting, set_setting, bot_bans, save_bans
 import cogs.http_session as http_session
-from cogs.state import init_db
 from cogs.history import init_history
 
 load_dotenv()
@@ -57,15 +57,46 @@ COGS = [
 # Track users we've already DM'd about their ban this session — avoid spamming.
 _dm_sent_bans: set[int] = set()
 
-# Simple per-user command cooldown to prevent spam.
-USER_COMMAND_COOLDOWN = 2.0  # seconds
+# Simple per-user command cooldown to prevent spam. The value is persisted
+# in `cogs.state` under key `user_command_cooldown` so the owner can change it.
+USER_COMMAND_COOLDOWN = 2.0  # default seconds
 _last_command_time: dict[int, float] = {}
+
+# Burst tracking: per-user deque of recent command timestamps (monotonic seconds)
+_burst_records: dict[int, deque] = {}
+
+
+def _check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
+    """Record a command for user and timeout them if they exceed burst limits.
+    Returns (allowed, timeout_seconds_if_timed_out).
+    """
+    now = time.monotonic()
+    window = float(get_setting("burst_window_seconds", 60.0))
+    limit  = int(get_setting("burst_limit_count", 20))
+    timeout = float(get_setting("burst_timeout_seconds", 300.0))
+
+    dq = _burst_records.setdefault(user_id, deque())
+    dq.append(now)
+    cutoff = now - window
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+    if len(dq) > limit:
+        # Timeout user at bot-level (temporary bot ban)
+        bot_bans[str(user_id)] = {
+            "reason": f"Flooding commands ({len(dq)} in {int(window)}s)",
+            "expires": time.time() + timeout,
+        }
+        save_bans()
+        return False, timeout
+    return True, None
 
 
 def _command_cooldown_check(user_id: int) -> bool:
     now = time.monotonic()
     last = _last_command_time.get(user_id)
-    if last is None or (now - last) >= USER_COMMAND_COOLDOWN:
+    cooldown = float(get_setting("user_command_cooldown", USER_COMMAND_COOLDOWN))
+    if last is None or (now - last) >= cooldown:
         _last_command_time[user_id] = now
         return True
     return False
@@ -88,9 +119,16 @@ async def global_ban_check(ctx: commands.Context) -> bool:
         await ctx.reply("🚫 You are banned from using Jarvis.")
         await _notify_banned(ctx.author)
         return False
+    # Burst/timeout check
+    allowed, t = _check_burst_and_maybe_timeout(ctx.author.id)
+    if not allowed:
+        await ctx.reply(f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding.")
+        await _notify_banned(ctx.author)
+        return False
     if not _command_cooldown_check(ctx.author.id):
+        cooldown = int(float(get_setting("user_command_cooldown", USER_COMMAND_COOLDOWN)))
         await ctx.reply(
-            f"⚠️ Please wait {int(USER_COMMAND_COOLDOWN)} seconds before sending another Jarvis command."
+            f"⚠️ Please wait {cooldown} seconds before sending another Jarvis command."
         )
         return False
     return True
@@ -106,9 +144,19 @@ async def slash_ban_check(interaction: discord.Interaction) -> bool:
 async def slash_interaction_check(interaction: discord.Interaction) -> bool:
     if not await slash_ban_check(interaction):
         return False
-    if not _command_cooldown_check(interaction.user.id):
+    # Burst/timeout check for interactions
+    allowed, t = _check_burst_and_maybe_timeout(interaction.user.id)
+    if not allowed:
         await interaction.response.send_message(
-            f"⚠️ Please wait {int(USER_COMMAND_COOLDOWN)} seconds before sending another Jarvis command.",
+            f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding.",
+            ephemeral=True,
+        )
+        await _notify_banned(interaction.user)
+        return False
+    if not _command_cooldown_check(interaction.user.id):
+        cooldown = int(float(get_setting("user_command_cooldown", USER_COMMAND_COOLDOWN)))
+        await interaction.response.send_message(
+            f"⚠️ Please wait {cooldown} seconds before sending another Jarvis command.",
             ephemeral=True,
         )
         return False
