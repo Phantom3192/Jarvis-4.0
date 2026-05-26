@@ -13,7 +13,7 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timezone
 import time
-from cogs.state import get_stats, get_all_stats, get_all_bans, get_all_rate_limits, _today_utc
+from cogs.state import get_stats, get_all_stats, get_all_bans, get_all_rate_limits, _today_utc, seen_users
 from cogs.admin import is_admin
 
 USERS_PAGE_SIZE = 10   # users per embed page
@@ -49,15 +49,21 @@ def _format_stats(user: discord.User | discord.Member, data: dict) -> discord.Em
 
 def _collect_user_rows(bot: commands.Bot) -> list[dict]:
     """
-    Merge stats + bans + rate_limits into a list of row dicts,
+    Merge seen + stats + bans + rate_limits into a list of row dicts,
     sorted by message count descending.
+
+    seen stores int user IDs; stats/bans/rate_limits use str keys.
+    We normalise everything to str so the union is complete and all
+    24 (or however many) users appear even if stats weren't recorded yet.
     """
     all_stats = get_all_stats()
     all_bans  = get_all_bans()
     all_rl    = get_all_rate_limits()
     today     = _today_utc()
 
-    all_uids = set(all_stats) | set(all_bans) | set(all_rl)
+    # seen_users stores ints — convert to str to match the other stores
+    seen_str = {str(uid) for uid in seen_users}
+    all_uids = seen_str | set(all_stats) | set(all_bans) | set(all_rl)
     rows = []
 
     for uid_str in all_uids:
