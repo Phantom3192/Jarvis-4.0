@@ -75,6 +75,14 @@ BAN_USAGE = (
 )
 UNBAN_USAGE = "**Usage:** `!global-unban <user_id>`"
 
+# ── Guild-ban storage (in-memory; keyed by guild_id) ─────────────────────────
+# Structure: { guild_id: {"reason": str, "banned_at": float} }
+_guild_bans: dict[int, dict] = {}
+
+
+def is_guild_banned(guild_id: int) -> bool:
+    return guild_id in _guild_bans
+
 
 async def _format_ban_lines(bot: commands.Bot) -> list[str]:
     """Build one display line per banned user. Shared by prefix and slash commands."""
@@ -114,6 +122,39 @@ def _build_ban_list_embed(lines: list[str]) -> discord.Embed:
         color=discord.Color.red(),
     )
     embed.set_footer(text="Use !global-unban <user_id> to unban a user.")
+    return embed
+
+
+async def _build_guild_ban_embed(bot: commands.Bot) -> discord.Embed:
+    """Build an embed listing all guild-banned servers."""
+    if not _guild_bans:
+        return discord.Embed(
+            title="✅ No guild bans",
+            description="No guilds are currently banned from Jarvis.",
+            color=discord.Color.green(),
+        )
+    lines = []
+    for gid, data in _guild_bans.items():
+        guild = bot.get_guild(gid)
+        name  = guild.name if guild else "Unknown Server"
+        ts    = discord.utils.format_dt(
+            discord.utils.utcnow().__class__.fromtimestamp(data["banned_at"]),
+            style="R",
+        )
+        lines.append(
+            f"**{name}** (`{gid}`)\n"
+            f"  ↳ Reason: {data['reason']}\n"
+            f"  ↳ Banned: {ts}  |  Unban: `!guild-unban {gid}`"
+        )
+    chunk = "\n\n".join(lines[:20])
+    if len(chunk) > 4000:
+        chunk = chunk[:3997] + "..."
+    embed = discord.Embed(
+        title=f"🚫 Guild-banned servers ({len(_guild_bans)})",
+        description=chunk,
+        color=discord.Color.red(),
+    )
+    embed.set_footer(text="Use !guild-unban <guild_id> to unban a server.")
     return embed
 
 
@@ -213,6 +254,44 @@ class Admin(commands.Cog):
             await user.send("✅ Your temporary ban from **Jarvis** has expired. You can use me again!")
         except (discord.Forbidden, discord.NotFound):
             pass
+
+    async def _do_guild_ban(self, guild_id: int, reason: str, send_msg) -> None:
+        """Ban a guild: record it, notify the owner if possible, then leave."""
+        if guild_id in _guild_bans:
+            await send_msg(f"⚠️ Guild `{guild_id}` is already banned.")
+            return
+        _guild_bans[guild_id] = {"reason": reason, "banned_at": time.time()}
+
+        guild = self.bot.get_guild(guild_id)
+        if guild:
+            # Try to notify the guild owner
+            if guild.owner:
+                try:
+                    await guild.owner.send(
+                        f"🚫 **{guild.name}** has been **banned from using Jarvis**.\n"
+                        f"**Reason:** {reason}\n"
+                        f"If you believe this is a mistake, please contact Phantom."
+                    )
+                except discord.Forbidden:
+                    pass
+            await guild.leave()
+            await send_msg(
+                f"🚫 Guild **{guild.name}** (`{guild_id}`) has been banned and Jarvis has left the server.\n"
+                f"**Reason:** {reason}"
+            )
+        else:
+            await send_msg(
+                f"🚫 Guild `{guild_id}` has been banned (Jarvis is not currently in that server).\n"
+                f"**Reason:** {reason}"
+            )
+
+    async def _do_guild_unban(self, guild_id: int, send_msg) -> None:
+        """Remove a guild ban."""
+        if guild_id not in _guild_bans:
+            await send_msg(f"❌ Guild `{guild_id}` is not guild-banned.")
+            return
+        del _guild_bans[guild_id]
+        await send_msg(f"✅ Guild `{guild_id}` has been unbanned. Jarvis can be re-invited to that server.")
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         if is_admin(ctx.author):
@@ -440,6 +519,87 @@ class Admin(commands.Cog):
             f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.",
             ephemeral=True,
         )
+
+
+    # ── Guild-ban commands ────────────────────────────────────────────────────
+
+    @commands.command(name="guild-ban")
+    async def prefix_guild_ban(self, ctx: commands.Context, guild_id: str = None, *, reason: str = "No reason provided"):
+        """Ban a guild from using Jarvis (admin only). Bot will leave the server."""
+        if not is_admin(ctx.author):
+            await ctx.reply("🚫 You don't have permission to use this command.")
+            return
+        if guild_id is None:
+            await ctx.reply("**Usage:** `!guild-ban <guild_id> [reason]`")
+            return
+        try:
+            gid = int(guild_id)
+        except ValueError:
+            await ctx.reply("❌ Invalid guild ID.")
+            return
+        await self._do_guild_ban(gid, reason, ctx.reply)
+
+    @commands.command(name="guild-unban")
+    async def prefix_guild_unban(self, ctx: commands.Context, guild_id: str = None):
+        """Unban a guild from Jarvis (admin only)."""
+        if not is_admin(ctx.author):
+            await ctx.reply("🚫 You don't have permission to use this command.")
+            return
+        if guild_id is None:
+            await ctx.reply("**Usage:** `!guild-unban <guild_id>`")
+            return
+        try:
+            gid = int(guild_id)
+        except ValueError:
+            await ctx.reply("❌ Invalid guild ID.")
+            return
+        await self._do_guild_unban(gid, ctx.reply)
+
+    @commands.command(name="guild-bans")
+    async def prefix_guild_bans(self, ctx: commands.Context):
+        """List all guild-banned servers (admin only)."""
+        if not is_admin(ctx.author):
+            await ctx.reply("🚫 You don't have permission to use this command.")
+            return
+        embed = await _build_guild_ban_embed(self.bot)
+        await ctx.reply(embed=embed)
+
+    @app_commands.command(name="guildban", description="Ban a guild from using Jarvis and leave it (admin only)")
+    @app_commands.describe(guild_id="The Discord Guild ID to ban", reason="Reason for the ban")
+    async def slash_guild_ban(self, interaction: discord.Interaction, guild_id: str, reason: str = "No reason provided"):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+            return
+        try:
+            gid = int(guild_id)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid guild ID.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await self._do_guild_ban(gid, reason, lambda msg: interaction.followup.send(msg))
+
+    @app_commands.command(name="guildunban", description="Unban a guild from Jarvis (admin only)")
+    @app_commands.describe(guild_id="The Discord Guild ID to unban")
+    async def slash_guild_unban(self, interaction: discord.Interaction, guild_id: str):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+            return
+        try:
+            gid = int(guild_id)
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid guild ID.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await self._do_guild_unban(gid, lambda msg: interaction.followup.send(msg))
+
+    @app_commands.command(name="guildbans", description="List all guild-banned servers (admin only)")
+    async def slash_guild_bans(self, interaction: discord.Interaction):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        embed = await _build_guild_ban_embed(self.bot)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

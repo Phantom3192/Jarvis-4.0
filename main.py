@@ -57,6 +57,15 @@ COGS = [
 _dm_sent_bans: set[int] = set()
 
 
+def _is_guild_banned(guild_id: int) -> bool:
+    """Lazy import to avoid circular dependency at module load time."""
+    try:
+        from cogs.admin import _guild_bans
+        return guild_id in _guild_bans
+    except ImportError:
+        return False
+
+
 async def _notify_banned(user: discord.User | discord.Member) -> None:
     """DM a banned user once per session to inform them."""
     if user.id in _dm_sent_bans:
@@ -70,6 +79,11 @@ async def _notify_banned(user: discord.User | discord.Member) -> None:
 
 @bot.check
 async def global_ban_check(ctx: commands.Context) -> bool:
+    # Guild-level ban check
+    if ctx.guild and _is_guild_banned(ctx.guild.id):
+        await ctx.reply("🚫 This server has been banned from using Jarvis.")
+        return False
+
     if is_bot_banned(ctx.author.id):
         await ctx.reply("🚫 You are banned from using Jarvis.")
         await _notify_banned(ctx.author)
@@ -100,6 +114,13 @@ async def slash_ban_check(interaction: discord.Interaction) -> bool:
     return True
 
 async def slash_interaction_check(interaction: discord.Interaction) -> bool:
+    # Guild-level ban check
+    if interaction.guild and _is_guild_banned(interaction.guild.id):
+        await interaction.response.send_message(
+            "🚫 This server has been banned from using Jarvis.", ephemeral=True
+        )
+        return False
+
     if not await slash_ban_check(interaction):
         return False
 

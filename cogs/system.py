@@ -154,6 +154,88 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     return embed
 
 
+# ── Guild helpers ─────────────────────────────────────────────────────────────
+
+def _build_guild_embed(guild: discord.Guild) -> discord.Embed:
+    """Build a detailed info embed for a single guild."""
+    embed = discord.Embed(
+        title=f"🏰 {guild.name}",
+        color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow(),
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    # Owner
+    owner = guild.owner
+    embed.add_field(name="👑 Owner",      value=f"{owner} (`{owner.id}`)" if owner else "Unknown", inline=True)
+    embed.add_field(name="🆔 Guild ID",   value=f"`{guild.id}`",                                   inline=True)
+    embed.add_field(name="📅 Created",    value=discord.utils.format_dt(guild.created_at, style="D"), inline=True)
+
+    # Members
+    total    = guild.member_count or 0
+    bots     = sum(1 for m in guild.members if m.bot) if guild.members else "?"
+    humans   = (total - bots) if isinstance(bots, int) else "?"
+    embed.add_field(name="👥 Members",   value=f"`{total}` total  •  `{humans}` humans  •  `{bots}` bots", inline=False)
+
+    # Channels
+    text_ch  = len(guild.text_channels)
+    voice_ch = len(guild.voice_channels)
+    cats     = len(guild.categories)
+    embed.add_field(name="💬 Channels",  value=f"`{text_ch}` text  •  `{voice_ch}` voice  •  `{cats}` categories", inline=False)
+
+    # Roles & emojis
+    embed.add_field(name="🎭 Roles",     value=f"`{len(guild.roles)}`",  inline=True)
+    embed.add_field(name="😄 Emojis",    value=f"`{len(guild.emojis)}`", inline=True)
+    embed.add_field(name="🔖 Stickers",  value=f"`{len(guild.stickers)}`", inline=True)
+
+    # Boost
+    embed.add_field(
+        name="🚀 Boost",
+        value=f"Level `{guild.premium_tier}`  •  `{guild.premium_subscription_count}` boosts",
+        inline=True,
+    )
+
+    # Verification
+    embed.add_field(name="🔒 Verification", value=f"`{guild.verification_level}`", inline=True)
+
+    # Preferred locale
+    embed.add_field(name="🌐 Locale", value=f"`{guild.preferred_locale}`", inline=True)
+
+    embed.set_footer(text="Jarvis  •  Guild Info")
+    return embed
+
+
+def _build_server_list_embeds(bot: commands.Bot) -> list[discord.Embed]:
+    """Build paginated embeds listing every server Jarvis is in."""
+    guilds   = sorted(bot.guilds, key=lambda g: g.member_count or 0, reverse=True)
+    per_page = 10
+    pages    = [guilds[i:i + per_page] for i in range(0, len(guilds), per_page)]
+    embeds   = []
+
+    for idx, page in enumerate(pages, start=1):
+        embed = discord.Embed(
+            title=f"🌐 Servers Jarvis is in — {len(guilds)} total",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        for g in page:
+            owner_name = str(g.owner) if g.owner else "Unknown"
+            embed.add_field(
+                name=f"{g.name}",
+                value=(
+                    f"ID: `{g.id}`\n"
+                    f"Members: `{g.member_count or '?'}`  •  Owner: {owner_name}\n"
+                    f"Created: {discord.utils.format_dt(g.created_at, style='d')}"
+                ),
+                inline=False,
+            )
+        embed.set_footer(text=f"Page {idx}/{len(pages)}  •  Jarvis Admin")
+        embeds.append(embed)
+
+    return embeds or [discord.Embed(title="No guilds found.", color=discord.Color.red())]
+
+
 # ── Reload logic ──────────────────────────────────────────────────────────────
 
 async def _do_reload(bot: commands.Bot) -> str:
@@ -286,6 +368,44 @@ class System(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         result = await _do_reload(self.bot)
         await interaction.followup.send(result)
+
+
+    # ── !guildinfo ────────────────────────────────────────────────────────────
+
+    @commands.command(name="guildinfo")
+    @commands.guild_only()
+    async def prefix_guildinfo(self, ctx: commands.Context):
+        """Show detailed info about the current server."""
+        await ctx.reply(embed=_build_guild_embed(ctx.guild))
+
+    @app_commands.command(name="guildinfo", description="Show detailed info about this server")
+    @app_commands.guild_only()
+    async def slash_guildinfo(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=_build_guild_embed(interaction.guild))
+
+    # ── !servers ──────────────────────────────────────────────────────────────
+
+    @commands.command(name="servers")
+    async def prefix_servers(self, ctx: commands.Context):
+        """List all servers Jarvis is in. Admin only."""
+        if not is_admin(ctx.author):
+            await ctx.reply("🚫 You don't have permission to use this command.")
+            return
+        for embed in _build_server_list_embeds(self.bot):
+            await ctx.reply(embed=embed)
+
+    @app_commands.command(name="servers", description="List all servers Jarvis is in (admin only)")
+    async def slash_servers(self, interaction: discord.Interaction):
+        if not is_admin(interaction.user):
+            await interaction.response.send_message(
+                "🚫 You don't have permission to use this command.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        embeds = _build_server_list_embeds(self.bot)
+        await interaction.followup.send(embed=embeds[0])
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):
