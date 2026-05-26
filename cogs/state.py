@@ -169,7 +169,17 @@ def save_bans() -> None:
     _schedule_save("bans")
 
 def is_bot_banned(user_id: int) -> bool:
-    return str(user_id) in _data["bans"]
+    uid  = str(user_id)
+    ban  = _data["bans"].get(uid)
+    if not ban:
+        return False
+    expires = ban.get("expires")
+    if expires is not None and time.time() >= expires:
+        # Temp ban expired — remove it automatically
+        del _data["bans"][uid]
+        _schedule_save("bans")
+        return False
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -332,7 +342,7 @@ def check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
     while dq and dq[0] < cutoff:
         dq.popleft()
 
-    print(f"[burst] user {user_id} count={len(dq)} (limit={limit})")
+
 
     if len(dq) >= limit:
         bot_bans[str(user_id)] = {

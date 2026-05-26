@@ -41,8 +41,8 @@ GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
 HISTORY_LIMIT = 5   # Reduced for ultra-fast API responses
-MAX_TOKENS    = 512 # Reduced for snappier responses (~2 paragraphs)
-PROVIDER_TIMEOUT = 12  # seconds per provider call
+MAX_TOKENS    = 400 # Snappier responses — still ~2 solid paragraphs
+PROVIDER_TIMEOUT = 8   # seconds per provider call — Groq rarely needs more than 3s
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
