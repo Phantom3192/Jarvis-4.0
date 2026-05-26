@@ -18,6 +18,26 @@ import asyncio
 import os
 import time
 from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage, get_setting, set_setting
+import re
+
+
+def _parse_time_arg(val: str) -> float:
+    """Parse a time argument like '60', '60s', '5m', '1h' into seconds."""
+    if val is None:
+        return None
+    val = val.strip().lower()
+    m = re.match(r"^(\d+(?:\.\d+)?)([smh]?)$", val)
+    if not m:
+        raise ValueError("invalid time")
+    num = float(m.group(1))
+    suf = m.group(2)
+    if suf == "s" or suf == "":
+        return num
+    if suf == "m":
+        return num * 60.0
+    if suf == "h":
+        return num * 3600.0
+    return num
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -324,12 +344,12 @@ class Admin(commands.Cog):
                     raise ValueError
                 set_setting("burst_limit_count", l)
             if window is not None:
-                w = float(window)
+                w = _parse_time_arg(window)
                 if w <= 0:
                     raise ValueError
                 set_setting("burst_window_seconds", w)
             if timeout is not None:
-                t = float(timeout)
+                t = _parse_time_arg(timeout)
                 if t < 0:
                     raise ValueError
                 set_setting("burst_timeout_seconds", t)

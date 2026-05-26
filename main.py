@@ -80,6 +80,8 @@ def _check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
     cutoff = now - window
     while dq and dq[0] < cutoff:
         dq.popleft()
+    # debug: show current burst count for this user
+    print(f"[burst] user {user_id} count={len(dq)} (limit={limit})")
 
     if len(dq) >= limit:
         # Timeout user at bot-level (temporary bot ban)
