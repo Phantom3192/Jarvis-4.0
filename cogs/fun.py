@@ -267,7 +267,7 @@ class Fun(commands.Cog):
             del active_hangman[cid]
             embed = _hangman_embed(state, finished=True)
             embed.colour = discord.Color.green()
-            embed.add_field(name="🎉 Winner!", value=f"{message.author.mention} guessed the word!", inline=False)
+            embed.add_field(name="🎉 Winner!", value=f"**{message.author.display_name}** guessed the word!", inline=False)
             await message.reply(embed=embed)
             return
         if state["wrong"] >= 6:

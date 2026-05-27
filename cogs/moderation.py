@@ -80,8 +80,8 @@ def _mod_embed(
     extra: dict | None = None,
 ) -> discord.Embed:
     embed = discord.Embed(title=f"🔨 {action}", color=color, timestamp=discord.utils.utcnow())
-    embed.add_field(name="User",      value=f"{target.mention} (`{target.id}`)", inline=True)
-    embed.add_field(name="Moderator", value=moderator.mention,                   inline=True)
+    embed.add_field(name="User",      value=f"{str(target)} (`{target.id}`)", inline=True)
+    embed.add_field(name="Moderator", value=str(moderator),                   inline=True)
     embed.add_field(name="Reason",    value=reason,                              inline=False)
     if extra:
         for k, v in extra.items():
@@ -146,7 +146,7 @@ class Moderation(commands.Cog):
                 until = discord.utils.utcnow() + discord.timedelta(seconds=duration)
                 await member.timeout(until, reason=f"Auto-mute: reached {count} warnings")
                 await ctx.send(
-                    f"⚠️ {member.mention} has been **auto-muted for 10 minutes** after reaching {count} warnings."
+                    f"⚠️ **{member.display_name}** has been **auto-muted for 10 minutes** after reaching {count} warnings."
                 )
             except discord.Forbidden:
                 pass
@@ -185,7 +185,7 @@ class Moderation(commands.Cog):
                 until = discord.utils.utcnow() + discord.timedelta(seconds=600)
                 await member.timeout(until, reason=f"Auto-mute: reached {count} warnings")
                 await interaction.followup.send(
-                    f"⚠️ {member.mention} has been **auto-muted for 10 minutes** after reaching {count} warnings."
+                    f"⚠️ **{member.display_name}** has been **auto-muted for 10 minutes** after reaching {count} warnings."
                 )
             except discord.Forbidden:
                 pass
@@ -210,9 +210,11 @@ class Moderation(commands.Cog):
                 discord.utils.utcnow().__class__.fromtimestamp(w["time"], tz=discord.utils.utcnow().tzinfo),
                 style="R",
             )
+            mod_member = ctx.guild.get_member(w['mod_id']) if ctx and ctx.guild else None
+            mod_label = str(mod_member) if mod_member else f"ID: {w['mod_id']}"
             embed.add_field(
                 name=f"#{i} — {ts}",
-                value=f"**Reason:** {w['reason']}\n**By:** <@{w['mod_id']}>  •  ID: `{w['id']}`",
+                value=f"**Reason:** {w['reason']}\n**By:** {mod_label}  •  ID: `{w['id']}`",
                 inline=False,
             )
         embed.set_footer(text=f"{len(warnings)} warning(s) total")
@@ -239,9 +241,11 @@ class Moderation(commands.Cog):
                 discord.utils.utcnow().__class__.fromtimestamp(w["time"], tz=discord.utils.utcnow().tzinfo),
                 style="R",
             )
+            mod_member = interaction.guild.get_member(w['mod_id']) if interaction and interaction.guild else None
+            mod_label = str(mod_member) if mod_member else f"ID: {w['mod_id']}"
             embed.add_field(
                 name=f"#{i} — {ts}",
-                value=f"**Reason:** {w['reason']}\n**By:** <@{w['mod_id']}>  •  ID: `{w['id']}`",
+                value=f"**Reason:** {w['reason']}\n**By:** {mod_label}  •  ID: `{w['id']}`",
                 inline=False,
             )
         embed.set_footer(text=f"{len(warnings)} warning(s) total")

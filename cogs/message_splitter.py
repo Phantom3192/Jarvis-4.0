@@ -7,7 +7,10 @@ DISCORD_MAX_LENGTH = 2000
 CONTINUATION_MARKER = "…"  # Indicates message continuation
 
 import re
+import discord
 from cogs.state import record_mention
+
+_AM_NONE = discord.AllowedMentions.none()
 
 
 def split_message(text: str, max_length: int = DISCORD_MAX_LENGTH) -> list[str]:
@@ -94,26 +97,22 @@ async def send_long_message(
     """
     parts = split_message(text, max_length)
     sent_messages = []
-    
+
     # Determine if this is a Message or Interaction
     is_interaction = hasattr(message_or_interaction, "response")
-    
+
     for i, part in enumerate(parts):
         # Add "continued..." indicator if not the first message
         display_text = part
         if i > 0:
             display_text = f"**[Continued]** {part}"
+
         # Detect explicit mention tokens like <@123...> in the outgoing text.
-        # If present, record the mention so we can apply anti-spam timeouts.
         MENTION_RE = re.compile(r"<@!?(?P<id>\d+)>")
         found = {int(m.group('id')) for m in MENTION_RE.finditer(display_text)}
         if found:
             # Determine invoker id (Interaction.user or Message.author)
-            invoker = None
-            if hasattr(message_or_interaction, "user"):
-                invoker = getattr(message_or_interaction, "user")
-            else:
-                invoker = getattr(message_or_interaction, "author", None)
+            invoker = getattr(message_or_interaction, "user", None) or getattr(message_or_interaction, "author", None)
             invoker_id = invoker.id if invoker is not None else None
             if invoker_id is not None:
                 for target_id in found:
@@ -126,22 +125,27 @@ async def send_long_message(
                         else:
                             timeout_msg = f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to mention spamming."
                         try:
-                            is_interaction = hasattr(message_or_interaction, "response")
                             if is_interaction:
-                                await message_or_interaction.response.send_message(timeout_msg, ephemeral=True)
+                                await message_or_interaction.response.send_message(timeout_msg, ephemeral=True, allowed_mentions=_AM_NONE)
                             else:
-                                await message_or_interaction.reply(timeout_msg)
+                                await message_or_interaction.reply(timeout_msg, allowed_mentions=_AM_NONE)
                         except Exception:
                             pass
                         return []
-        
+
+        # Sanitize common ping tokens to be extra-safe (zero-width space breaks mention)
+        display_text = display_text.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+        # Break raw mention tokens like <@123> so Discord won't treat them as pings
+        display_text = display_text.replace("<@", "<@\u200b")
+
         try:
             if is_interaction:
                 # Interaction: first response uses response.send_message, rest use followup
                 if i == 0:
                     await message_or_interaction.response.send_message(
                         display_text,
-                        ephemeral=ephemeral
+                        ephemeral=ephemeral,
+                        allowed_mentions=_AM_NONE,
                     )
                     # Get the initial response message
                     sent_msg = await message_or_interaction.original_response()
@@ -149,16 +153,17 @@ async def send_long_message(
                 else:
                     sent_msg = await message_or_interaction.followup.send(
                         display_text,
-                        ephemeral=ephemeral
+                        ephemeral=ephemeral,
+                        allowed_mentions=_AM_NONE,
                     )
                     sent_messages.append(sent_msg)
             else:
                 # Message: use reply for all parts
-                sent_msg = await message_or_interaction.reply(display_text)
+                sent_msg = await message_or_interaction.reply(display_text, allowed_mentions=_AM_NONE)
                 sent_messages.append(sent_msg)
         except Exception as e:
             print(f"❌ Error sending message part {i+1}: {e}")
-    
+
     return sent_messages
 
 
@@ -204,7 +209,7 @@ async def edit_or_send_long_message(
                         else:
                             timeout_msg = f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to mention spamming."
                         try:
-                            await interaction.response.send_message(timeout_msg, ephemeral=True)
+                            await interaction.response.send_message(timeout_msg, ephemeral=True, allowed_mentions=_AM_NONE)
                         except Exception:
                             pass
                         return []
@@ -213,16 +218,20 @@ async def edit_or_send_long_message(
             if i == 0:
                 # Edit or create the initial response
                 if interaction.response.is_done():
-                    # Already responded, edit it
-                    sent_msg = await interaction.edit_original_response(content=display_text)
+                    # Already responded, edit it (include allowed_mentions to be safe)
+                    try:
+                        sent_msg = await interaction.edit_original_response(content=display_text, allowed_mentions=_AM_NONE)
+                    except TypeError:
+                        # Older versions may not accept allowed_mentions on edit
+                        sent_msg = await interaction.edit_original_response(content=display_text)
                 else:
                     # Haven't responded yet, send initial response
-                    await interaction.response.send_message(display_text, ephemeral=ephemeral)
+                    await interaction.response.send_message(display_text, ephemeral=ephemeral, allowed_mentions=_AM_NONE)
                     sent_msg = await interaction.original_response()
                 sent_messages.append(sent_msg)
             else:
                 # Use followup for continuation
-                sent_msg = await interaction.followup.send(display_text, ephemeral=ephemeral)
+                sent_msg = await interaction.followup.send(display_text, ephemeral=ephemeral, allowed_mentions=_AM_NONE)
                 sent_messages.append(sent_msg)
         except Exception as e:
             print(f"❌ Error in edit_or_send_long_message part {i+1}: {e}")
