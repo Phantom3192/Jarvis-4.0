@@ -492,6 +492,7 @@ async def generate_ai_response(
     image_b64: str | None = None,
     media_type: str | None = None,
     user: discord.User | discord.Member | None = None,
+    reply_context: list[dict] | None = None,
 ) -> str:
     if is_ai_rate_limited(user_id):
         limit = get_ai_limit()
@@ -565,13 +566,36 @@ async def generate_ai_response(
     history  = _get_history(user_id, channel_id)
     has_image = bool(image_b64 and media_type)
 
+    # Prepend reply-chain context when present (e.g. UserB replying to UserA's
+    # conversation). We build a temporary history that starts with the thread
+    # context so the model understands what's being discussed, then appends
+    # the user's own history on top, and finally the current message.
+    # We do NOT save reply_context to persistent history — it's read-only context.
+    if reply_context:
+        # Merge: reply_context first, then user's own history (deduplicated)
+        combined = list(reply_context)
+        for entry in history:
+            if entry not in combined:
+                combined.append(entry)
+        history = combined
+
     stored = (
         f"[{user.display_name}]: {user_message or '(sent an image)'}"
         if (in_group and user)
         else (user_message or "(sent an image)")
     )
-    history.append({"role": "user", "content": stored})
-    _trim(history)
+
+    # For save purposes, use the real per-user history (not the merged one)
+    real_history = _get_history(user_id, channel_id)
+    real_history.append({"role": "user", "content": stored})
+    _trim(real_history)
+
+    # Build the working history for this request
+    if reply_context:
+        history.append({"role": "user", "content": stored})
+        _trim(history)
+    else:
+        history = real_history
 
     # ── Route based on user's preferred model ─────────────────────────────────
     # Strategy: try the preferred/primary provider first with a short timeout.
@@ -718,6 +742,58 @@ def _build_model_embed(user_id: int) -> discord.Embed:
     else:
         embed.set_footer(text="Use /setmodel or !setmodel to change  •  Resets on bot restart")
     return embed
+
+
+# ── Reply-chain context helper ───────────────────────────────────────────────
+
+async def _extract_reply_context(message: discord.Message) -> list[dict]:
+    """
+    Walk up the Discord reply chain (up to 3 hops) and collect the prior
+    exchange as a mini-history list so Jarvis understands the thread.
+
+    Returns a list of {"role": ..., "content": ...} dicts, oldest first,
+    ready to be prepended before the current user's message.
+
+    Example:
+        UserA: "Jarvis who is Naruto?"
+        Jarvis: "Naruto is a fictional ninja..."
+        UserB replies to Jarvis: "Which anime?"
+        → returns [
+            {"role": "user",      "content": "[UserA]: who is Naruto?"},
+            {"role": "assistant", "content": "Naruto is a fictional ninja..."},
+          ]
+    """
+    context: list[dict] = []
+    MAX_HOPS = 3
+    current = message
+
+    for _ in range(MAX_HOPS):
+        ref = getattr(current, "reference", None)
+        if not ref:
+            break
+        parent = ref.resolved
+        if not isinstance(parent, discord.Message):
+            # Not cached — try to fetch it
+            try:
+                parent = await current.channel.fetch_message(ref.message_id)
+            except Exception:
+                break
+
+        if parent.author.bot:
+            # This is a Jarvis reply — add as assistant turn
+            context.insert(0, {"role": "assistant", "content": parent.content})
+        else:
+            # This is a human message — add as user turn, labelled with their name
+            text = parent.content.strip()
+            # Strip bot mentions and "jarvis" keyword so it reads cleanly
+            text = _MENTION_RE.sub("", text)
+            text = _JARVIS_RE.sub("", text).strip(" ,:-")
+            label = getattr(parent.author, "display_name", str(parent.author))
+            context.insert(0, {"role": "user", "content": f"[{label}]: {text}"})
+
+        current = parent
+
+    return context
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -895,12 +971,44 @@ class AI(commands.Cog):
             mark_seen(message.author.id)
             await _log_new_user(message.author)
 
+        # ── Reply-chain context injection ──────────────────────────────────
+        # When UserB replies to a Jarvis message that came from UserA, Jarvis
+        # would normally load UserB's empty history and lose all context.
+        # Instead, we walk the reply chain and prepend the prior exchange so
+        # Jarvis understands the thread (e.g. "Which anime?" → knows it's Naruto).
+        reply_context: list[dict] = []
+        if replied_to_me:
+            original_author_id = None
+            ref = getattr(message.reference, "resolved", None)
+            if isinstance(ref, discord.Message) and ref.author.bot:
+                # The message being replied to is Jarvis — find the human who
+                # originally triggered that Jarvis reply (one more hop up)
+                parent_ref = getattr(ref, "reference", None)
+                if parent_ref:
+                    parent_msg = parent_ref.resolved
+                    if isinstance(parent_msg, discord.Message):
+                        original_author_id = parent_msg.author.id
+
+            is_different_user = (
+                original_author_id is not None
+                and original_author_id != message.author.id
+            )
+            if is_different_user:
+                # UserB is replying to a conversation they weren't part of —
+                # fetch the full reply chain as context
+                reply_context = await _extract_reply_context(message)
+            elif replied_to_me and not is_different_user:
+                # Same user continuing their own thread via reply — also grab
+                # context in case their own history doesn't cover it
+                reply_context = await _extract_reply_context(message)
+
         guild_id = message.guild.id if message.guild else None
         try:
             async with message.channel.typing():
                 reply = await generate_ai_response(
                     message.author.id, user_text, message.channel.id,
                     guild_id, image_b64, media_type, user=message.author,
+                    reply_context=reply_context,
                 )
         except Exception as e:
             # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
@@ -908,6 +1016,7 @@ class AI(commands.Cog):
             reply = await generate_ai_response(
                 message.author.id, user_text, message.channel.id,
                 guild_id, image_b64, media_type, user=message.author,
+                reply_context=reply_context,
             )
         await send_long_message(message, reply, ephemeral=False)
 
