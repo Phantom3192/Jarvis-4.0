@@ -13,7 +13,7 @@ from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timezone
 import time
-from cogs.state import get_stats, get_all_stats, get_all_bans, get_all_rate_limits, _today_utc, seen_users
+from cogs.state import get_stats, get_all_stats, get_all_bans, get_all_rate_limits, _today_utc, seen_users, DAILY_AI_LIMIT
 from cogs.admin import is_admin
 
 USERS_PAGE_SIZE = 10   # users per embed page
@@ -127,7 +127,7 @@ def _build_users_embed(rows: list[dict], page: int, total_pages: int) -> discord
 
     for r in chunk:
         ban_tag   = " 🚫" if r["is_banned"] else ""
-        limit_tag = " ⏳" if r["ai_today"] >= 50 else ""
+        limit_tag = " ⏳" if r["ai_today"] >= DAILY_AI_LIMIT else ""
 
         if r["is_banned"]:
             if r["ban_expires"]:
@@ -153,7 +153,7 @@ def _build_users_embed(rows: list[dict], page: int, total_pages: int) -> discord
                 f"**ID:** `{r['uid']}`\n"
                 f"**Messages:** `{r['messages']:,}` "
                 f"• **~Tokens:** `{r['tokens_est']:,}` "
-                f"• **AI today:** `{r['ai_today']}/50`"
+                f"• **AI today:** `{r['ai_today']}/{DAILY_AI_LIMIT}`"
                 f"{time_line}"
                 f"{ban_line}"
             ),

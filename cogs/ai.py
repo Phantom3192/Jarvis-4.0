@@ -781,6 +781,16 @@ class AI(commands.Cog):
         if not (mentioned or replied_to_me or named):
             return
 
+        # Guild-level ban check — on_message bypasses @bot.check so we must do this manually
+        if message.guild:
+            try:
+                from cogs.admin import _guild_bans
+                if message.guild.id in _guild_bans:
+                    await message.reply("🚫 This server has been banned from using Jarvis.")
+                    return
+            except Exception:
+                pass
+
         if is_bot_banned(message.author.id):
             await message.reply("🚫 You've been banned from Jarvis. Contact the bot owner if you think this is a mistake.")
             return
