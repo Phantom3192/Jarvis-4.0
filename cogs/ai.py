@@ -23,7 +23,7 @@ import importlib
 import base64
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
-    is_ai_rate_limited, increment_ai_usage, get_ai_usage,
+    is_ai_rate_limited, increment_ai_usage, get_ai_usage, get_ai_limit,
     DAILY_AI_LIMIT, WARN_AT, check_burst_and_maybe_timeout, check_cooldown, get_setting,
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
@@ -494,7 +494,8 @@ async def generate_ai_response(
     user: discord.User | discord.Member | None = None,
 ) -> str:
     if is_ai_rate_limited(user_id):
-        return DAILY_LIMIT_MSG.format(limit=DAILY_AI_LIMIT)
+        limit = get_ai_limit()
+        return DAILY_LIMIT_MSG.format(limit=limit)
 
     # Prevent abusive repeat/spam requests that ask Jarvis to output a phrase
     # many times (e.g. "say Hi 100 times"). Detect common patterns and
@@ -652,8 +653,9 @@ async def generate_ai_response(
 
     new_count = increment_ai_usage(user_id)
     if new_count == WARN_AT:
-        remaining = DAILY_AI_LIMIT - new_count
-        reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=DAILY_AI_LIMIT, remaining=remaining)}"
+        limit = get_ai_limit()
+        remaining = limit - new_count
+        reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=limit, remaining=remaining)}"
 
     # Cache text responses for 60 seconds (skip if has image)
     if not image_b64:
@@ -667,8 +669,9 @@ async def generate_ai_response(
 
 def _build_mylimit_embed(user_id: int) -> discord.Embed:
     count, day = get_ai_usage(user_id)
-    remaining  = max(0, DAILY_AI_LIMIT - count)
-    pct        = count / DAILY_AI_LIMIT
+    limit = get_ai_limit()
+    remaining  = max(0, limit - count)
+    pct        = count / limit if limit else 1
 
     if remaining == 0:
         colour, status = discord.Color.red(),    "❌ Limit reached"
@@ -684,7 +687,7 @@ def _build_mylimit_embed(user_id: int) -> discord.Embed:
         title="📊 Your Daily AI Limit",
         color=colour,
         description=(
-            f"`{bar}` {count}/{DAILY_AI_LIMIT}\n"
+            f"`{bar}` {count}/{limit}\n"
             f"**Status:** {status}\n"
             f"**Remaining:** {remaining} message(s)\n"
             f"**Resets:** midnight UTC (daily)"

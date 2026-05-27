@@ -312,9 +312,12 @@ def increment_ai_usage(user_id: int) -> int:
     _schedule_save("rate_limits")
     return entry["count"]
 
+def get_ai_limit() -> int:
+    return int(get_setting("daily_ai_limit", 50))
+
 def is_ai_rate_limited(user_id: int) -> bool:
     count, _ = get_ai_usage(user_id)
-    return count >= DAILY_AI_LIMIT
+    return count >= get_ai_limit()
 
 def reset_ai_usage(user_id: int) -> None:
     uid = str(user_id)
