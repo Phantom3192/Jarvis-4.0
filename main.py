@@ -23,7 +23,8 @@ import time
 from dotenv import load_dotenv
 from cogs.state import is_bot_banned, init_db, get_setting, set_setting, check_burst_and_maybe_timeout, check_cooldown
 import cogs.http_session as http_session
-from cogs.history import init_history
+from cogs.history import init_history, load_all_histories
+from cogs.memory import init_memory
 
 load_dotenv()
 
@@ -179,6 +180,15 @@ async def main():
                 await http_session.create_session()
                 await init_db()
                 await init_history()
+                await init_memory()
+
+                # Restore persisted session histories into in-memory store
+                from cogs.ai import private_history
+                restored = await load_all_histories()
+                for uid, msgs in restored.items():
+                    private_history[uid].extend(msgs)
+                if restored:
+                    print(f"✅ Restored session history for {len(restored)} user(s)")
 
                 for cog in COGS:
                     try:

@@ -140,6 +140,27 @@ async def get_history_count(user_id: int) -> int:
     return result[0] if result else 0
 
 
+async def load_all_histories() -> dict[int, list[dict]]:
+    """
+    Load all persisted histories into memory at startup.
+    Returns {user_id: [{"role": ..., "content": ...}, ...]} oldest-first.
+    """
+    if _conn is None:
+        return {}
+    try:
+        rows = _conn.execute(
+            "SELECT user_id, role, content FROM history ORDER BY timestamp ASC"
+        ).fetchall()
+        out: dict[int, list[dict]] = {}
+        for uid_str, role, content in rows:
+            uid = int(uid_str)
+            out.setdefault(uid, []).append({"role": role, "content": content})
+        return out
+    except Exception as e:
+        print(f"[History] load_all_histories error: {e}")
+        return {}
+
+
 # ── Auto cleanup ──────────────────────────────────────────────────────────────
 
 async def _cleanup_loop():

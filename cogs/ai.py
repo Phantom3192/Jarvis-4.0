@@ -28,6 +28,8 @@ from cogs.state import (
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session
+from cogs.history import add_message as _db_add_message, get_history as _db_get_history
+from cogs.memory import extract_facts, save_facts, get_facts, build_memory_prompt, forget_facts, get_facts_count
 
 # ── API keys & models ─────────────────────────────────────────────────────────
 
@@ -548,6 +550,18 @@ async def generate_ai_response(
     in_group    = _is_in_group(user_id, channel_id)
     in_merge    = thread_root_id is not None
 
+    # ── Long-term memory injection ────────────────────────────────────────────
+    # Fetch stored facts about this user and append to the base prompt so
+    # Jarvis remembers things from previous sessions. Skipped for group/merge.
+    memory_suffix = ""
+    if not in_group and not in_merge:
+        try:
+            facts = await get_facts(user_id)
+            memory_suffix = build_memory_prompt(facts)
+        except Exception:
+            memory_suffix = ""
+    effective_base = base_prompt + memory_suffix
+
     if user:
         name     = user.display_name if user.display_name != user.name else user.name
         username = user.name
@@ -555,7 +569,7 @@ async def generate_ai_response(
             cache_key = (thread_root_id, "merge")
             if cache_key not in _system_prompt_cache:
                 _system_prompt_cache[cache_key] = (
-                    base_prompt +
+                    effective_base +
                     "\n\nThis is a shared conversation between multiple people replying in the same thread. "
                     "Messages are prefixed with each person's name so you know who said what. "
                     "Maintain a single coherent conversation thread across all participants. "
@@ -568,7 +582,7 @@ async def generate_ai_response(
             cache_key = (user_id, "group", n)
             if cache_key not in _system_prompt_cache:
                 _system_prompt_cache[cache_key] = (
-                    base_prompt +
+                    effective_base +
                     f"\n\nThis is a shared group conversation between {n} people. "
                     f"Messages are prefixed with the sender's name so you know who said what. "
                     f"The person who just sent this message is {name} (username: {username}). "
@@ -576,17 +590,27 @@ async def generate_ai_response(
                 )
             system_prompt = _system_prompt_cache[cache_key]
         else:
-            cache_key = (user_id, "private")
-            if cache_key not in _system_prompt_cache:
-                _system_prompt_cache[cache_key] = (
-                    base_prompt +
+            # Private — don't cache when memory_suffix is present, since facts change
+            if not memory_suffix:
+                cache_key = (user_id, "private")
+                if cache_key not in _system_prompt_cache:
+                    _system_prompt_cache[cache_key] = (
+                        effective_base +
+                        f"\n\nThe person messaging you is {name} (username: {username}). "
+                        f"Only reveal this if they directly ask who they are. "
+                        f"Never volunteer their name or username unprompted."
+                    )
+                system_prompt = _system_prompt_cache[cache_key]
+            else:
+                # Memory-enriched prompt — build fresh each time (facts may have just been added)
+                system_prompt = (
+                    effective_base +
                     f"\n\nThe person messaging you is {name} (username: {username}). "
                     f"Only reveal this if they directly ask who they are. "
                     f"Never volunteer their name or username unprompted."
                 )
-            system_prompt = _system_prompt_cache[cache_key]
     else:
-        system_prompt = base_prompt
+        system_prompt = effective_base
 
     history  = _get_history(user_id, channel_id, thread_root_id)
     has_image = bool(image_b64 and media_type)
@@ -694,7 +718,30 @@ async def generate_ai_response(
     if len(history) > HISTORY_LIMIT:
         _trim(history)
     
-    # Fire-and-forget: record to DB in background, don't block response
+    # ── Persist session history to DB (fire-and-forget) ───────────────────────
+    # Only for private conversations (not merge threads or group chats — those
+    # are ephemeral by design)
+    if thread_root_id is None and not in_group:
+        async def _persist_session():
+            try:
+                await _db_add_message(user_id, "user", stored)
+                await _db_add_message(user_id, "assistant", reply)
+            except Exception as e:
+                print(f"[History] persist error: {e}")
+        asyncio.create_task(_persist_session())
+
+    # ── Extract and save long-term memories (fire-and-forget) ─────────────────
+    if user_message and thread_root_id is None and not in_group:
+        async def _extract_memory():
+            try:
+                facts = extract_facts(user_message)
+                if facts:
+                    await save_facts(user_id, facts)
+            except Exception as e:
+                print(f"[Memory] extract error: {e}")
+        asyncio.create_task(_extract_memory())
+
+    # Fire-and-forget: record stats to DB in background, don't block response
     asyncio.create_task(asyncio.to_thread(_background_record, user_id, user_message, reply))
 
     new_count = increment_ai_usage(user_id)
@@ -1148,6 +1195,66 @@ class AI(commands.Cog):
     async def prefix_mymodel(self, ctx: commands.Context):
         """Check your current AI model preference."""
         await ctx.reply(embed=_build_model_embed(ctx.author.id))
+
+    # ── /mymemory & !mymemory ─────────────────────────────────────────────────
+
+    @app_commands.command(name="mymemory", description="See what Jarvis remembers about you")
+    async def slash_mymemory(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        facts = await get_facts(interaction.user.id)
+        embed = _build_memory_embed(interaction.user, facts)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @commands.command(name="mymemory")
+    async def prefix_mymemory(self, ctx: commands.Context):
+        """See what Jarvis remembers about you."""
+        facts = await get_facts(ctx.author.id)
+        embed = _build_memory_embed(ctx.author, facts)
+        await ctx.reply(embed=embed)
+
+    # ── /forgetme & !forgetme ─────────────────────────────────────────────────
+
+    @app_commands.command(name="forgetme", description="Make Jarvis forget everything it remembers about you")
+    async def slash_forgetme(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        count = await forget_facts(interaction.user.id)
+        if count:
+            await interaction.followup.send(
+                f"🧹 Done — I've forgotten **{count}** thing(s) about you. Fresh start!",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "I don't have anything stored about you yet.", ephemeral=True
+            )
+
+    @commands.command(name="forgetme")
+    async def prefix_forgetme(self, ctx: commands.Context):
+        """Make Jarvis forget everything it remembers about you."""
+        count = await forget_facts(ctx.author.id)
+        if count:
+            await ctx.reply(f"🧹 Done — I've forgotten **{count}** thing(s) about you. Fresh start!")
+        else:
+            await ctx.reply("I don't have anything stored about you yet.")
+
+
+def _build_memory_embed(user: discord.User | discord.Member, facts: list[str]) -> discord.Embed:
+    if not facts:
+        embed = discord.Embed(
+            title="🧠 My memory about you",
+            description="I don't remember anything about you yet — just chat and I'll pick up important things naturally.",
+            color=discord.Color.blurple(),
+        )
+    else:
+        lines = "\n".join(f"• {f}" for f in facts)
+        embed = discord.Embed(
+            title="🧠 My memory about you",
+            description=lines,
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"{len(facts)} thing(s) stored • Use /forgetme to clear all")
+    embed.set_thumbnail(url=user.display_avatar.url)
+    return embed
 
 
 async def setup(bot: commands.Bot):
