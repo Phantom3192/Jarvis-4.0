@@ -75,7 +75,7 @@ async def add_message(user_id: int, role: str, content: str):
 
     _conn.execute(
         "INSERT INTO history (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-        [uid, role, content, now]
+        (uid, role, content, now)
     )
 
     _conn.execute("""
@@ -87,7 +87,7 @@ async def add_message(user_id: int, role: str, content: str):
             ORDER BY timestamp DESC
             LIMIT ?
         )
-    """, [uid, uid, MAX_HISTORY])
+    """, (uid, uid, MAX_HISTORY))
 
     _conn.commit()
 
@@ -107,7 +107,7 @@ async def get_history(user_id: int) -> list[dict]:
         WHERE user_id = ?
         ORDER BY timestamp ASC
         """,
-        [uid]
+        (uid,)
     ).fetchall()
 
     return [{"role": row[0], "content": row[1]} for row in result]
@@ -122,7 +122,7 @@ async def clear_history(user_id: int) -> bool:
         return False
 
     uid = str(user_id)
-    _conn.execute("DELETE FROM history WHERE user_id = ?", [uid])
+    _conn.execute("DELETE FROM history WHERE user_id = ?", (uid,))
     _conn.commit()
     return True
 
@@ -135,7 +135,7 @@ async def get_history_count(user_id: int) -> int:
     uid = str(user_id)
     result = _conn.execute(
         "SELECT COUNT(*) FROM history WHERE user_id = ?",
-        [uid]
+        (uid,)
     ).fetchone()
     return result[0] if result else 0
 
@@ -181,6 +181,6 @@ async def _cleanup_inactive():
             GROUP BY user_id
             HAVING MAX(timestamp) < ?
         )
-    """, [cutoff])
+    """, (cutoff,))
     _conn.commit()
     print(f"🧹 Cleaned up inactive user histories older than {INACTIVE_DAYS} days")
