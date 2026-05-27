@@ -216,6 +216,8 @@ def _gemini_set_backoff(api_key: str) -> None:
 private_history: dict[int, list[dict]] = defaultdict(list)
 group_history:   dict[int, list[dict]] = defaultdict(list)
 active_groups:   dict[int, set[int]]   = {}
+merge_history:   dict[int, list[dict]] = defaultdict(list)  # keyed by root message ID
+_reply_thread_root: dict[int, int]     = {}  # message_id → root_message_id
 _system_prompt_cache: dict[tuple, str] = {}  # Cache system prompts to avoid reconstruction
 _response_cache: dict[tuple, tuple[str, float]] = {}  # Cache responses for 60s (message_hash, timestamp, response)
 
@@ -223,7 +225,9 @@ _response_cache: dict[tuple, tuple[str, float]] = {}  # Cache responses for 60s 
 def _is_in_group(user_id: int, channel_id: int) -> bool:
     return channel_id in active_groups and user_id in active_groups[channel_id]
 
-def _get_history(user_id: int, channel_id: int) -> list[dict]:
+def _get_history(user_id: int, channel_id: int, thread_root_id: int | None = None) -> list[dict]:
+    if thread_root_id is not None:
+        return merge_history[thread_root_id]
     return group_history[channel_id] if _is_in_group(user_id, channel_id) else private_history[user_id]
 
 def _trim(history: list[dict]) -> None:
@@ -242,6 +246,13 @@ def clear_history(user_id: int, channel_id: int | None = None) -> None:
         group_history[channel_id].clear()
     else:
         private_history[user_id].clear()
+
+def register_reply_root(message_id: int, root_id: int) -> None:
+    """Map a message ID to the root of its reply chain for merge history lookup."""
+    _reply_thread_root[message_id] = root_id
+
+def get_reply_root(message_id: int) -> int | None:
+    return _reply_thread_root.get(message_id)
 
 def start_group(channel_id: int, user_ids: list[int]) -> None:
     active_groups[channel_id] = set(user_ids)
@@ -493,6 +504,7 @@ async def generate_ai_response(
     media_type: str | None = None,
     user: discord.User | discord.Member | None = None,
     reply_context: list[dict] | None = None,
+    thread_root_id: int | None = None,
 ) -> str:
     if is_ai_rate_limited(user_id):
         limit = get_ai_limit()
@@ -534,11 +546,24 @@ async def generate_ai_response(
 
     base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
     in_group    = _is_in_group(user_id, channel_id)
+    in_merge    = thread_root_id is not None
 
     if user:
         name     = user.display_name if user.display_name != user.name else user.name
         username = user.name
-        if in_group:
+        if in_merge:
+            cache_key = (thread_root_id, "merge")
+            if cache_key not in _system_prompt_cache:
+                _system_prompt_cache[cache_key] = (
+                    base_prompt +
+                    "\n\nThis is a shared conversation between multiple people replying in the same thread. "
+                    "Messages are prefixed with each person's name so you know who said what. "
+                    "Maintain a single coherent conversation thread across all participants. "
+                    f"The person who just sent this message is {name} (username: {username}). "
+                    "Only reveal their name/username if they directly ask."
+                )
+            system_prompt = _system_prompt_cache[cache_key]
+        elif in_group:
             n = len(active_groups[channel_id])
             cache_key = (user_id, "group", n)
             if cache_key not in _system_prompt_cache:
@@ -563,35 +588,32 @@ async def generate_ai_response(
     else:
         system_prompt = base_prompt
 
-    history  = _get_history(user_id, channel_id)
+    history  = _get_history(user_id, channel_id, thread_root_id)
     has_image = bool(image_b64 and media_type)
 
-    # Prepend reply-chain context when present (e.g. UserB replying to UserA's
-    # conversation). We build a temporary history that starts with the thread
-    # context so the model understands what's being discussed, then appends
-    # the user's own history on top, and finally the current message.
-    # We do NOT save reply_context to persistent history — it's read-only context.
-    if reply_context:
-        # Merge: reply_context first, then user's own history (deduplicated)
+    # In merge threads reply_context is not needed — history IS the shared thread.
+    # For non-merge replies, apply the old read-only context injection.
+    if reply_context and not in_merge:
         combined = list(reply_context)
         for entry in history:
             if entry not in combined:
                 combined.append(entry)
         history = combined
 
+    # Always prefix with speaker name in merge threads (and group mode)
     stored = (
         f"[{user.display_name}]: {user_message or '(sent an image)'}"
-        if (in_group and user)
+        if ((in_group or in_merge) and user)
         else (user_message or "(sent an image)")
     )
 
-    # For save purposes, use the real per-user history (not the merged one)
-    real_history = _get_history(user_id, channel_id)
+    # Write to the correct history bucket
+    real_history = _get_history(user_id, channel_id, thread_root_id)
     real_history.append({"role": "user", "content": stored})
     _trim(real_history)
 
     # Build the working history for this request
-    if reply_context:
+    if reply_context and not in_merge:
         history.append({"role": "user", "content": stored})
         _trim(history)
     else:
@@ -971,36 +993,64 @@ class AI(commands.Cog):
             mark_seen(message.author.id)
             await _log_new_user(message.author)
 
-        # ── Reply-chain context injection ──────────────────────────────────
-        # When UserB replies to a Jarvis message that came from UserA, Jarvis
-        # would normally load UserB's empty history and lose all context.
-        # Instead, we walk the reply chain and prepend the prior exchange so
-        # Jarvis understands the thread (e.g. "Which anime?" → knows it's Naruto).
+        # ── Reply-chain merge ──────────────────────────────────────────────
+        # When any user replies into an existing Jarvis thread, automatically
+        # route all reads/writes to a shared merge_history keyed by the root
+        # message of that reply chain. This means User B replying to a
+        # User A ↔ Jarvis exchange picks up the full shared context, and both
+        # users' subsequent replies continue the same thread seamlessly.
         reply_context: list[dict] = []
-        if replied_to_me:
-            original_author_id = None
-            ref = getattr(message.reference, "resolved", None)
-            if isinstance(ref, discord.Message) and ref.author.bot:
-                # The message being replied to is Jarvis — find the human who
-                # originally triggered that Jarvis reply (one more hop up)
-                parent_ref = getattr(ref, "reference", None)
-                if parent_ref:
-                    parent_msg = parent_ref.resolved
-                    if isinstance(parent_msg, discord.Message):
-                        original_author_id = parent_msg.author.id
+        thread_root_id: int | None = None
 
-            is_different_user = (
-                original_author_id is not None
-                and original_author_id != message.author.id
-            )
-            if is_different_user:
-                # UserB is replying to a conversation they weren't part of —
-                # fetch the full reply chain as context
-                reply_context = await _extract_reply_context(message)
-            elif replied_to_me and not is_different_user:
-                # Same user continuing their own thread via reply — also grab
-                # context in case their own history doesn't cover it
-                reply_context = await _extract_reply_context(message)
+        if replied_to_me:
+            # Walk up the reply chain to find or create the root message ID
+            root_id: int | None = None
+
+            # Check if we already know the root for the message being replied to
+            ref_msg_id = message.reference.message_id if message.reference else None
+            if ref_msg_id:
+                root_id = get_reply_root(ref_msg_id)
+
+            if root_id is None:
+                # Not cached — walk the chain to find the original human message
+                # that started this thread (the one Jarvis first replied to)
+                cur = message.reference.resolved if message.reference else None
+                hops = 0
+                while isinstance(cur, discord.Message) and hops < 10:
+                    parent_ref = getattr(cur, "reference", None)
+                    if not parent_ref:
+                        # cur has no parent — it's a root-level message
+                        if not cur.author.bot:
+                            root_id = cur.id
+                        break
+                    parent = parent_ref.resolved
+                    if not isinstance(parent, discord.Message):
+                        try:
+                            parent = await message.channel.fetch_message(parent_ref.message_id)
+                        except Exception:
+                            break
+                    if not parent.author.bot:
+                        # parent is human — it could be the root, keep going up
+                        root_id = parent.id
+                    cur = parent
+                    hops += 1
+
+                # Fallback: if we couldn't walk up, use the Jarvis message being
+                # replied to as the anchor — still creates a shared history
+                if root_id is None and ref_msg_id:
+                    root_id = ref_msg_id
+
+            if root_id is not None:
+                thread_root_id = root_id
+                # Register current message → root so future replies resolve instantly
+                register_reply_root(message.id, root_id)
+
+                # Seed the merge history from the reply chain if it's brand new
+                if not merge_history[root_id]:
+                    seed = await _extract_reply_context(message)
+                    if seed:
+                        merge_history[root_id].extend(seed)
+                        _trim(merge_history[root_id])
 
         guild_id = message.guild.id if message.guild else None
         try:
@@ -1009,6 +1059,7 @@ class AI(commands.Cog):
                     message.author.id, user_text, message.channel.id,
                     guild_id, image_b64, media_type, user=message.author,
                     reply_context=reply_context,
+                    thread_root_id=thread_root_id,
                 )
         except Exception as e:
             # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
@@ -1017,8 +1068,16 @@ class AI(commands.Cog):
                 message.author.id, user_text, message.channel.id,
                 guild_id, image_b64, media_type, user=message.author,
                 reply_context=reply_context,
+                thread_root_id=thread_root_id,
             )
-        await send_long_message(message, reply, ephemeral=False)
+        bot_reply_msgs = await send_long_message(message, reply, ephemeral=False)
+        # Register both the human message and Jarvis's reply → root so that
+        # whoever replies next immediately resolves to the correct merge history.
+        # For a fresh (non-reply) message, the message itself is the root.
+        effective_root = thread_root_id if thread_root_id is not None else message.id
+        register_reply_root(message.id, effective_root)
+        if bot_reply_msgs:
+            register_reply_root(bot_reply_msgs[0].id, effective_root)
 
     # ── /mylimit & !mylimit ───────────────────────────────────────────────────
 
