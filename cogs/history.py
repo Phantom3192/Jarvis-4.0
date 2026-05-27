@@ -1,170 +1,145 @@
 """
-Conversation history manager — backed by Turso (LibSQL).
-Stores last 20 messages per user, auto-deletes after 30 days inactivity.
+Conversation history — one row per user in Turso.
+Stores the last MAX_HISTORY messages as a JSON blob.
+50 users = 50 rows. No runaway growth.
 """
 import os
+import json
 import time
 import asyncio
 
-MAX_HISTORY      = 20    # messages per user
-INACTIVE_DAYS    = 30    # auto-delete after this many days of inactivity
-CLEANUP_INTERVAL = 86400 # run cleanup every 24 hours
+MAX_HISTORY      = 20
+INACTIVE_DAYS    = 30
+CLEANUP_INTERVAL = 86400
 
 _conn = None
 
 
-# ── Init ──────────────────────────────────────────────────────────────────────
-
 async def init_history():
-    """Call once at startup to connect and create table."""
     global _conn
-
-    # Read env vars here (after load_dotenv has run), not at module level
-    turso_url   = os.getenv("TURSO_URL", "").strip().lstrip("=").strip()
+    turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
-
     if not turso_url or not turso_token:
-        print(
-            "⚠️  TURSO_URL or TURSO_TOKEN is not set in your .env file.\n"
-            "   Conversation history will not be saved across restarts."
-        )
+        print("⚠️  History: TURSO_URL/TOKEN not set — session history won't persist across restarts.")
         return
-
     try:
         import libsql_experimental as libsql
-        _conn = libsql.connect(
-            database=turso_url,
-            auth_token=turso_token,
-        )
+        _conn = libsql.connect(database=turso_url, auth_token=turso_token)
+        # One row per user — messages stored as JSON, last_active for cleanup
         _conn.execute("""
-            CREATE TABLE IF NOT EXISTS history (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL,
-                timestamp   REAL NOT NULL
+            CREATE TABLE IF NOT EXISTS user_history (
+                user_id     TEXT PRIMARY KEY,
+                messages    TEXT NOT NULL DEFAULT '[]',
+                last_active REAL NOT NULL DEFAULT 0
             )
         """)
-        _conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_history_user
-            ON history (user_id, timestamp)
-        """)
         _conn.commit()
-        print("✅ Turso history DB connected")
 
-        # Start background cleanup task
+        # Migrate from old multi-row history table if it exists
+        try:
+            old_rows = _conn.execute(
+                "SELECT user_id, role, content FROM history ORDER BY timestamp ASC"
+            ).fetchall()
+            if old_rows:
+                by_user: dict[str, list] = {}
+                for uid, role, content in old_rows:
+                    by_user.setdefault(uid, []).append({"role": role, "content": content})
+                now = time.time()
+                for uid, msgs in by_user.items():
+                    msgs = msgs[-MAX_HISTORY:]
+                    _conn.execute("""
+                        INSERT INTO user_history (user_id, messages, last_active)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id) DO NOTHING
+                    """, (uid, json.dumps(msgs), now))
+                _conn.execute("DROP TABLE IF EXISTS history")
+                _conn.commit()
+                print(f"✅ Migrated {len(by_user)} user(s) from old history table")
+        except Exception:
+            pass  # old table doesn't exist — nothing to migrate
+        print("✅ History DB connected (compact mode: 1 row/user)")
         asyncio.create_task(_cleanup_loop())
-
     except Exception as e:
-        print(f"❌ Turso connection failed: {e}\n   History will not be persisted.")
+        print(f"❌ History DB init failed: {e}")
         _conn = None
 
 
-# ── Core functions ────────────────────────────────────────────────────────────
-
-async def add_message(user_id: int, role: str, content: str):
-    """
-    Add a message to history and trim to MAX_HISTORY.
-    role: 'user' or 'assistant'
-    """
+async def add_message(user_id: int, role: str, content: str) -> None:
+    """Append a message to the user's history blob, trimming to MAX_HISTORY."""
     if _conn is None:
         return
-
     uid = str(user_id)
     now = time.time()
-
-    _conn.execute(
-        "INSERT INTO history (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-        (uid, role, content, now)
-    )
-
-    _conn.execute("""
-        DELETE FROM history
-        WHERE user_id = ?
-        AND id NOT IN (
-            SELECT id FROM history
-            WHERE user_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-        )
-    """, (uid, uid, MAX_HISTORY))
-
-    _conn.commit()
+    try:
+        row = _conn.execute(
+            "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+        ).fetchone()
+        msgs = json.loads(row[0]) if row else []
+        msgs.append({"role": role, "content": content})
+        if len(msgs) > MAX_HISTORY:
+            msgs = msgs[-MAX_HISTORY:]
+        blob = json.dumps(msgs)
+        _conn.execute("""
+            INSERT INTO user_history (user_id, messages, last_active)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                messages    = excluded.messages,
+                last_active = excluded.last_active
+        """, (uid, blob, now))
+        _conn.commit()
+    except Exception as e:
+        print(f"[History] add_message error for {uid}: {e}")
 
 
 async def get_history(user_id: int) -> list[dict]:
-    """
-    Get conversation history for a user.
-    Returns list of {'role': ..., 'content': ...} dicts oldest first.
-    """
+    """Return stored messages for a user, oldest first."""
     if _conn is None:
         return []
-
     uid = str(user_id)
-    result = _conn.execute(
-        """
-        SELECT role, content FROM history
-        WHERE user_id = ?
-        ORDER BY timestamp ASC
-        """,
-        (uid,)
-    ).fetchall()
-
-    return [{"role": row[0], "content": row[1]} for row in result]
+    try:
+        row = _conn.execute(
+            "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+        ).fetchone()
+        return json.loads(row[0]) if row else []
+    except Exception as e:
+        print(f"[History] get_history error for {uid}: {e}")
+        return []
 
 
 async def clear_history(user_id: int) -> bool:
-    """
-    Clear all history for a user.
-    Returns True if anything was deleted.
-    """
     if _conn is None:
         return False
-
     uid = str(user_id)
-    _conn.execute("DELETE FROM history WHERE user_id = ?", (uid,))
-    _conn.commit()
-    return True
-
-
-async def get_history_count(user_id: int) -> int:
-    """Get number of stored messages for a user."""
-    if _conn is None:
-        return 0
-
-    uid = str(user_id)
-    result = _conn.execute(
-        "SELECT COUNT(*) FROM history WHERE user_id = ?",
-        (uid,)
-    ).fetchone()
-    return result[0] if result else 0
+    try:
+        _conn.execute(
+            "UPDATE user_history SET messages = '[]' WHERE user_id = ?", (uid,)
+        )
+        _conn.commit()
+        return True
+    except Exception as e:
+        print(f"[History] clear error for {uid}: {e}")
+        return False
 
 
 async def load_all_histories() -> dict[int, list[dict]]:
-    """
-    Load all persisted histories into memory at startup.
-    Returns {user_id: [{"role": ..., "content": ...}, ...]} oldest-first.
-    """
+    """Load all persisted histories at startup. Returns {user_id: [messages]}."""
     if _conn is None:
         return {}
     try:
         rows = _conn.execute(
-            "SELECT user_id, role, content FROM history ORDER BY timestamp ASC"
+            "SELECT user_id, messages FROM user_history"
         ).fetchall()
-        out: dict[int, list[dict]] = {}
-        for uid_str, role, content in rows:
-            uid = int(uid_str)
-            out.setdefault(uid, []).append({"role": role, "content": content})
-        return out
+        return {
+            int(uid): json.loads(msgs)
+            for uid, msgs in rows
+            if msgs and msgs != "[]"
+        }
     except Exception as e:
         print(f"[History] load_all_histories error: {e}")
         return {}
 
 
-# ── Auto cleanup ──────────────────────────────────────────────────────────────
-
 async def _cleanup_loop():
-    """Background task — deletes history of users inactive for 30+ days."""
     while True:
         await asyncio.sleep(CLEANUP_INTERVAL)
         await _cleanup_inactive()
@@ -174,13 +149,11 @@ async def _cleanup_inactive():
     if _conn is None:
         return
     cutoff = time.time() - (INACTIVE_DAYS * 86400)
-    _conn.execute("""
-        DELETE FROM history
-        WHERE user_id IN (
-            SELECT user_id FROM history
-            GROUP BY user_id
-            HAVING MAX(timestamp) < ?
+    try:
+        _conn.execute(
+            "DELETE FROM user_history WHERE last_active < ? AND last_active > 0", (cutoff,)
         )
-    """, (cutoff,))
-    _conn.commit()
-    print(f"🧹 Cleaned up inactive user histories older than {INACTIVE_DAYS} days")
+        _conn.commit()
+        print(f"🧹 Cleaned up histories inactive for {INACTIVE_DAYS}+ days")
+    except Exception as e:
+        print(f"[History] cleanup error: {e}")

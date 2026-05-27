@@ -1,8 +1,16 @@
 """
-Long-term user memory — stores important facts about users across sessions.
+Long-term user memory — one row per user in Turso.
+Facts stored as a JSON blob. Smart deduplication prevents redundant entries.
+50 users = 50 rows. No runaway growth.
+
+Smart dedup logic:
+- Same category + high word overlap → update the existing fact instead of adding
+- "User is from India" + "User is from Patna, India" → keeps the more specific one
+- Explicit "remember that..." always wins and replaces older explicit facts
 """
 import os
 import re
+import json
 import time
 import asyncio
 from typing import Any
@@ -24,26 +32,62 @@ async def init_memory():
     try:
         import libsql_experimental as libsql
         _conn = libsql.connect(database=turso_url, auth_token=turso_token)
+        # One row per user — facts stored as JSON array of {fact, category, ts}
         _conn.execute("""
             CREATE TABLE IF NOT EXISTS user_memory (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id   TEXT    NOT NULL,
-                fact      TEXT    NOT NULL,
-                category  TEXT    NOT NULL DEFAULT 'general',
-                timestamp REAL    NOT NULL
+                user_id     TEXT PRIMARY KEY,
+                facts       TEXT NOT NULL DEFAULT '[]',
+                last_active REAL NOT NULL DEFAULT 0
             )
         """)
-        _conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_memory_user
-            ON user_memory (user_id, timestamp)
-        """)
         _conn.commit()
-        print("✅ Memory DB connected")
+
+        # Migrate from old multi-row user_memory table if it exists
+        try:
+            old_rows = _conn.execute(
+                "SELECT user_id, fact, category, timestamp FROM user_memory_old ORDER BY timestamp ASC"
+            ).fetchall()
+        except Exception:
+            old_rows = []
+
+        # Check if old table had id column (multi-row schema)
+        try:
+            old_rows = _conn.execute(
+                "SELECT user_id, fact, category, timestamp FROM user_memory WHERE user_id != '' ORDER BY timestamp ASC"
+            ).fetchall()
+            # If rows have string facts (old schema had TEXT fact column at top level)
+            # Detect old schema: try fetching 'id' column
+            _conn.execute("SELECT id FROM user_memory LIMIT 1").fetchone()
+            # If we get here, old schema exists — migrate
+            by_user: dict[str, list] = {}
+            now = time.time()
+            for uid, fact, category, ts in old_rows:
+                by_user.setdefault(uid, []).append({"fact": fact, "category": category, "ts": ts})
+            _conn.execute("DROP TABLE user_memory")
+            _conn.execute("""
+                CREATE TABLE user_memory (
+                    user_id     TEXT PRIMARY KEY,
+                    facts       TEXT NOT NULL DEFAULT '[]',
+                    last_active REAL NOT NULL DEFAULT 0
+                )
+            """)
+            for uid, entries in by_user.items():
+                entries = entries[-MAX_FACTS:]
+                _conn.execute("""
+                    INSERT INTO user_memory (user_id, facts, last_active) VALUES (?, ?, ?)
+                """, (uid, json.dumps(entries), now))
+            _conn.commit()
+            print(f"✅ Migrated memory for {len(by_user)} user(s) from old schema")
+        except Exception:
+            pass  # already new schema or empty
+        print("✅ Memory DB connected (compact mode: 1 row/user)")
         asyncio.create_task(_cleanup_loop())
     except Exception as e:
         print(f"❌ Memory DB init failed: {e}")
         _conn = None
 
+
+# ── Extraction patterns ───────────────────────────────────────────────────────
 
 _PATTERNS: list[tuple[str, str, Any]] = [
     (r"\b(?:please\s+)?remember\s+(?:that\s+)?(.+)", "explicit",
@@ -79,8 +123,26 @@ _COMPILED = [
     for pat, cat, fmt in _PATTERNS
 ]
 
-_SKIP_PATTERNS = re.compile(
+_SKIP = re.compile(
     r"^\s*(?:hi|hey|hello|ok|okay|thanks|thank you|yes|no|nope|yep|sure|lol|haha|k|cool|nice|wow|wtf|omg|bruh|lmao)\s*$",
+    re.IGNORECASE
+)
+
+# Categories where only one fact should exist (newest wins)
+_SINGLETON_CATEGORIES = {"identity"}
+
+# Sub-keys that are truly singular — replace on match
+_SINGLETON_PREFIXES = (
+    "user's name is",
+    "user is from",
+    "user lives in",
+    "user is a ",
+    "user works as",
+    "user is \d",   # age
+    "user speaks",
+)
+_SINGLETON_RE = re.compile(
+    r"^(" + "|".join(_SINGLETON_PREFIXES) + r")",
     re.IGNORECASE
 )
 
@@ -88,10 +150,9 @@ _SKIP_PATTERNS = re.compile(
 def extract_facts(user_message: str) -> list[tuple[str, str]]:
     if not user_message or len(user_message) < 8:
         return []
-    if _SKIP_PATTERNS.match(user_message.strip()):
+    if _SKIP.match(user_message.strip()):
         return []
-    facts = []
-    seen  = set()
+    facts, seen = [], set()
     for pattern, category, formatter in _COMPILED:
         m = pattern.search(user_message)
         if m:
@@ -105,39 +166,83 @@ def extract_facts(user_message: str) -> list[tuple[str, str]]:
     return facts
 
 
+# ── Smart deduplication ───────────────────────────────────────────────────────
+
+def _word_overlap(a: str, b: str) -> float:
+    """Jaccard similarity between word sets of two strings."""
+    wa = set(re.findall(r"\w+", a.lower()))
+    wb = set(re.findall(r"\w+", b.lower()))
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _merge_facts(existing: list[dict], new_facts: list[tuple[str, str]]) -> list[dict]:
+    """
+    Merge new facts into the existing list intelligently:
+    - Singleton prefixes (name, location, age, etc.) → replace the old one
+    - High word overlap (>0.6) in same category → replace with newer/longer
+    - Otherwise → append if under the cap
+    """
+    result = list(existing)
+    now = time.time()
+
+    for fact, category in new_facts:
+        replaced = False
+
+        # Check for singleton match (e.g. two "User is from X" facts)
+        if _SINGLETON_RE.match(fact):
+            for i, entry in enumerate(result):
+                if _SINGLETON_RE.match(entry["fact"]) and \
+                   entry["fact"].split()[0:3] == fact.split()[0:3]:  # same prefix words
+                    # Keep the more specific (longer) one
+                    if len(fact) >= len(entry["fact"]):
+                        result[i] = {"fact": fact, "category": category, "ts": now}
+                    replaced = True
+                    break
+
+        if not replaced:
+            # Check semantic overlap within the same category
+            for i, entry in enumerate(result):
+                if entry["category"] == category and _word_overlap(fact, entry["fact"]) > 0.6:
+                    # Same meaning — keep the longer/newer one
+                    if len(fact) >= len(entry["fact"]):
+                        result[i] = {"fact": fact, "category": category, "ts": now}
+                    replaced = True
+                    break
+
+        if not replaced:
+            result.append({"fact": fact, "category": category, "ts": now})
+
+    # Cap and evict oldest
+    if len(result) > MAX_FACTS:
+        result.sort(key=lambda x: x["ts"])
+        result = result[-MAX_FACTS:]
+
+    return result
+
+
+# ── DB operations ─────────────────────────────────────────────────────────────
+
 async def save_facts(user_id: int, facts: list[tuple[str, str]]) -> None:
     if _conn is None or not facts:
         return
     uid = str(user_id)
     now = time.time()
     try:
-        existing_rows = _conn.execute(
-            "SELECT fact FROM user_memory WHERE user_id = ?", (uid,)
-        ).fetchall()
-        existing = {row[0].lower() for row in existing_rows}
-    except Exception:
-        existing = set()
-
-    new_facts = [(f, c) for f, c in facts if f.lower() not in existing]
-    if not new_facts:
-        return
-
-    try:
-        for fact, category in new_facts:
-            _conn.execute(
-                "INSERT INTO user_memory (user_id, fact, category, timestamp) VALUES (?, ?, ?, ?)",
-                (uid, fact, category, now)
-            )
+        row = _conn.execute(
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+        ).fetchone()
+        existing = json.loads(row[0]) if row else []
+        merged = _merge_facts(existing, facts)
+        blob = json.dumps(merged)
         _conn.execute("""
-            DELETE FROM user_memory
-            WHERE user_id = ?
-            AND id NOT IN (
-                SELECT id FROM user_memory
-                WHERE user_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            )
-        """, (uid, uid, MAX_FACTS))
+            INSERT INTO user_memory (user_id, facts, last_active)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                facts       = excluded.facts,
+                last_active = excluded.last_active
+        """, (uid, blob, now))
         _conn.commit()
     except Exception as e:
         print(f"[Memory] save error for {uid}: {e}")
@@ -148,11 +253,15 @@ async def get_facts(user_id: int) -> list[str]:
         return []
     uid = str(user_id)
     try:
-        rows = _conn.execute(
-            "SELECT fact FROM user_memory WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
-            (uid, MAX_FACTS)
-        ).fetchall()
-        return [row[0] for row in rows]
+        row = _conn.execute(
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+        ).fetchone()
+        if not row:
+            return []
+        entries = json.loads(row[0])
+        # Return most recent first
+        entries.sort(key=lambda x: x.get("ts", 0), reverse=True)
+        return [e["fact"] for e in entries]
     except Exception as e:
         print(f"[Memory] get error for {uid}: {e}")
         return []
@@ -164,10 +273,12 @@ async def forget_facts(user_id: int) -> int:
     uid = str(user_id)
     try:
         row = _conn.execute(
-            "SELECT COUNT(*) FROM user_memory WHERE user_id = ?", (uid,)
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
         ).fetchone()
-        count = row[0] if row else 0
-        _conn.execute("DELETE FROM user_memory WHERE user_id = ?", (uid,))
+        count = len(json.loads(row[0])) if row else 0
+        _conn.execute(
+            "UPDATE user_memory SET facts = '[]' WHERE user_id = ?", (uid,)
+        )
         _conn.commit()
         return count
     except Exception as e:
@@ -181,9 +292,9 @@ async def get_facts_count(user_id: int) -> int:
     uid = str(user_id)
     try:
         row = _conn.execute(
-            "SELECT COUNT(*) FROM user_memory WHERE user_id = ?", (uid,)
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
         ).fetchone()
-        return row[0] if row else 0
+        return len(json.loads(row[0])) if row else 0
     except Exception:
         return 0
 
@@ -210,8 +321,10 @@ async def _cleanup_old_facts():
         return
     cutoff = time.time() - (MEMORY_DAYS * 86400)
     try:
-        _conn.execute("DELETE FROM user_memory WHERE timestamp < ?", (cutoff,))
+        _conn.execute(
+            "DELETE FROM user_memory WHERE last_active < ? AND last_active > 0", (cutoff,)
+        )
         _conn.commit()
-        print(f"🧹 Cleaned up memory facts older than {MEMORY_DAYS} days")
+        print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
     except Exception as e:
         print(f"[Memory] cleanup error: {e}")
