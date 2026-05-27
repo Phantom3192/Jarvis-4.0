@@ -369,6 +369,43 @@ def check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
     return True, None
 
 
+# ── Mention spam protection ──────────────────────────────────────────────────
+
+_mention_records: dict[tuple[int, int], deque] = {}
+
+def record_mention(invoker_id: int, target_id: int) -> tuple[bool, float | None]:
+    """Record that `invoker_id` caused the bot to mention `target_id`.
+
+    Returns (allowed, timeout_seconds). If allowed is False the invoker has
+    been temporarily bot-banned and the timeout value is returned.
+    """
+    now = time.monotonic()
+    window = float(get_setting("mention_window_seconds", 60.0))
+    limit = int(get_setting("mention_limit_count", 4))
+    timeout = float(get_setting("mention_timeout_seconds", 600.0))
+
+    key = (invoker_id, target_id)
+    dq = _mention_records.setdefault(key, deque())
+    dq.append(now)
+    cutoff = now - window
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+
+    # Trigger only when more than the configured limit within the window.
+    if len(dq) > limit:
+        # Temp ban the invoker
+        bot_bans[str(invoker_id)] = {
+            "reason": f"Mention spamming user {target_id} ({len(dq)} in {int(window)}s)",
+            "expires": time.time() + timeout,
+        }
+        save_bans()
+        dq.clear()
+        print(f"[mention] Timed out user {invoker_id} for mentioning {target_id}: {len(dq)} hits (limit={limit}, window={window}s, timeout={timeout}s)")
+        return False, timeout
+
+    return True, None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # COMMAND COOLDOWN
 # ══════════════════════════════════════════════════════════════════════════════

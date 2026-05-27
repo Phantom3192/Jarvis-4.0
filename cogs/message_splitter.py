@@ -6,6 +6,9 @@ Intelligently splits long messages while maintaining natural continuity.
 DISCORD_MAX_LENGTH = 2000
 CONTINUATION_MARKER = "…"  # Indicates message continuation
 
+import re
+from cogs.state import record_mention
+
 
 def split_message(text: str, max_length: int = DISCORD_MAX_LENGTH) -> list[str]:
     """
@@ -100,6 +103,37 @@ async def send_long_message(
         display_text = part
         if i > 0:
             display_text = f"**[Continued]** {part}"
+        # Detect explicit mention tokens like <@123...> in the outgoing text.
+        # If present, record the mention so we can apply anti-spam timeouts.
+        MENTION_RE = re.compile(r"<@!?(?P<id>\d+)>")
+        found = {int(m.group('id')) for m in MENTION_RE.finditer(display_text)}
+        if found:
+            # Determine invoker id (Interaction.user or Message.author)
+            invoker = None
+            if hasattr(message_or_interaction, "user"):
+                invoker = getattr(message_or_interaction, "user")
+            else:
+                invoker = getattr(message_or_interaction, "author", None)
+            invoker_id = invoker.id if invoker is not None else None
+            if invoker_id is not None:
+                for target_id in found:
+                    allowed, t = record_mention(invoker_id, target_id)
+                    if not allowed:
+                        # Inform the invoker and abort sending the reply
+                        minutes = int(t / 60) if t >= 60 else None
+                        if minutes:
+                            timeout_msg = f"⏱️ You have been temporarily blocked from using Jarvis for {minutes} minute(s) due to mention spamming."
+                        else:
+                            timeout_msg = f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to mention spamming."
+                        try:
+                            is_interaction = hasattr(message_or_interaction, "response")
+                            if is_interaction:
+                                await message_or_interaction.response.send_message(timeout_msg, ephemeral=True)
+                            else:
+                                await message_or_interaction.reply(timeout_msg)
+                        except Exception:
+                            pass
+                        return []
         
         try:
             if is_interaction:
@@ -154,6 +188,26 @@ async def edit_or_send_long_message(
         display_text = part
         if i > 0:
             display_text = f"**[Continued]** {part}"
+        # Same mention-spam protection for interactions editing/sending responses.
+        MENTION_RE = re.compile(r"<@!?(?P<id>\d+)>")
+        found = {int(m.group('id')) for m in MENTION_RE.finditer(display_text)}
+        if found:
+            invoker = getattr(interaction, "user", None)
+            invoker_id = invoker.id if invoker is not None else None
+            if invoker_id is not None:
+                for target_id in found:
+                    allowed, t = record_mention(invoker_id, target_id)
+                    if not allowed:
+                        minutes = int(t / 60) if t >= 60 else None
+                        if minutes:
+                            timeout_msg = f"⏱️ You have been temporarily blocked from using Jarvis for {minutes} minute(s) due to mention spamming."
+                        else:
+                            timeout_msg = f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to mention spamming."
+                        try:
+                            await interaction.response.send_message(timeout_msg, ephemeral=True)
+                        except Exception:
+                            pass
+                        return []
         
         try:
             if i == 0:
