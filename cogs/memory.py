@@ -90,7 +90,7 @@ async def init_memory():
 # ── Extraction patterns ───────────────────────────────────────────────────────
 
 _PATTERNS: list[tuple[str, str, Any]] = [
-    (r"\b(?:please\s+)?remember\s+(?:that\s+)?(.+)", "explicit",
+    (r"\b(?:please\s+)?remember\s+(?:that\s+|to\s+)?(.+)", "explicit",
      lambda m: m.group(1).strip().rstrip(".")),
     (r"\bmy\s+name\s+is\s+([A-Za-z][A-Za-z\s]{1,30})", "identity",
      lambda m: f"User's name is {m.group(1).strip()}"),
@@ -138,7 +138,7 @@ _SINGLETON_PREFIXES = (
     "user lives in",
     "user is a ",
     "user works as",
-    "user is \d",   # age
+    r"user is \d",   # age
     "user speaks",
 )
 _SINGLETON_RE = re.compile(
@@ -159,6 +159,27 @@ def extract_facts(user_message: str) -> list[tuple[str, str]]:
             try:
                 fact = formatter(m)
                 if fact and len(fact) > 5 and fact not in seen:
+                    # If an explicit "remember ..." fact was captured, re-run
+                    # identity/preference sub-patterns on the captured tail so that
+                    # "remember to call me Phantom" becomes identity fact
+                    # "User's name is Phantom" rather than a raw string.
+                    if category == "explicit":
+                        tail = fact
+                        promoted = False
+                        for sub_pat, sub_cat, sub_fmt in _COMPILED[1:]:
+                            sm = sub_pat.search(tail)
+                            if sm:
+                                try:
+                                    sub_fact = sub_fmt(sm)
+                                    if sub_fact and len(sub_fact) > 5 and sub_fact not in seen:
+                                        facts.append((sub_fact, sub_cat))
+                                        seen.add(sub_fact)
+                                        promoted = True
+                                except Exception:
+                                    pass
+                        if promoted:
+                            seen.add(fact)
+                            continue
                     facts.append((fact, category))
                     seen.add(fact)
             except Exception:

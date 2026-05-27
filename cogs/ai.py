@@ -544,6 +544,17 @@ async def generate_ai_response(
         if cache_key in _response_cache:
             cached_response, cache_time = _response_cache[cache_key]
             if time.time() - cache_time < 60:  # Cache for 60 seconds
+                # Still extract memory even on cache hits so "remember to call me X"
+                # is never silently dropped just because the message was repeated.
+                if user_message and thread_root_id is None:
+                    async def _extract_memory_cached():
+                        try:
+                            facts = extract_facts(user_message)
+                            if facts:
+                                await save_facts(user_id, facts)
+                        except Exception as e:
+                            print(f"[Memory] extract error (cached): {e}")
+                    asyncio.create_task(_extract_memory_cached())
                 return cached_response
 
     base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
