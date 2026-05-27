@@ -256,7 +256,7 @@ class Admin(commands.Cog):
             pass
 
     async def _do_guild_ban(self, guild_id: int, reason: str, send_msg) -> None:
-        """Ban a guild: record it, notify the owner if possible, then leave."""
+        """Ban a guild: record it and notify the owner if possible."""
         if guild_id in _guild_bans:
             await send_msg(f"⚠️ Guild `{guild_id}` is already banned.")
             return
@@ -274,14 +274,13 @@ class Admin(commands.Cog):
                     )
                 except discord.Forbidden:
                     pass
-            await guild.leave()
             await send_msg(
-                f"🚫 Guild **{guild.name}** (`{guild_id}`) has been banned and Jarvis has left the server.\n"
+                f"🚫 Guild **{guild.name}** (`{guild_id}`) has been banned from using Jarvis.\n"
                 f"**Reason:** {reason}"
             )
         else:
             await send_msg(
-                f"🚫 Guild `{guild_id}` has been banned (Jarvis is not currently in that server).\n"
+                f"🚫 Guild `{guild_id}` has been banned from using Jarvis.\n"
                 f"**Reason:** {reason}"
             )
 
@@ -525,7 +524,7 @@ class Admin(commands.Cog):
 
     @commands.command(name="guild-ban")
     async def prefix_guild_ban(self, ctx: commands.Context, guild_id: str = None, *, reason: str = "No reason provided"):
-        """Ban a guild from using Jarvis (admin only). Bot will leave the server."""
+        """Ban a guild from using Jarvis (admin only)."""
         if not is_admin(ctx.author):
             await ctx.reply("🚫 You don't have permission to use this command.")
             return
@@ -564,7 +563,7 @@ class Admin(commands.Cog):
         embed = await _build_guild_ban_embed(self.bot)
         await ctx.reply(embed=embed)
 
-    @app_commands.command(name="guildban", description="Ban a guild from using Jarvis and leave it (admin only)")
+    @app_commands.command(name="guildban", description="Ban a guild from using Jarvis (admin only)")
     @app_commands.describe(guild_id="The Discord Guild ID to ban", reason="Reason for the ban")
     async def slash_guild_ban(self, interaction: discord.Interaction, guild_id: str, reason: str = "No reason provided"):
         if not is_admin(interaction.user):

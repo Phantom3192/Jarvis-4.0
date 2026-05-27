@@ -63,7 +63,7 @@ CATEGORIES = {
             ("/botunban",           "Slash version of global-unban"),
             ("!global-bans",        "List all currently banned users"),
             ("/botbans",            "Slash version of global-bans"),
-            ("!guild-ban <id>",     "Ban a server from Jarvis (bot leaves the server)"),
+            ("!guild-ban <id>",     "Ban a server from Jarvis"),
             ("/guildban",           "Slash version of guild-ban"),
             ("!guild-unban <id>",   "Unban a server from Jarvis"),
             ("/guildunban",         "Slash version of guild-unban"),
