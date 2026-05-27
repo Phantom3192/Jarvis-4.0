@@ -313,7 +313,8 @@ def increment_ai_usage(user_id: int) -> int:
     return entry["count"]
 
 def get_ai_limit() -> int:
-    return int(get_setting("daily_ai_limit", 50))
+    # Enforce the single source of truth for daily AI usage limits.
+    return DAILY_AI_LIMIT
 
 def is_ai_rate_limited(user_id: int) -> bool:
     count, _ = get_ai_usage(user_id)
