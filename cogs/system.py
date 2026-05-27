@@ -14,6 +14,7 @@ import time
 import discord
 from discord.ext import commands
 from discord import app_commands
+from typing import Optional
 
 try:
     import psutil
@@ -373,15 +374,48 @@ class System(commands.Cog):
     # ── !guildinfo ────────────────────────────────────────────────────────────
 
     @commands.command(name="guildinfo")
-    @commands.guild_only()
-    async def prefix_guildinfo(self, ctx: commands.Context):
-        """Show detailed info about the current server."""
-        await ctx.reply(embed=_build_guild_embed(ctx.guild))
+    async def prefix_guildinfo(self, ctx: commands.Context, guild_id: int = None):
+        """Show detailed info about the current server, or for a specified guild ID.
+
+        Usage: `!guildinfo` or `!guildinfo 123456789012345678`
+        """
+        # Determine which guild to show: explicit ID takes precedence.
+        if guild_id is None:
+            if ctx.guild is None:
+                await ctx.reply("🚫 This command must be used in a server or you must provide a guild ID.")
+                return
+            guild = ctx.guild
+        else:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                await ctx.reply("❌ I couldn't find a guild with that ID that I'm in.")
+                return
+
+        await ctx.reply(embed=_build_guild_embed(guild))
 
     @app_commands.command(name="guildinfo", description="Show detailed info about this server")
-    @app_commands.guild_only()
-    async def slash_guildinfo(self, interaction: discord.Interaction):
-        await interaction.response.send_message(embed=_build_guild_embed(interaction.guild))
+    async def slash_guildinfo(self, interaction: discord.Interaction, guild_id: Optional[int] = None):
+        """Show detailed info about the current server or for a specified guild ID.
+
+        Usage: `/guildinfo` or `/guildinfo guild_id:123456789012345678`
+        """
+        if guild_id is None:
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    "🚫 This command must be used in a server or you must provide a guild ID.",
+                    ephemeral=True,
+                )
+                return
+            guild = interaction.guild
+        else:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                await interaction.response.send_message(
+                    "❌ I couldn't find a guild with that ID that I'm in.", ephemeral=True
+                )
+                return
+
+        await interaction.response.send_message(embed=_build_guild_embed(guild))
 
     # ── !servers ──────────────────────────────────────────────────────────────
 
