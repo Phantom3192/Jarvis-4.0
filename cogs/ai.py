@@ -496,6 +496,32 @@ async def generate_ai_response(
     if is_ai_rate_limited(user_id):
         return DAILY_LIMIT_MSG.format(limit=DAILY_AI_LIMIT)
 
+    # Prevent abusive repeat/spam requests that ask Jarvis to output a phrase
+    # many times (e.g. "say Hi 100 times"). Detect common patterns and
+    # refuse if the requested repeat count exceeds a sane threshold.
+    def _requested_repeat_count(text: str) -> int | None:
+        # Patterns like "... 100 times", "repeat 100 times", "say hi 100x"
+        m = re.search(r"(?:repeat|say|spam|print)\s+['\"]?.{0,50}?['\"]?\s*(?:for\s*)?(?P<n>\d{1,5})\s*(?:x|times)?\b", text, re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group("n"))
+            except Exception:
+                return None
+        m2 = re.search(r"\b(?P<n>\d{1,5})\s*(?:x|times)\b", text, re.IGNORECASE)
+        if m2:
+            try:
+                return int(m2.group("n"))
+            except Exception:
+                return None
+        return None
+
+    rep = _requested_repeat_count(user_message or "")
+    if rep and rep > int(get_setting("max_repeat_requests", 10)):
+        return (
+            f"🚫 I won't repeat something {rep} times — that's abusive. "
+            f"If you really need a repeated output, ask for at most {get_setting('max_repeat_requests', 10)} repetitions."
+        )
+
     # Quick cache check — if same message asked within 60s, return cached response
     if not image_b64:  # Only cache text responses
         cache_key = (user_id, channel_id, user_message)
