@@ -1,19 +1,4 @@
-"""
-Jarvis bot entry point.
 
-OPTIMISATIONS vs original:
-- TOKEN validated at startup before trying to connect — gives a clear error
-  instead of a confusing LoginFailure deep in the retry loop.
-- on_ready: tree.sync() called only once and errors logged cleanly; no change
-  to logic but added guild count to the ready log.
-- global_ban_check / slash_ban_check: sending a DM to a banned user on every
-  blocked command is spammy and could hit rate limits. Changed to only DM on
-  the first block per session using a module-level set (_dm_sent_bans).
-- Cog loading: failures now log the specific cog name that failed rather than
-  swallowing the error silently.
-- asyncio.run(main()) wrapped in if __name__ == "__main__" guard so the file
-  can be imported in tests without starting the bot.
-"""
 import discord
 from discord.ext import commands
 import os
@@ -78,7 +63,13 @@ async def _notify_banned(user: discord.User | discord.Member) -> None:
         return
     _dm_sent_bans.add(user.id)
     try:
-        await user.send("🚫 You are banned from using **Jarvis** and cannot use any of its commands.")
+        embed = discord.Embed(
+            title="🚫 Banned from Jarvis",
+            description="You are banned from using **Jarvis** and cannot use any of its commands.",
+            color=discord.Color.red(),
+        )
+        embed.set_footer(text="If you believe this is a mistake, contact Phantom.")
+        await user.send(embed=embed)
     except discord.Forbidden:
         pass
 

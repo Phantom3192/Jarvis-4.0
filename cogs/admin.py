@@ -196,10 +196,13 @@ class Admin(commands.Cog):
             bot_bans[str(user.id)] = {"reason": reason, "expires": None}
             save_bans()
             try:
-                await user.send(
-                    f"🚫 You have been **permanently banned** from using **Jarvis**.\n"
-                    f"**Reason:** {reason}"
+                embed = discord.Embed(
+                    title="🚫 Permanently Banned from Jarvis",
+                    color=discord.Color.red(),
                 )
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.set_footer(text="If you believe this is a mistake, contact Phantom.")
+                await user.send(embed=embed)
             except discord.Forbidden:
                 pass
             await send_msg(
@@ -215,11 +218,14 @@ class Admin(commands.Cog):
             bot_bans[str(user.id)] = {"reason": reason, "expires": expires}
             save_bans()
             try:
-                await user.send(
-                    f"⏱️ You have been **temporarily banned** from using **Jarvis**.\n"
-                    f"**Duration:** {duration} {unit}\n"
-                    f"**Reason:** {reason}"
+                embed = discord.Embed(
+                    title="⏱️ Temporarily Banned from Jarvis",
+                    color=discord.Color.orange(),
                 )
+                embed.add_field(name="Duration", value=f"{duration} {unit}", inline=True)
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.set_footer(text="Your access will be restored automatically when the ban expires.")
+                await user.send(embed=embed)
             except discord.Forbidden:
                 pass
             await send_msg(
@@ -251,7 +257,13 @@ class Admin(commands.Cog):
         self.temp_ban_tasks.pop(user_id, None)
         try:
             user = await self.bot.fetch_user(user_id)
-            await user.send("✅ Your temporary ban from **Jarvis** has expired. You can use me again!")
+            embed = discord.Embed(
+                title="✅ Your Jarvis Ban Has Expired",
+                description="Your temporary ban from **Jarvis** has lifted. You can use me again!",
+                color=discord.Color.green(),
+            )
+            embed.set_footer(text="Welcome back!")
+            await user.send(embed=embed)
         except (discord.Forbidden, discord.NotFound):
             pass
 
@@ -267,11 +279,14 @@ class Admin(commands.Cog):
             # Try to notify the guild owner
             if guild.owner:
                 try:
-                    await guild.owner.send(
-                        f"🚫 **{guild.name}** has been **banned from using Jarvis**.\n"
-                        f"**Reason:** {reason}\n"
-                        f"If you believe this is a mistake, please contact Phantom."
+                    embed = discord.Embed(
+                        title="🚫 Server Banned from Jarvis",
+                        color=discord.Color.red(),
                     )
+                    embed.add_field(name="Server", value=guild.name, inline=True)
+                    embed.add_field(name="Reason", value=reason, inline=False)
+                    embed.set_footer(text="If you believe this is a mistake, please contact Phantom.")
+                    await guild.owner.send(embed=embed)
                 except discord.Forbidden:
                     pass
             await send_msg(
