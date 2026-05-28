@@ -9,14 +9,25 @@ from cogs.http_session import get_session
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 HANGMAN_STAGES = [
-    "```\n  +---+\n  |   |\n      |\n      |\n      |\n      |\n=========```",
-    "```\n  +---+\n  |   |\n  O   |\n      |\n      |\n      |\n=========```",
-    "```\n  +---+\n  |   |\n  O   |\n  |   |\n      |\n      |\n=========```",
-    "```\n  +---+\n  |   |\n  O   |\n /|   |\n      |\n      |\n=========```",
-    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n      |\n      |\n=========```",
-    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n /    |\n      |\n=========```",
-    "```\n  +---+\n  |   |\n  O   |\n /|\\  |\n / \\  |\n      |\n=========```",
+    "```\n  ╔═══╗\n  ║   ║\n      ║\n      ║\n      ║\n      ║\n  ════╝```",
+    "```\n  ╔═══╗\n  ║   ║\n  😶  ║\n      ║\n      ║\n      ║\n  ════╝```",
+    "```\n  ╔═══╗\n  ║   ║\n  😶  ║\n  │   ║\n      ║\n      ║\n  ════╝```",
+    "```\n  ╔═══╗\n  ║   ║\n  😟  ║\n ╱│   ║\n      ║\n      ║\n  ════╝```",
+    "```\n  ╔═══╗\n  ║   ║\n  😟  ║\n ╱│╲  ║\n      ║\n      ║\n  ════╝```",
+    "```\n  ╔═══╗\n  ║   ║\n  😨  ║\n ╱│╲  ║\n ╱    ║\n      ║\n  ════╝```",
+    "```\n  ╔═══╗\n  ║   ║\n  😵  ║\n ╱│╲  ║\n ╱ ╲  ║\n      ║\n  ════╝```",
 ]
+
+HANGMAN_COLORS = [
+    discord.Color.green(),
+    discord.Color.green(),
+    discord.Color.from_rgb(144, 238, 144),
+    discord.Color.yellow(),
+    discord.Color.orange(),
+    discord.Color.from_rgb(255, 80, 0),
+    discord.Color.red(),
+]
+
 
 HANGMAN_WORDS = [
     "python", "discord", "robot", "galaxy", "jarvis", "keyboard", "asteroid",
@@ -140,18 +151,36 @@ def _hangman_embed(state: dict, finished: bool = False) -> discord.Embed:
     word    = state["word"]
     guessed = state["guessed"]
     wrong   = state["wrong"]
-    display = " ".join(c if c in guessed else "\\_" for c in word)
-    wrong_letters = ", ".join(sorted(g for g in guessed if g not in word)) or "None"
-    embed = discord.Embed(
-        title="🪢 Hangman",
-        color=discord.Color.blurple() if not finished else discord.Color.greyple(),
-    )
+    lives_left = 6 - wrong
+
+    # Word display — spaced letters, revealed in bold
+    display = "  ".join(f"**{c.upper()}**" if c in guessed else "﹏" for c in word)
+
+    # Lives as hearts
+    hearts = "❤️" * lives_left + "🖤" * wrong
+
+    # Wrong letters as red cross emoji badges
+    wrong_letters = guessed - set(word)
+    wrong_display = "  ".join(f"~~{l.upper()}~~" for l in sorted(wrong_letters)) or "None yet"
+
+    # Progress bar
+    total     = len(word)
+    revealed  = sum(1 for c in word if c in guessed)
+    filled    = round((revealed / total) * 10)
+    bar       = "█" * filled + "░" * (10 - filled)
+    progress  = f"`[{bar}]` {revealed}/{total}"
+
+    color = HANGMAN_COLORS[min(wrong, 6)] if not finished else discord.Color.greyple()
+
+    embed = discord.Embed(title="🪢  H A N G M A N", color=color)
     embed.description = HANGMAN_STAGES[min(wrong, 6)]
-    embed.add_field(name="Word",          value=f"`{display}`",      inline=False)
-    embed.add_field(name="Wrong guesses", value=f"`{wrong_letters}`", inline=True)
-    embed.add_field(name="Lives left",    value=f"`{6 - wrong}/6`",  inline=True)
+    embed.add_field(name="Word", value=display, inline=False)
+    embed.add_field(name=" Lives", value=hearts, inline=True)
+    embed.add_field(name="📏 Length", value=f"`{len(word)}` letters", inline=True)
+    embed.add_field(name="❌ Wrong Guesses", value=wrong_display, inline=False)
+    embed.add_field(name="📊 Progress", value=progress, inline=False)
     if not finished:
-        embed.set_footer(text="Type a single letter to guess!")
+        embed.set_footer(text="✏️  Type a single letter to guess!")
     return embed
 
 
