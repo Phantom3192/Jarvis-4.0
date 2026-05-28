@@ -37,15 +37,9 @@ CATEGORIES = {
         "description": "Fun commands to mess around with.",
         "color": 0xF1C40F,
         "commands": [
-            ("!trivia  /trivia",             "Random trivia question to test your knowledge"),
             ("!hangman  /hangman",           "Classic word guessing — 6 lives, type letters to guess"),
             ("/stophangman",                 "Stop the current hangman game in this channel"),
-            ("!roast  /roast @user",         "Roast someone with a witty insult"),
             ("!compliment  /compliment @user", "Send someone a nice compliment"),
-            ("!wyr  /wyr",                   "Random Would You Rather question"),
-            ("!truth  /truth",               "Get a random truth question"),
-            ("!dare  /dare",                 "Get a random dare"),
-            ("!funfact  /funfact",           "Drop a random fun fact"),
         ],
     },
     "📊 Stats": {

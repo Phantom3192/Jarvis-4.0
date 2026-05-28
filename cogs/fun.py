@@ -3,7 +3,6 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import asyncio
-import html
 from cogs.ai import generate_ai_response
 from cogs.http_session import get_session
 
@@ -26,146 +25,10 @@ HANGMAN_WORDS = [
     "pirate", "jungle", "rocket", "cobalt", "marble", "falcon", "puzzle",
 ]
 
-TRUTH_QUESTIONS = [
-    "What's the most embarrassing thing you've done online?",
-    "Have you ever ghosted someone? Why?",
-    "What's a secret talent you've never told anyone?",
-    "What's the weirdest dream you've ever had?",
-    "Have you ever lied to get out of plans? What did you say?",
-    "What's the most childish thing you still do?",
-    "Who was your first crush?",
-    "What's the worst gift you've ever received?",
-    "Have you ever cheated on a test?",
-    "What's one thing you'd change about yourself?",
-    "What's the most useless talent you have?",
-    "What show do you watch but pretend you don't?",
-    "What's the pettiest thing you've ever done?",
-    "Have you ever pretended to be busy to avoid someone?",
-    "What's the last lie you told?",
-]
-
-DARE_CHALLENGES = [
-    "Type a message using only your elbows.",
-    "Send the last photo in your camera roll (no deleting first!).",
-    "Write a 3-sentence love poem about your least favourite food.",
-    "Do your best impression of a famous person in voice chat.",
-    "Change your nickname to whatever the next person says for 10 minutes.",
-    "Speak in rhymes for the next 5 minutes.",
-    "Send a compliment to the last person you texted.",
-    "Try to lick your elbow and describe the experience.",
-    "Write a haiku about someone in this server.",
-    "Say the alphabet backwards as fast as you can.",
-    "Describe yourself using only emoji for the next 3 messages.",
-    "Type your next message with your eyes closed.",
-    "Sing the chorus of a song in voice chat.",
-    "Do 10 push-ups and come back with proof.",
-    "Send a voice message saying 'I am a golden retriever' three times.",
-]
-
-FUN_FACTS = [
-    "🐙 Octopuses have three hearts, nine brains, and blue blood.",
-    "🍯 Honey never spoils — archaeologists found 3,000-year-old honey in Egyptian tombs that was still edible.",
-    "🌙 The Moon is slowly drifting away from Earth at about 3.8 cm per year.",
-    "🐧 Penguins propose to their mates with a pebble.",
-    "⚡ A bolt of lightning is five times hotter than the surface of the Sun.",
-    "🦈 Sharks are older than trees — they've existed for over 400 million years.",
-    "🧠 Your brain generates enough electricity to power a small LED light.",
-    "🐘 Elephants are the only animals that can't jump.",
-    "🌊 More than 80% of Earth's oceans remain unexplored.",
-    "🦋 Butterflies taste with their feet.",
-    "🍕 The world's most expensive pizza costs $12,000 and takes 72 hours to make.",
-    "🚀 In space, astronauts can grow up to 2 inches taller due to spine decompression.",
-    "🐝 A single bee will produce only 1/12th of a teaspoon of honey in its entire lifetime.",
-    "🌍 There are more possible chess games than atoms in the observable universe.",
-    "🦜 African grey parrots can have the emotional intelligence of a 5-year-old child.",
-    "🔥 Hot water can freeze faster than cold water — this is called the Mpemba effect.",
-    "🧬 You share 60% of your DNA with a banana.",
-    "🐢 A group of flamingos is called a 'flamboyance'.",
-    "💤 Humans spend about 26 years of their life sleeping.",
-    "🎵 Music can help plants grow faster.",
-]
-
-WYR_QUESTIONS = [
-    ("be able to fly", "be invisible"),
-    ("never use social media again", "never watch movies/TV again"),
-    ("know when you'll die", "know how you'll die"),
-    ("have unlimited money", "have unlimited time"),
-    ("live in the past", "live in the future"),
-    ("be the funniest person in the room", "be the smartest person in the room"),
-    ("lose all your memories", "never make new ones"),
-    ("be able to talk to animals", "speak every human language"),
-    ("always be 10 minutes late", "always be 20 minutes early"),
-    ("give up the internet", "give up all cooked food"),
-    ("fight 100 duck-sized horses", "fight 1 horse-sized duck"),
-    ("have no fingers", "have no elbows"),
-    ("always have to whisper", "always have to shout"),
-    ("be famous but broke", "be rich but completely unknown"),
-    ("know all the world's languages", "know how to play every instrument"),
-]
 
 # ── Active game tracking ──────────────────────────────────────────────────────
 
 active_hangman: dict[int, dict] = {}
-active_trivia:  dict[int, dict] = {}
-
-
-# ── Trivia helper ─────────────────────────────────────────────────────────────
-
-async def _fetch_trivia() -> dict | None:
-    url = "https://opentdb.com/api.php?amount=1&type=multiple"
-    try:
-        session = get_session()
-        async with session.get(url, timeout=5) as resp:
-            data = await resp.json()
-            if data["response_code"] == 0:
-                return data["results"][0]
-    except Exception:
-        pass
-    return None
-
-
-# ── Trivia view ───────────────────────────────────────────────────────────────
-
-class TriviaView(discord.ui.View):
-    def __init__(self, correct: str, options: list[str], channel_id: int):
-        super().__init__(timeout=20)
-        self.correct    = correct
-        self.channel_id = channel_id
-        self.answered   = False
-
-        labels = ["A", "B", "C", "D"]
-        for i, opt in enumerate(options):
-            btn = discord.ui.Button(label=f"{labels[i]}. {opt[:60]}", style=discord.ButtonStyle.primary, custom_id=opt)
-            btn.callback = self._make_callback(opt)
-            self.add_item(btn)
-
-    def _make_callback(self, choice: str):
-        async def callback(interaction: discord.Interaction):
-            if self.answered:
-                await interaction.response.send_message("⚡ Someone already answered!", ephemeral=True)
-                return
-            self.answered = True
-            for item in self.children:
-                item.disabled = True
-                if isinstance(item, discord.ui.Button):
-                    if item.custom_id == self.correct:
-                        item.style = discord.ButtonStyle.success
-                    elif item.custom_id == choice and choice != self.correct:
-                        item.style = discord.ButtonStyle.danger
-            if choice == self.correct:
-                msg = f"✅ **{interaction.user.display_name}** got it! The answer was **{self.correct}**."
-            else:
-                msg = f"❌ **{interaction.user.display_name}** guessed wrong. The answer was **{self.correct}**."
-            await interaction.response.edit_message(view=self)
-            await interaction.followup.send(msg)
-            active_trivia.pop(self.channel_id, None)
-            self.stop()
-        return callback
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        active_trivia.pop(self.channel_id, None)
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -173,54 +36,6 @@ class TriviaView(discord.ui.View):
 class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    # ── /trivia ───────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="trivia", description="Start a trivia question — first to answer wins!")
-    async def slash_trivia(self, interaction: discord.Interaction):
-        if interaction.channel_id in active_trivia:
-            await interaction.response.send_message("⚠️ A trivia game is already running in this channel!", ephemeral=True)
-            return
-        await interaction.response.defer()
-        q = await _fetch_trivia()
-        if not q:
-            await interaction.followup.send("⚠️ Couldn't fetch a trivia question. Try again in a moment.")
-            return
-        question  = html.unescape(q["question"])
-        correct   = html.unescape(q["correct_answer"])
-        incorrect = [html.unescape(a) for a in q["incorrect_answers"]]
-        options   = incorrect + [correct]
-        random.shuffle(options)
-        embed = discord.Embed(title="🧠 Trivia Time!", description=question, color=discord.Color.blurple())
-        embed.add_field(name="Category",   value=q["category"],              inline=True)
-        embed.add_field(name="Difficulty", value=q["difficulty"].capitalize(), inline=True)
-        embed.set_footer(text="You have 20 seconds — first to answer wins!")
-        view = TriviaView(correct, options, interaction.channel_id)
-        active_trivia[interaction.channel_id] = True
-        await interaction.followup.send(embed=embed, view=view)
-
-    @commands.command(name="trivia")
-    async def prefix_trivia(self, ctx: commands.Context):
-        if ctx.channel.id in active_trivia:
-            await ctx.reply("⚠️ A trivia game is already running in this channel!")
-            return
-        async with ctx.typing():
-            q = await _fetch_trivia()
-        if not q:
-            await ctx.reply("⚠️ Couldn't fetch a trivia question. Try again in a moment.")
-            return
-        question  = html.unescape(q["question"])
-        correct   = html.unescape(q["correct_answer"])
-        incorrect = [html.unescape(a) for a in q["incorrect_answers"]]
-        options   = incorrect + [correct]
-        random.shuffle(options)
-        embed = discord.Embed(title="🧠 Trivia Time!", description=question, color=discord.Color.blurple())
-        embed.add_field(name="Category",   value=q["category"],              inline=True)
-        embed.add_field(name="Difficulty", value=q["difficulty"].capitalize(), inline=True)
-        embed.set_footer(text="You have 20 seconds — first to answer wins!")
-        view = TriviaView(correct, options, ctx.channel.id)
-        active_trivia[ctx.channel.id] = True
-        await ctx.reply(embed=embed, view=view)
 
     # ── /hangman ──────────────────────────────────────────────────────────────
 
@@ -287,39 +102,6 @@ class Fun(commands.Cog):
         state = active_hangman.pop(interaction.channel_id)
         await interaction.response.send_message(f"🛑 Hangman stopped. The word was **{state['word']}**.")
 
-    # ── /roast ────────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="roast", description="Roast a user with a witty AI burn 🔥")
-    @app_commands.describe(user="The user to roast")
-    async def slash_roast(self, interaction: discord.Interaction, user: discord.Member):
-        await interaction.response.defer()
-        prompt = (
-            f"Give a single witty, creative, and funny roast of a Discord user named '{user.display_name}'. "
-            f"Keep it playful and not genuinely hurtful — more like a comedy roast. "
-            f"One short paragraph max. Don't start with 'Oh' or 'Ah'."
-        )
-        reply = await generate_ai_response(interaction.user.id, prompt, interaction.guild_id)
-        embed = discord.Embed(description=f"🔥 {reply}", color=discord.Color.orange())
-        embed.set_author(name=f"Roasting {user.display_name}", icon_url=user.display_avatar.url)
-        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-        await interaction.followup.send(embed=embed)
-
-    @commands.command(name="roast")
-    async def prefix_roast(self, ctx: commands.Context, user: discord.Member = None):
-        if not user:
-            await ctx.reply("Usage: `!roast @user`")
-            return
-        async with ctx.typing():
-            prompt = (
-                f"Give a single witty, creative, and funny roast of a Discord user named '{user.display_name}'. "
-                f"Keep it playful and not genuinely hurtful — more like a comedy roast. "
-                f"One short paragraph max. Don't start with 'Oh' or 'Ah'."
-            )
-            reply = await generate_ai_response(ctx.author.id, prompt, ctx.guild.id if ctx.guild else None)
-        embed = discord.Embed(description=f"🔥 {reply}", color=discord.Color.orange())
-        embed.set_author(name=f"Roasting {user.display_name}", icon_url=user.display_avatar.url)
-        await ctx.reply(embed=embed)
-
     # ── /compliment ───────────────────────────────────────────────────────────
 
     @app_commands.command(name="compliment", description="Send someone a genuine AI compliment 💛")
@@ -349,70 +131,6 @@ class Fun(commands.Cog):
             reply = await generate_ai_response(ctx.author.id, prompt, ctx.guild.id if ctx.guild else None)
         embed = discord.Embed(description=f"💛 {reply}", color=discord.Color.yellow())
         embed.set_author(name=f"A compliment for {user.display_name}", icon_url=user.display_avatar.url)
-        await ctx.reply(embed=embed)
-
-    # ── /wyr ──────────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="wyr", description="Would you rather…?")
-    async def slash_wyr(self, interaction: discord.Interaction):
-        a, b = random.choice(WYR_QUESTIONS)
-        embed = discord.Embed(title="🤔 Would You Rather…", color=discord.Color.purple())
-        embed.add_field(name="Option A", value=f"🅰️ {a.capitalize()}", inline=False)
-        embed.add_field(name="Option B", value=f"🅱️ {b.capitalize()}", inline=False)
-        embed.set_footer(text="Reply with A or B!")
-        await interaction.response.send_message(embed=embed)
-
-    @commands.command(name="wyr")
-    async def prefix_wyr(self, ctx: commands.Context):
-        a, b = random.choice(WYR_QUESTIONS)
-        embed = discord.Embed(title="🤔 Would You Rather…", color=discord.Color.purple())
-        embed.add_field(name="Option A", value=f"🅰️ {a.capitalize()}", inline=False)
-        embed.add_field(name="Option B", value=f"🅱️ {b.capitalize()}", inline=False)
-        embed.set_footer(text="Reply with A or B!")
-        await ctx.reply(embed=embed)
-
-    # ── /truth & /dare ────────────────────────────────────────────────────────
-
-    @app_commands.command(name="truth", description="Get a truth question 👀")
-    async def slash_truth(self, interaction: discord.Interaction):
-        q = random.choice(TRUTH_QUESTIONS)
-        embed = discord.Embed(title="🫣 Truth!", description=q, color=discord.Color.teal())
-        embed.set_footer(text=f"Asked to {interaction.user.display_name}")
-        await interaction.response.send_message(embed=embed)
-
-    @commands.command(name="truth")
-    async def prefix_truth(self, ctx: commands.Context):
-        q = random.choice(TRUTH_QUESTIONS)
-        embed = discord.Embed(title="🫣 Truth!", description=q, color=discord.Color.teal())
-        embed.set_footer(text=f"Asked to {ctx.author.display_name}")
-        await ctx.reply(embed=embed)
-
-    @app_commands.command(name="dare", description="Get a dare challenge 😈")
-    async def slash_dare(self, interaction: discord.Interaction):
-        d = random.choice(DARE_CHALLENGES)
-        embed = discord.Embed(title="😈 Dare!", description=d, color=discord.Color.red())
-        embed.set_footer(text=f"Dared to {interaction.user.display_name}")
-        await interaction.response.send_message(embed=embed)
-
-    @commands.command(name="dare")
-    async def prefix_dare(self, ctx: commands.Context):
-        d = random.choice(DARE_CHALLENGES)
-        embed = discord.Embed(title="😈 Dare!", description=d, color=discord.Color.red())
-        embed.set_footer(text=f"Dared to {ctx.author.display_name}")
-        await ctx.reply(embed=embed)
-
-    # ── /funfact ──────────────────────────────────────────────────────────────
-
-    @app_commands.command(name="funfact", description="Get a random fun fact 🤯")
-    async def slash_funfact(self, interaction: discord.Interaction):
-        fact = random.choice(FUN_FACTS)
-        embed = discord.Embed(title="🤯 Fun Fact!", description=fact, color=discord.Color.green())
-        await interaction.response.send_message(embed=embed)
-
-    @commands.command(name="funfact")
-    async def prefix_funfact(self, ctx: commands.Context):
-        fact = random.choice(FUN_FACTS)
-        embed = discord.Embed(title="🤯 Fun Fact!", description=fact, color=discord.Color.green())
         await ctx.reply(embed=embed)
 
 
