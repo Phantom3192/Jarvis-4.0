@@ -1,22 +1,25 @@
 """
 Stats cog.
 
-CHANGES:
-- !users / /users: paginated embed with ◀ ▶ arrow buttons (same pattern as
-  help.py). Shows username, user ID, messages, ~tokens, AI usage today,
-  first/last seen, ban status. Admin-only.
-- Buttons are locked to the invoking admin (interaction_check).
-- Buttons and view time out after 120 s of inactivity (same as help).
+CHANGES vs previous version:
+- /stats personal embed: activity-based colour, daily AI usage bar with %,
+  rank badge (by message count), memory count, cleaner layout.
+- /users admin embed: server-wide summary header (total msgs, tokens, active
+  today, banned count), rank numbers on each row, cleaner value lines.
+- "No data" responses now use a tidy embed instead of a bare string.
 """
 import discord
 from discord.ext import commands
 from discord import app_commands
 from datetime import datetime, timezone
 import time
-from cogs.state import get_stats, get_all_stats, get_all_bans, get_all_rate_limits, _today_utc, seen_users, DAILY_AI_LIMIT
+from cogs.state import (
+    get_stats, get_all_stats, get_all_bans, get_all_rate_limits,
+    _today_utc, seen_users, DAILY_AI_LIMIT, get_ai_usage, get_ai_limit,
+)
 from cogs.admin import is_admin
 
-USERS_PAGE_SIZE = 10   # users per embed page
+USERS_PAGE_SIZE = 10
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -27,41 +30,110 @@ def _ts_to_discord(ts: float) -> str:
 
 def _ts_to_short(ts: float) -> str:
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d")
+    return dt.strftime("%d %b %Y")
+
+def _bar(filled: int, total: int = 10, fill: str = "█", empty: str = "░") -> str:
+    f = round((filled / total) * 10) if total else 0
+    return fill * f + empty * (10 - f)
+
+def _activity_color(messages: int) -> discord.Color:
+    """Shift embed colour based on how active a user is."""
+    if messages >= 500:
+        return discord.Color.gold()
+    if messages >= 100:
+        return discord.Color.blurple()
+    if messages >= 20:
+        return discord.Color.teal()
+    return discord.Color.greyple()
+
+def _rank_badge(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
 
 
-def _format_stats(user: discord.User | discord.Member, data: dict) -> discord.Embed:
+# ── Personal stats embed ──────────────────────────────────────────────────────
+
+def _format_stats(
+    user: discord.User | discord.Member,
+    data: dict,
+    rank: int | None = None,
+    memory_count: int = 0,
+) -> discord.Embed:
+    msgs       = data.get("messages", 0)
+    tokens     = data.get("tokens_est", 0)
+    first_seen = data.get("first_seen", 0)
+    last_seen  = data.get("last_seen", 0)
+
+    ai_count, _ = get_ai_usage(user.id)
+    ai_limit    = get_ai_limit()
+    ai_pct      = round((ai_count / ai_limit) * 100) if ai_limit else 0
+    ai_bar      = _bar(ai_count, ai_limit)
+
+    if ai_pct >= 90:
+        ai_status = "🔴 Almost out"
+    elif ai_pct >= 60:
+        ai_status = "🟡 Running low"
+    else:
+        ai_status = "🟢 Good to go"
+
+    color = _activity_color(msgs)
+    rank_str = f"  •  Rank {_rank_badge(rank)}" if rank else ""
+
     embed = discord.Embed(
-        title=f"📊 Jarvis Stats — {user.display_name}",
-        color=discord.Color.blurple(),
+        title=f"📊 {user.display_name}'s Jarvis Stats{rank_str}",
+        color=color,
     )
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.add_field(name="Messages Sent", value=f"`{data['messages']:,}`",   inline=True)
-    embed.add_field(name="~Tokens Used",  value=f"`{data['tokens_est']:,}`", inline=True)
-    embed.add_field(name="\u200b",        value="\u200b",                    inline=True)
-    embed.add_field(name="First Interaction", value=_ts_to_discord(data["first_seen"]), inline=True)
-    embed.add_field(name="Last Interaction",  value=_ts_to_discord(data["last_seen"]),  inline=True)
+
+    # Row 1 — core numbers
+    embed.add_field(name="💬 Messages",   value=f"`{msgs:,}`",    inline=True)
+    embed.add_field(name="🔤 ~Tokens",    value=f"`{tokens:,}`",  inline=True)
+    if memory_count:
+        embed.add_field(name="🧠 Memories", value=f"`{memory_count}`", inline=True)
+    else:
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    # Row 2 — timeline
+    if first_seen:
+        embed.add_field(name="📅 First Seen", value=_ts_to_discord(first_seen), inline=True)
+        embed.add_field(name="🕐 Last Active", value=_ts_to_discord(last_seen),  inline=True)
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    # Row 3 — daily AI bar
+    embed.add_field(
+        name="⚡ Today's AI Usage",
+        value=(
+            f"`{ai_bar}` **{ai_count}/{ai_limit}** ({ai_pct}%)\n"
+            f"{ai_status}  •  Resets midnight UTC"
+        ),
+        inline=False,
+    )
+
     embed.set_footer(text="Token count is an estimate (~4 chars/token)")
     return embed
 
 
-# ── Data collection ───────────────────────────────────────────────────────────
+def _no_stats_embed(user: discord.User | discord.Member, is_self: bool) -> discord.Embed:
+    embed = discord.Embed(
+        title="📭 No Stats Yet",
+        description=(
+            "You haven't interacted with Jarvis yet. Send a message to get started!"
+            if is_self
+            else f"**{user.display_name}** hasn't interacted with Jarvis yet."
+        ),
+        color=discord.Color.greyple(),
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    return embed
+
+
+# ── Admin users list ──────────────────────────────────────────────────────────
 
 def _collect_user_rows(bot: commands.Bot) -> list[dict]:
-    """
-    Merge seen + stats + bans + rate_limits into a list of row dicts,
-    sorted by message count descending.
-
-    seen stores int user IDs; stats/bans/rate_limits use str keys.
-    We normalise everything to str so the union is complete and all
-    24 (or however many) users appear even if stats weren't recorded yet.
-    """
     all_stats = get_all_stats()
     all_bans  = get_all_bans()
     all_rl    = get_all_rate_limits()
     today     = _today_utc()
 
-    # seen_users stores ints — convert to str to match the other stores
     seen_str = {str(uid) for uid in seen_users}
     all_uids = seen_str | set(all_stats) | set(all_bans) | set(all_rl)
     rows = []
@@ -106,63 +178,73 @@ def _collect_user_rows(bot: commands.Bot) -> list[dict]:
     return rows
 
 
-# ── Embed builder ─────────────────────────────────────────────────────────────
+def _server_summary(rows: list[dict]) -> str:
+    """One-line summary stats for the embed description."""
+    today        = _today_utc()
+    total_msgs   = sum(r["messages"]   for r in rows)
+    total_tokens = sum(r["tokens_est"] for r in rows)
+    active_today = sum(1 for r in rows if r["ai_today"] > 0)
+    banned_count = sum(1 for r in rows if r["is_banned"])
+    limit_hit    = sum(1 for r in rows if r["ai_today"] >= DAILY_AI_LIMIT)
+
+    lines = [
+        f"💬 **{total_msgs:,}** total messages  •  🔤 **{total_tokens:,}** ~tokens",
+        f"⚡ **{active_today}** active today  •  🚫 **{banned_count}** banned  •  ⏳ **{limit_hit}** at daily limit",
+    ]
+    return "\n".join(lines)
+
 
 def _build_users_embed(rows: list[dict], page: int, total_pages: int) -> discord.Embed:
-    """Build a single page embed for the users list."""
-    total   = len(rows)
-    today   = _today_utc()
-    start   = page * USERS_PAGE_SIZE
-    chunk   = rows[start : start + USERS_PAGE_SIZE]
+    total = len(rows)
+    today = _today_utc()
+    start = page * USERS_PAGE_SIZE
+    chunk = rows[start : start + USERS_PAGE_SIZE]
 
     embed = discord.Embed(
         title=f"👥 Jarvis Users — {total:,} total",
-        color=discord.Color.blurple(),
         description=(
-            f"Page **{page + 1}/{total_pages}** • "
-            f"Sorted by most messages • "
-            f"`{today}`"
+            _server_summary(rows) +
+            f"\n\n*Page **{page + 1} / {total_pages}** • sorted by messages • `{today}`*"
         ),
+        color=discord.Color.blurple(),
     )
 
-    for r in chunk:
-        ban_tag   = " 🚫" if r["is_banned"] else ""
-        limit_tag = " ⏳" if r["ai_today"] >= DAILY_AI_LIMIT else ""
+    for i, r in enumerate(chunk, start=start + 1):
+        rank     = _rank_badge(i)
+        ban_tag  = " 🚫" if r["is_banned"] else ""
+        limit_tag= " ⏳" if r["ai_today"] >= DAILY_AI_LIMIT else ""
 
         if r["is_banned"]:
             if r["ban_expires"]:
                 exp_dt  = datetime.fromtimestamp(r["ban_expires"], tz=timezone.utc)
                 exp_str = discord.utils.format_dt(exp_dt, style="R")
-                ban_line = f"\n  🚫 Banned — expires {exp_str} | {r['ban_reason'] or 'No reason'}"
+                ban_line = f"\n  🚫 Banned — expires {exp_str}  •  _{r['ban_reason'] or 'No reason'}_"
             else:
-                ban_line = f"\n  🚫 Permanently banned | {r['ban_reason'] or 'No reason'}"
+                ban_line = f"\n  🚫 Permanently banned  •  _{r['ban_reason'] or 'No reason'}_"
         else:
             ban_line = ""
 
-        # Skip time fields if no stats recorded yet
         time_line = ""
         if r["first_seen"]:
             time_line = (
-                f" • **First:** `{_ts_to_short(r['first_seen'])}`"
-                f" • **Last:** {_ts_to_discord(r['last_seen'])}"
+                f"  •  📅 `{_ts_to_short(r['first_seen'])}`"
+                f"  •  🕐 {_ts_to_discord(r['last_seen'])}"
             )
 
+        ai_bar = _bar(r["ai_today"], DAILY_AI_LIMIT)
+
         embed.add_field(
-            name=f"`{r['username']}`{ban_tag}{limit_tag}",
+            name=f"{rank} `{r['username']}`{ban_tag}{limit_tag}",
             value=(
-                f"**ID:** `{r['uid']}`\n"
-                f"**Messages:** `{r['messages']:,}` "
-                f"• **~Tokens:** `{r['tokens_est']:,}` "
-                f"• **AI today:** `{r['ai_today']}/{DAILY_AI_LIMIT}`"
-                f"{time_line}"
+                f"ID: `{r['uid']}`{time_line}\n"
+                f"💬 `{r['messages']:,}` msgs  •  🔤 `{r['tokens_est']:,}` tokens  •  "
+                f"⚡ `{ai_bar}` {r['ai_today']}/{DAILY_AI_LIMIT}"
                 f"{ban_line}"
             ),
             inline=False,
         )
 
-    embed.set_footer(
-        text="🚫 = banned  ⏳ = daily limit hit  •  Token count is an estimate"
-    )
+    embed.set_footer(text="🚫 banned  ⏳ daily limit hit  •  Token count is an estimate")
     return embed
 
 
@@ -174,7 +256,7 @@ class UsersView(discord.ui.View):
         self.author_id   = author_id
         self.rows        = rows
         self.page        = 0
-        self.total_pages = max(1, -(-len(rows) // USERS_PAGE_SIZE))  # ceiling div
+        self.total_pages = max(1, -(-len(rows) // USERS_PAGE_SIZE))
         self._update_buttons()
 
     def _update_buttons(self):
@@ -208,7 +290,6 @@ class UsersView(discord.ui.View):
 
     @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.primary, disabled=True)
     async def page_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Non-interactive — just shows current page. Required: must have a callback.
         await interaction.response.defer()
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
@@ -223,14 +304,30 @@ class Stats(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    def _user_rank(self, user_id: int) -> int | None:
+        """Return 1-based rank of user by message count, or None if no stats."""
+        all_stats = get_all_stats()
+        uid_str   = str(user_id)
+        if uid_str not in all_stats:
+            return None
+        sorted_ids = sorted(all_stats, key=lambda k: all_stats[k].get("messages", 0), reverse=True)
+        try:
+            return sorted_ids.index(uid_str) + 1
+        except ValueError:
+            return None
+
+    async def _memory_count(self, user_id: int) -> int:
+        try:
+            from cogs.memory import get_facts_count
+            return await get_facts_count(user_id)
+        except Exception:
+            return 0
+
     # ── /stats & !stats ───────────────────────────────────────────────────────
 
     @commands.command(name="stats")
     async def prefix_stats(self, ctx: commands.Context, user: discord.User = None):
-        """
-        !stats          — view your own stats
-        !stats @user    — view another user's stats (admins only)
-        """
+        """!stats — your stats  |  !stats @user — admin only"""
         if user is not None and not is_admin(ctx.author):
             await ctx.reply("🚫 Only admins can view other users' stats.")
             return
@@ -238,17 +335,14 @@ class Stats(commands.Cog):
         target = user or ctx.author
         data   = get_stats(target.id)
         if not data:
-            msg = (
-                "📭 You haven't interacted with Jarvis yet."
-                if target.id == ctx.author.id
-                else f"📭 **{target}** has no recorded interactions with Jarvis."
-            )
-            await ctx.reply(msg)
+            await ctx.reply(embed=_no_stats_embed(target, target.id == ctx.author.id))
             return
 
-        await ctx.reply(embed=_format_stats(target, data))
+        rank   = self._user_rank(target.id)
+        mem    = await self._memory_count(target.id)
+        await ctx.reply(embed=_format_stats(target, data, rank=rank, memory_count=mem))
 
-    @app_commands.command(name="stats", description="View Jarvis usage stats")
+    @app_commands.command(name="stats", description="View your Jarvis usage stats")
     @app_commands.describe(user="User to look up (admins only — leave empty for your own stats)")
     async def slash_stats(self, interaction: discord.Interaction, user: discord.User = None):
         if user is not None and not is_admin(interaction.user):
@@ -257,31 +351,36 @@ class Stats(commands.Cog):
             )
             return
 
+        await interaction.response.defer(ephemeral=bool(user))
         target = user or interaction.user
         data   = get_stats(target.id)
         if not data:
-            msg = (
-                "📭 You haven't interacted with Jarvis yet."
-                if target.id == interaction.user.id
-                else f"📭 **{target}** has no recorded interactions with Jarvis."
+            await interaction.followup.send(
+                embed=_no_stats_embed(target, target.id == interaction.user.id),
+                ephemeral=True,
             )
-            await interaction.response.send_message(msg, ephemeral=True)
             return
 
-        await interaction.response.send_message(embed=_format_stats(target, data))
+        rank = self._user_rank(target.id)
+        mem  = await self._memory_count(target.id)
+        await interaction.followup.send(embed=_format_stats(target, data, rank=rank, memory_count=mem))
 
     # ── !users & /users ───────────────────────────────────────────────────────
 
     @commands.command(name="users")
     async def prefix_users(self, ctx: commands.Context):
-        """[Admin] Browse all users Jarvis has ever seen, with arrow buttons."""
+        """[Admin] Browse all users Jarvis has seen, with arrow buttons."""
         if not is_admin(ctx.author):
             await ctx.reply("🚫 This command is for admins only.")
             return
 
         rows = _collect_user_rows(self.bot)
         if not rows:
-            await ctx.reply("📭 No users recorded yet.")
+            await ctx.reply(embed=discord.Embed(
+                title="📭 No Users Yet",
+                description="No one has interacted with Jarvis yet.",
+                color=discord.Color.greyple(),
+            ))
             return
 
         view = UsersView(author_id=ctx.author.id, rows=rows)
@@ -297,7 +396,14 @@ class Stats(commands.Cog):
 
         rows = _collect_user_rows(self.bot)
         if not rows:
-            await interaction.response.send_message("📭 No users recorded yet.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="📭 No Users Yet",
+                    description="No one has interacted with Jarvis yet.",
+                    color=discord.Color.greyple(),
+                ),
+                ephemeral=True,
+            )
             return
 
         view = UsersView(author_id=interaction.user.id, rows=rows)
