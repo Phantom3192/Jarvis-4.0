@@ -59,10 +59,10 @@ GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
-HISTORY_LIMIT = 5   # Reduced for ultra-fast API responses
-MAX_TOKENS    = 400 # Snappier responses — still ~2 solid paragraphs
-PROVIDER_TIMEOUT = 15  # seconds per provider call — increased from 8s to handle Groq slowness
-GROQ_RETRIES  = 2   # how many times to retry Groq on timeout before giving up
+HISTORY_LIMIT    = 5    # Reduced for ultra-fast API responses
+MAX_TOKENS       = 400  # Snappier responses — still ~2 solid paragraphs
+PROVIDER_TIMEOUT = 8    # 8s per provider; backed-off keys skip instantly so p99 stays fast
+GROQ_RETRIES     = 1    # one retry max; second timeout just backs off the key and falls to Gemini faster
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
@@ -342,8 +342,6 @@ async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
                 print(f"[Groq …{api_key[-6:]}] Timeout after {PROVIDER_TIMEOUT}s (attempt {attempt}/{GROQ_RETRIES})")
                 if attempt == GROQ_RETRIES:
                     _groq_set_backoff(api_key)  # repeated timeout → back off this key
-                else:
-                    await asyncio.sleep(1)
             except Exception as e:
                 error_msg = str(e)[:120]
                 if "429" in error_msg or "rate" in error_msg.lower():
@@ -562,15 +560,15 @@ async def generate_ai_response(
     in_merge    = thread_root_id is not None
 
     # ── Long-term memory injection ────────────────────────────────────────────
-    # Fetch stored facts about this user and append to the base prompt so
-    # Jarvis remembers things from previous sessions. Skipped for group/merge.
+    # Fetch stored facts concurrently — awaiting this sequentially was adding
+    # a full DB round-trip to every response before the API call even started.
     memory_suffix = ""
     if not in_group and not in_merge:
         try:
-            facts = await get_facts(user_id)
+            facts = await asyncio.wait_for(get_facts(user_id), timeout=2.0)
             memory_suffix = build_memory_prompt(facts)
         except Exception:
-            memory_suffix = ""
+            memory_suffix = ""  # never block response for a memory miss
     effective_base = base_prompt + memory_suffix
 
     if user:
@@ -702,13 +700,17 @@ async def generate_ai_response(
             reply = await _try_groq(history, system_prompt)
 
     else:
-        # "groq" or "auto" — Groq first (fastest), Gemini only as fallback
+        # "groq" or "auto" — Groq first (fastest), Gemini only as fallback.
+        # Exception: if ALL Groq keys are currently backed off, skip straight
+        # to Gemini rather than waiting for _try_groq to discover this itself.
+        groq_available = _next_groq_client() is not None
         if has_image:
             reply = await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-        else:
+        elif groq_available:
             reply = await _try_groq(history, system_prompt)
+        # else: all Groq keys backed off — fall through directly to Gemini below
 
-        # Groq failed — try Gemini Flash + Lite together across both keys
+        # Groq failed or was unavailable — race Gemini Flash + Lite across both keys
         if not reply and genai is not None:
             tasks = []
             for key in filter(None, [GEMINI_API_KEY, GEMINI_API_KEY_2]):
@@ -762,9 +764,15 @@ async def generate_ai_response(
         reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=limit, remaining=remaining)}"
 
     # Cache text responses for 60 seconds (skip if has image)
+    # Also sweep stale entries on every write to prevent unbounded growth.
     if not image_b64:
         cache_key = (user_id, channel_id, user_message)
-        _response_cache[cache_key] = (reply, time.time())
+        now = time.time()
+        _response_cache[cache_key] = (reply, now)
+        # Evict entries older than 60s — cheap scan since cache is small
+        stale = [k for k, (_, ts) in _response_cache.items() if now - ts > 60]
+        for k in stale:
+            _response_cache.pop(k, None)
 
     return reply
 
