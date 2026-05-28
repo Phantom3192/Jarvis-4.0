@@ -57,7 +57,7 @@ class ErrorHandler(commands.Cog):
             print(f"❌ Asyncio unhandled exception: {tb}")
             loop.create_task(_send_error("Asyncio Unhandled Exception", tb))
 
-        asyncio.get_event_loop().set_exception_handler(_asyncio_exception_handler)
+        asyncio.get_running_loop().set_exception_handler(_asyncio_exception_handler)
 
         original_excepthook = sys.excepthook
 

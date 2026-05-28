@@ -17,7 +17,7 @@ from discord import app_commands
 import asyncio
 import os
 import time
-from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage, get_setting, set_setting
+from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage, get_setting, set_setting, _data, _schedule_save
 import re
 
 
@@ -75,9 +75,28 @@ BAN_USAGE = (
 )
 UNBAN_USAGE = "**Usage:** `!global-unban <user_id>`"
 
-# ── Guild-ban storage (in-memory; keyed by guild_id) ─────────────────────────
-# Structure: { guild_id: {"reason": str, "banned_at": float} }
+# ── Guild-ban storage — persisted via state._data["guild_bans"] ───────────────
+# Structure: { guild_id (int): {"reason": str, "banned_at": float} }
+# Loaded from Turso at startup via _load_guild_bans(), saved on every change.
+
 _guild_bans: dict[int, dict] = {}
+
+
+def _load_guild_bans() -> None:
+    """Load guild bans from the shared state store into _guild_bans."""
+    raw = _data.get("guild_bans", {})
+    _guild_bans.clear()
+    for k, v in raw.items():
+        try:
+            _guild_bans[int(k)] = v
+        except (ValueError, TypeError):
+            pass
+
+
+def _save_guild_bans() -> None:
+    """Persist guild bans back to the shared state store (debounced write)."""
+    _data["guild_bans"] = {str(k): v for k, v in _guild_bans.items()}
+    _schedule_save("guild_bans")
 
 
 def is_guild_banned(guild_id: int) -> bool:
@@ -164,6 +183,9 @@ class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.temp_ban_tasks: dict[int, asyncio.Task] = {}
+
+        # Load persisted guild bans from Turso into _guild_bans
+        _load_guild_bans()
 
         # Re-schedule any active temp bans that survived a restart
         now = time.time()
@@ -273,6 +295,7 @@ class Admin(commands.Cog):
             await send_msg(f"⚠️ Guild `{guild_id}` is already banned.")
             return
         _guild_bans[guild_id] = {"reason": reason, "banned_at": time.time()}
+        _save_guild_bans()
 
         guild = self.bot.get_guild(guild_id)
         if guild:
@@ -305,6 +328,7 @@ class Admin(commands.Cog):
             await send_msg(f"❌ Guild `{guild_id}` is not guild-banned.")
             return
         del _guild_bans[guild_id]
+        _save_guild_bans()
         await send_msg(f"✅ Guild `{guild_id}` has been unbanned. Jarvis can be re-invited to that server.")
 
     async def cog_check(self, ctx: commands.Context) -> bool:

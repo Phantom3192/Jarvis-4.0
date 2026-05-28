@@ -245,77 +245,90 @@ def _merge_facts(existing: list[dict], new_facts: list[tuple[str, str]]) -> list
 
 # ── DB operations ─────────────────────────────────────────────────────────────
 
+def _sync_save_facts(uid: str, facts: list[tuple[str, str]]) -> None:
+    """Blocking DB write — always call via asyncio.to_thread."""
+    now = time.time()
+    row = _conn.execute(
+        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+    ).fetchone()
+    existing = json.loads(row[0]) if row else []
+    merged   = _merge_facts(existing, facts)
+    blob     = json.dumps(merged)
+    _conn.execute("""
+        INSERT INTO user_memory (user_id, facts, last_active)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            facts       = excluded.facts,
+            last_active = excluded.last_active
+    """, (uid, blob, now))
+    _conn.commit()
+
 async def save_facts(user_id: int, facts: list[tuple[str, str]]) -> None:
     if _conn is None or not facts:
         return
     uid = str(user_id)
-    now = time.time()
     try:
-        row = _conn.execute(
-            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-        ).fetchone()
-        existing = json.loads(row[0]) if row else []
-        merged = _merge_facts(existing, facts)
-        blob = json.dumps(merged)
-        _conn.execute("""
-            INSERT INTO user_memory (user_id, facts, last_active)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                facts       = excluded.facts,
-                last_active = excluded.last_active
-        """, (uid, blob, now))
-        _conn.commit()
+        await asyncio.to_thread(_sync_save_facts, uid, facts)
     except Exception as e:
         print(f"[Memory] save error for {uid}: {e}")
 
+
+def _sync_get_facts(uid: str) -> list[str]:
+    """Blocking DB read — always call via asyncio.to_thread."""
+    row = _conn.execute(
+        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+    ).fetchone()
+    if not row:
+        return []
+    entries = json.loads(row[0])
+    entries.sort(key=lambda x: x.get("ts", 0), reverse=True)
+    return [e["fact"] for e in entries]
 
 async def get_facts(user_id: int) -> list[str]:
     if _conn is None:
         return []
     uid = str(user_id)
     try:
-        row = _conn.execute(
-            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-        ).fetchone()
-        if not row:
-            return []
-        entries = json.loads(row[0])
-        # Return most recent first
-        entries.sort(key=lambda x: x.get("ts", 0), reverse=True)
-        return [e["fact"] for e in entries]
+        return await asyncio.to_thread(_sync_get_facts, uid)
     except Exception as e:
         print(f"[Memory] get error for {uid}: {e}")
         return []
 
+
+def _sync_forget_facts(uid: str) -> int:
+    """Blocking DB write — always call via asyncio.to_thread."""
+    row = _conn.execute(
+        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+    ).fetchone()
+    count = len(json.loads(row[0])) if row else 0
+    _conn.execute("UPDATE user_memory SET facts = '[]' WHERE user_id = ?", (uid,))
+    _conn.commit()
+    return count
 
 async def forget_facts(user_id: int) -> int:
     if _conn is None:
         return 0
     uid = str(user_id)
     try:
-        row = _conn.execute(
-            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-        ).fetchone()
-        count = len(json.loads(row[0])) if row else 0
-        _conn.execute(
-            "UPDATE user_memory SET facts = '[]' WHERE user_id = ?", (uid,)
-        )
-        _conn.commit()
-        return count
+        return await asyncio.to_thread(_sync_forget_facts, uid)
     except Exception as e:
         print(f"[Memory] forget error for {uid}: {e}")
         return 0
 
+
+def _sync_get_facts_count(uid: str) -> int:
+    """Blocking DB read — always call via asyncio.to_thread."""
+    row = _conn.execute(
+        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+    ).fetchone()
+    return len(json.loads(row[0])) if row else 0
 
 async def get_facts_count(user_id: int) -> int:
     if _conn is None:
         return 0
     uid = str(user_id)
     try:
-        row = _conn.execute(
-            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-        ).fetchone()
-        return len(json.loads(row[0])) if row else 0
+        return await asyncio.to_thread(_sync_get_facts_count, uid)
     except Exception:
         return 0
 
@@ -337,15 +350,18 @@ async def _cleanup_loop():
         await _cleanup_old_facts()
 
 
+def _sync_cleanup_old_facts(cutoff: float) -> None:
+    _conn.execute(
+        "DELETE FROM user_memory WHERE last_active < ? AND last_active > 0", (cutoff,)
+    )
+    _conn.commit()
+
 async def _cleanup_old_facts():
     if _conn is None:
         return
     cutoff = time.time() - (MEMORY_DAYS * 86400)
     try:
-        _conn.execute(
-            "DELETE FROM user_memory WHERE last_active < ? AND last_active > 0", (cutoff,)
-        )
-        _conn.commit()
+        await asyncio.to_thread(_sync_cleanup_old_facts, cutoff)
         print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
     except Exception as e:
         print(f"[Memory] cleanup error: {e}")

@@ -64,32 +64,43 @@ async def init_history():
         _conn = None
 
 
+def _sync_add_message(uid: str, role: str, content: str) -> None:
+    """Blocking DB write — always call via asyncio.to_thread."""
+    now = time.time()
+    row = _conn.execute(
+        "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+    ).fetchone()
+    msgs = json.loads(row[0]) if row else []
+    msgs.append({"role": role, "content": content})
+    if len(msgs) > MAX_HISTORY:
+        msgs = msgs[-MAX_HISTORY:]
+    blob = json.dumps(msgs)
+    _conn.execute("""
+        INSERT INTO user_history (user_id, messages, last_active)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            messages    = excluded.messages,
+            last_active = excluded.last_active
+    """, (uid, blob, now))
+    _conn.commit()
+
 async def add_message(user_id: int, role: str, content: str) -> None:
     """Append a message to the user's history blob, trimming to MAX_HISTORY."""
     if _conn is None:
         return
     uid = str(user_id)
-    now = time.time()
     try:
-        row = _conn.execute(
-            "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
-        ).fetchone()
-        msgs = json.loads(row[0]) if row else []
-        msgs.append({"role": role, "content": content})
-        if len(msgs) > MAX_HISTORY:
-            msgs = msgs[-MAX_HISTORY:]
-        blob = json.dumps(msgs)
-        _conn.execute("""
-            INSERT INTO user_history (user_id, messages, last_active)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                messages    = excluded.messages,
-                last_active = excluded.last_active
-        """, (uid, blob, now))
-        _conn.commit()
+        await asyncio.to_thread(_sync_add_message, uid, role, content)
     except Exception as e:
         print(f"[History] add_message error for {uid}: {e}")
 
+
+def _sync_get_history(uid: str) -> list[dict]:
+    """Blocking DB read — always call via asyncio.to_thread."""
+    row = _conn.execute(
+        "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+    ).fetchone()
+    return json.loads(row[0]) if row else []
 
 async def get_history(user_id: int) -> list[dict]:
     """Return stored messages for a user, oldest first."""
@@ -97,43 +108,48 @@ async def get_history(user_id: int) -> list[dict]:
         return []
     uid = str(user_id)
     try:
-        row = _conn.execute(
-            "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
-        ).fetchone()
-        return json.loads(row[0]) if row else []
+        return await asyncio.to_thread(_sync_get_history, uid)
     except Exception as e:
         print(f"[History] get_history error for {uid}: {e}")
         return []
 
+
+def _sync_clear_history(uid: str) -> bool:
+    """Blocking DB write — always call via asyncio.to_thread."""
+    _conn.execute(
+        "UPDATE user_history SET messages = '[]' WHERE user_id = ?", (uid,)
+    )
+    _conn.commit()
+    return True
 
 async def clear_history(user_id: int) -> bool:
     if _conn is None:
         return False
     uid = str(user_id)
     try:
-        _conn.execute(
-            "UPDATE user_history SET messages = '[]' WHERE user_id = ?", (uid,)
-        )
-        _conn.commit()
-        return True
+        return await asyncio.to_thread(_sync_clear_history, uid)
     except Exception as e:
         print(f"[History] clear error for {uid}: {e}")
         return False
 
+
+def _sync_load_all_histories() -> dict[int, list[dict]]:
+    """Blocking DB read — always call via asyncio.to_thread."""
+    rows = _conn.execute(
+        "SELECT user_id, messages FROM user_history"
+    ).fetchall()
+    return {
+        int(uid): json.loads(msgs)
+        for uid, msgs in rows
+        if msgs and msgs != "[]"
+    }
 
 async def load_all_histories() -> dict[int, list[dict]]:
     """Load all persisted histories at startup. Returns {user_id: [messages]}."""
     if _conn is None:
         return {}
     try:
-        rows = _conn.execute(
-            "SELECT user_id, messages FROM user_history"
-        ).fetchall()
-        return {
-            int(uid): json.loads(msgs)
-            for uid, msgs in rows
-            if msgs and msgs != "[]"
-        }
+        return await asyncio.to_thread(_sync_load_all_histories)
     except Exception as e:
         print(f"[History] load_all_histories error: {e}")
         return {}
@@ -145,15 +161,18 @@ async def _cleanup_loop():
         await _cleanup_inactive()
 
 
+def _sync_cleanup_inactive(cutoff: float) -> None:
+    _conn.execute(
+        "DELETE FROM user_history WHERE last_active < ? AND last_active > 0", (cutoff,)
+    )
+    _conn.commit()
+
 async def _cleanup_inactive():
     if _conn is None:
         return
     cutoff = time.time() - (INACTIVE_DAYS * 86400)
     try:
-        _conn.execute(
-            "DELETE FROM user_history WHERE last_active < ? AND last_active > 0", (cutoff,)
-        )
-        _conn.commit()
+        await asyncio.to_thread(_sync_cleanup_inactive, cutoff)
         print(f"🧹 Cleaned up histories inactive for {INACTIVE_DAYS}+ days")
     except Exception as e:
         print(f"[History] cleanup error: {e}")

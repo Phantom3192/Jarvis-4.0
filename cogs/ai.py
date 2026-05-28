@@ -222,6 +222,7 @@ merge_history:   dict[int, list[dict]] = defaultdict(list)  # keyed by root mess
 _reply_thread_root: dict[int, int]     = {}  # message_id → root_message_id
 _system_prompt_cache: dict[tuple, str] = {}  # Cache system prompts to avoid reconstruction
 _response_cache: dict[tuple, tuple[str, float]] = {}  # Cache responses for 60s (message_hash, timestamp, response)
+_response_cache_writes: list[int] = [0]  # mutable counter for sweep throttling
 
 
 def _is_in_group(user_id: int, channel_id: int) -> bool:
@@ -249,8 +250,15 @@ def clear_history(user_id: int, channel_id: int | None = None) -> None:
     else:
         private_history[user_id].clear()
 
+_MAX_REPLY_ROOT_CACHE = 10_000
+
 def register_reply_root(message_id: int, root_id: int) -> None:
     """Map a message ID to the root of its reply chain for merge history lookup."""
+    if len(_reply_thread_root) >= _MAX_REPLY_ROOT_CACHE:
+        # Evict oldest ~10% of entries to keep memory bounded
+        evict = list(_reply_thread_root.keys())[:_MAX_REPLY_ROOT_CACHE // 10]
+        for k in evict:
+            _reply_thread_root.pop(k, None)
     _reply_thread_root[message_id] = root_id
 
 def get_reply_root(message_id: int) -> int | None:
@@ -457,10 +465,11 @@ async def _race_providers(*tasks: asyncio.Task) -> str | None:
         return None
 
     remaining = set(tasks)
-    deadline = asyncio.get_event_loop().time() + 20  # overall timeout
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 20  # overall timeout
 
     while remaining:
-        time_left = deadline - asyncio.get_event_loop().time()
+        time_left = deadline - loop.time()
         if time_left <= 0:
             break
         try:
@@ -695,15 +704,26 @@ async def generate_ai_response(
     in_merge    = thread_root_id is not None
 
     # ── Long-term memory injection ────────────────────────────────────────────
-    # Fetch stored facts concurrently — awaiting this sequentially was adding
-    # a full DB round-trip to every response before the API call even started.
-    memory_suffix = ""
+    # Start memory fetch immediately — it runs concurrently while we build the
+    # system prompt and history. We await it only right before we need it.
+    memory_task = None
     if not in_group and not in_merge:
+        memory_task = asyncio.create_task(
+            asyncio.wait_for(get_facts(user_id), timeout=2.0)
+        )
+
+    # Build history and prompt while memory is fetching in background
+    history  = _get_history(user_id, channel_id, thread_root_id)
+    has_image = bool(image_b64 and media_type)
+
+    # Await memory result now — by this point it's likely already done
+    memory_suffix = ""
+    if memory_task is not None:
         try:
-            facts = await asyncio.wait_for(get_facts(user_id), timeout=2.0)
+            facts = await memory_task
             memory_suffix = build_memory_prompt(facts)
         except Exception:
-            memory_suffix = ""  # never block response for a memory miss
+            memory_suffix = ""
     effective_base = base_prompt + memory_suffix
 
     if user:
@@ -755,9 +775,6 @@ async def generate_ai_response(
                 )
     else:
         system_prompt = effective_base
-
-    history  = _get_history(user_id, channel_id, thread_root_id)
-    has_image = bool(image_b64 and media_type)
 
     # In merge threads reply_context is not needed — history IS the shared thread.
     # For non-merge replies, apply the old read-only context injection.
@@ -899,15 +916,18 @@ async def generate_ai_response(
         reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=limit, remaining=remaining)}"
 
     # Cache text responses for 60 seconds (skip if has image)
-    # Also sweep stale entries on every write to prevent unbounded growth.
+    # Sweep stale entries every 100 writes to avoid unbounded growth without
+    # paying a full scan cost on every single message.
     if not image_b64:
         cache_key = (user_id, channel_id, user_message)
         now = time.time()
         _response_cache[cache_key] = (reply, now)
-        # Evict entries older than 60s — cheap scan since cache is small
-        stale = [k for k, (_, ts) in _response_cache.items() if now - ts > 60]
-        for k in stale:
-            _response_cache.pop(k, None)
+        _response_cache_writes[0] += 1
+        if _response_cache_writes[0] >= 100:
+            _response_cache_writes[0] = 0
+            stale = [k for k, (_, ts) in _response_cache.items() if now - ts > 60]
+            for k in stale:
+                _response_cache.pop(k, None)
 
     return reply
 
@@ -1201,7 +1221,7 @@ class AI(commands.Cog):
 
         if is_new_user(message.author.id):
             mark_seen(message.author.id)
-            await _log_new_user(message.author)
+            asyncio.create_task(_log_new_user(message.author))  # fire-and-forget
 
         # ── Reply-chain merge ──────────────────────────────────────────────
         # When any user replies into an existing Jarvis thread, automatically

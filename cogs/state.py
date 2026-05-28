@@ -33,6 +33,7 @@ _data: dict[str, Any] = {
     "prompts":     {},    # str(guild_id) → prompt string
     "rate_limits": {},    # str(user_id)  → {"count": int, "day": "YYYY-MM-DD"}
     "settings":   {},    # arbitrary bot settings persisted (e.g. cooldowns)
+    "guild_bans":  {},    # str(guild_id) → {"reason": str, "banned_at": float}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -43,6 +44,7 @@ _SERIALISE: dict[str, Any] = {
     "prompts":     lambda: _data["prompts"],
     "rate_limits": lambda: _data["rate_limits"],
     "settings":    lambda: _data["settings"],
+    "guild_bans":  lambda: _data["guild_bans"],
 }
 
 
@@ -84,6 +86,7 @@ async def init_db():
         if "prompts"     in db: _data["prompts"]      = db["prompts"]
         if "settings"    in db: _data["settings"]     = db["settings"]
         if "rate_limits" in db: _data["rate_limits"]  = db["rate_limits"]
+        if "guild_bans"  in db: _data["guild_bans"]   = db["guild_bans"]
 
         print("✅ Turso state DB connected")
 
@@ -327,15 +330,24 @@ def reset_ai_usage(user_id: int) -> None:
 
 
 # ── Generic settings storage ──────────────────────────────────────────────────
+
+# In-memory cache for settings — avoids dict-in-dict lookup on every message.
+# Invalidated on every set_setting() call so values are always fresh.
+_settings_cache: dict[str, object] = {}
+
 def get_setting(key: str, default=None):
-    s = _data.get("settings", {})
-    return s.get(key, default)
+    if key in _settings_cache:
+        return _settings_cache[key]
+    val = _data.get("settings", {}).get(key, default)
+    _settings_cache[key] = val
+    return val
 
 
 def set_setting(key: str, value) -> None:
     if "settings" not in _data:
         _data["settings"] = {}
     _data["settings"][key] = value
+    _settings_cache[key] = value  # update cache immediately
     _schedule_save("settings")
 
 
