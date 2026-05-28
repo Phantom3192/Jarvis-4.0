@@ -493,6 +493,141 @@ async def _race_providers(*tasks: asyncio.Task) -> str | None:
     return None
 
 
+
+# ── Intent interceptor ────────────────────────────────────────────────────────
+# Maps natural-language chat messages to real bot command outputs.
+# Returns True if the message was handled (so caller skips the AI API),
+# False if it should proceed to the AI normally.
+
+_INTENT_PING = re.compile(
+    r"\b(ping|latency|lag|response\s*time|how\s*(fast|slow)|ms\b)",
+    re.IGNORECASE,
+)
+_INTENT_UPTIME = re.compile(
+    r"\b(uptime|how\s+long\s+(have\s+you|you'?ve|has\s+it|it'?s)\s+(been\s+)?(online|running|up|alive)|online\s+for|been\s+running)",
+    re.IGNORECASE,
+)
+_INTENT_USAGE = re.compile(
+    r"\b(usage|resource|cpu|ram|memory\s+usage|disk|system\s+stats?|host\s+stats?|server\s+stats?|load|how\s+much\s+(ram|cpu|memory|disk))",
+    re.IGNORECASE,
+)
+_INTENT_STATS = re.compile(
+    r"\b(my\s+stats?|usage\s+stats?|how\s+many\s+(messages|tokens)|messages?\s+sent|ai\s+limit|daily\s+limit)",
+    re.IGNORECASE,
+)
+_INTENT_HELP = re.compile(
+    r"\b(what\s+(can\s+you|commands?|do\s+you)|show\s+(me\s+)?(commands?|help)|list\s+(commands?|what)|available\s+commands?|help\s+menu|command\s+list)",
+    re.IGNORECASE,
+)
+_INTENT_MEMORY = re.compile(
+    r"\b(what\s+do\s+you\s+(know|remember)|what\s+have\s+you\s+(stored|saved|remembered)|my\s+memory|show\s+(my\s+)?memories)",
+    re.IGNORECASE,
+)
+_INTENT_MODEL = re.compile(
+    r"\b(what\s+(model|ai)\s+(are\s+you|is\s+(running|active))|which\s+model|current\s+model|my\s+model|what\s+are\s+you\s+using)",
+    re.IGNORECASE,
+)
+_INTENT_LIMIT = re.compile(
+    r"\b(how\s+many\s+(ai\s+)?(messages?|requests?)\s+(do\s+i\s+have|left|remaining)|my\s+(daily\s+)?limit|ai\s+limit|messages?\s+left)",
+    re.IGNORECASE,
+)
+
+
+async def _try_intent_intercept(
+    message: discord.Message,
+    user_text: str,
+    bot: commands.Bot,
+) -> bool:
+    """
+    Check if user_text maps to a known bot command intent.
+    If it does, send the real embed/response and return True.
+    Return False to let the message fall through to the AI.
+    """
+    from cogs.admin import is_admin as _is_admin
+
+    # ── ping ──────────────────────────────────────────────────────────────
+    if _INTENT_PING.search(user_text):
+        import time as _time
+        from cogs.system import _ping_colour
+        ws_ms  = round(bot.latency * 1000)
+        before = _time.monotonic()
+        msg    = await message.reply("🏓 Pinging…")
+        api_ms = round((_time.monotonic() - before) * 1000)
+        embed  = discord.Embed(title="🏓 Pong!", color=_ping_colour(ws_ms))
+        embed.add_field(name="WebSocket",      value=f"`{ws_ms} ms`",  inline=True)
+        embed.add_field(name="API Round-trip", value=f"`{api_ms} ms`", inline=True)
+        await msg.edit(content=None, embed=embed)
+        return True
+
+    # ── uptime ────────────────────────────────────────────────────────────
+    if _INTENT_UPTIME.search(user_text):
+        from cogs.system import _START_TIME, _fmt_uptime
+        import time as _time
+        uptime = _time.monotonic() - _START_TIME
+        embed  = discord.Embed(
+            title="⏱️ Jarvis Uptime",
+            description=f"Online for **{_fmt_uptime(uptime)}**",
+            color=discord.Color.green(),
+        )
+        embed.set_footer(text="Jarvis")
+        await message.reply(embed=embed)
+        return True
+
+    # ── system usage (admin only) ─────────────────────────────────────────
+    if _INTENT_USAGE.search(user_text):
+        if not _is_admin(message.author):
+            await message.reply("🚫 System usage stats are admin-only.", mention_author=False)
+            return True
+        from cogs.system import _build_usage_embed
+        await message.reply(embed=_build_usage_embed(bot))
+        return True
+
+    # ── personal stats ────────────────────────────────────────────────────
+    if _INTENT_STATS.search(user_text):
+        from cogs.state import get_stats as _get_stats
+        from cogs.stats import _format_stats, _no_stats_embed
+        data = _get_stats(message.author.id)
+        if not data:
+            await message.reply(embed=_no_stats_embed(message.author, True))
+        else:
+            # Get rank and memory count
+            try:
+                from cogs.stats import Stats as _StatsCog
+                cog = bot.cogs.get("Stats")
+                rank = cog._user_rank(message.author.id) if cog else None
+                mem  = await cog._memory_count(message.author.id) if cog else 0
+            except Exception:
+                rank, mem = None, 0
+            await message.reply(embed=_format_stats(message.author, data, rank=rank, memory_count=mem))
+        return True
+
+    # ── daily AI limit ────────────────────────────────────────────────────
+    if _INTENT_LIMIT.search(user_text):
+        await message.reply(embed=_build_mylimit_embed(message.author.id))
+        return True
+
+    # ── help / command list ───────────────────────────────────────────────
+    if _INTENT_HELP.search(user_text):
+        from cogs.help import _build_overview_embed, HelpView
+        view = HelpView(author_id=message.author.id)
+        await message.reply(embed=_build_overview_embed(), view=view)
+        return True
+
+    # ── memory ────────────────────────────────────────────────────────────
+    if _INTENT_MEMORY.search(user_text):
+        from cogs.memory import get_facts as _get_facts
+        facts = await _get_facts(message.author.id)
+        await message.reply(embed=_build_memory_embed(message.author, facts))
+        return True
+
+    # ── current model ─────────────────────────────────────────────────────
+    if _INTENT_MODEL.search(user_text):
+        await message.reply(embed=_build_model_embed(message.author.id))
+        return True
+
+    return False
+
+
 # ── Core response ─────────────────────────────────────────────────────────────
 
 async def generate_ai_response(
@@ -1054,6 +1189,15 @@ class AI(commands.Cog):
         if not user_text and not image_b64:
             await message.reply("Yes? What can I help you with?")
             return
+
+        # ── Intent intercept — run real command logic, skip the AI API ────
+        # Detect natural-language requests that map to a concrete bot command
+        # and respond with the actual embed/data instead of letting the API
+        # write a made-up text description of it.
+        if not image_b64:
+            intercepted = await _try_intent_intercept(message, user_text, self.bot)
+            if intercepted:
+                return
 
         if is_new_user(message.author.id):
             mark_seen(message.author.id)
