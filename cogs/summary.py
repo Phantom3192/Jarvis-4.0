@@ -1,13 +1,16 @@
 """
-Summary cog — summarises recent channel messages using AI.
+Summary cog — summarises the invoking user's personal conversation with Jarvis.
+
+Only messages from the user themselves OR from the bot are included.
+Other users' messages are ignored entirely.
 
 Usage:
-    !summary            → summarise the last 50 messages
-    !summary 30m        → summarise messages from the last 30 minutes
-    !summary 1h         → summarise messages from the last 1 hour
-    !summary 2h         → summarise messages from the last 2 hours
-    !summary 6h         → summarise messages from the last 6 hours
-    !summary 24h / 1d   → summarise messages from the last 24 hours
+    !summary            → summarise your last 50 exchanges with Jarvis
+    !summary 30m        → your conversation with Jarvis in the last 30 minutes
+    !summary 1h         → last 1 hour
+    !summary 2h         → last 2 hours
+    !summary 6h         → last 6 hours
+    !summary 24h / 1d   → last 24 hours (max)
 
     /summary [window]   → slash command equivalent
 
@@ -15,17 +18,15 @@ Time window formats accepted:
     <N>m   — minutes  (e.g. 30m, 90m)
     <N>h   — hours    (e.g. 1h, 6h)
     <N>d   — days     (e.g. 1d, 2d)
-    (no arg) — defaults to last 50 messages regardless of time
+    (no arg) — defaults to last 50 messages (user + bot combined)
 
 Limits:
-    - Max lookback: 24 hours (to avoid enormous fetches)
-    - Max messages scanned: 500
-    - Bot messages are excluded from the summary content
-    - Requires the bot to have read history permission in the channel
+    - Max lookback: 24 hours
+    - Max messages scanned from Discord history: 500
+    - Only the invoking user's messages and Jarvis's replies are summarised
 """
 
 import re
-import time
 import asyncio
 import discord
 from discord.ext import commands
@@ -33,18 +34,16 @@ from discord import app_commands
 from datetime import datetime, timezone, timedelta
 
 from cogs.http_session import safe_reply
-from cogs.message_splitter import send_long_message
 from cogs.state import is_ai_rate_limited, increment_ai_usage
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-MAX_MESSAGES     = 500          # hard cap on messages fetched from Discord
-DEFAULT_MESSAGES = 50           # used when no time window is specified
-MAX_LOOKBACK_H   = 24           # maximum time window allowed (hours)
-SUMMARY_TIMEOUT  = 20           # seconds to wait for AI response
-MAX_TOKENS       = 600          # summary can be a bit longer than chat replies
+MAX_SCAN         = 500    # max messages fetched from Discord history
+DEFAULT_SCAN     = 200    # messages to scan when no time window given
+MAX_LOOKBACK_H   = 24     # maximum time window (hours)
+SUMMARY_TIMEOUT  = 20     # seconds to wait for AI provider
 
-# Regex: optional integer + unit (m/h/d), case-insensitive
+# Regex: integer + unit m/h/d
 _WINDOW_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
 
 
@@ -52,88 +51,79 @@ _WINDOW_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
 
 def _parse_window(arg: str) -> tuple[int, str] | None:
     """
-    Parse a time window string like '30m', '2h', '1d'.
-    Returns (seconds, human_label) or None if invalid.
+    Parse '30m', '2h', '1d' → (total_seconds, human_label).
+    Returns None if the format is unrecognised.
     """
     m = _WINDOW_RE.match(arg.strip())
     if not m:
         return None
     n, unit = int(m.group(1)), m.group(2).lower()
     if unit == "m":
-        return n * 60, f"{n} minute{'s' if n != 1 else ''}"
+        return n * 60,    f"{n} minute{'s' if n != 1 else ''}"
     if unit == "h":
-        return n * 3600, f"{n} hour{'s' if n != 1 else ''}"
+        return n * 3600,  f"{n} hour{'s' if n != 1 else ''}"
     if unit == "d":
         return n * 86400, f"{n} day{'s' if n != 1 else ''}"
     return None
 
 
-def _format_messages(messages: list[discord.Message]) -> str:
+def _format_conversation(
+    messages: list[discord.Message],
+    user: discord.User | discord.Member,
+    bot_id: int,
+) -> str:
     """
-    Turn a list of Discord messages into a plain-text transcript for the AI.
-    Format: [HH:MM] Username: content
+    Build a plain-text transcript of only the user ↔ Jarvis exchange.
+    Format: [HH:MM] You: ...   /   [HH:MM] Jarvis: ...
     """
     lines = []
     for msg in messages:
-        # Skip empty messages (e.g. pure embeds / attachments)
         content = msg.content.strip()
         if not content:
             continue
         ts = msg.created_at.strftime("%H:%M")
-        name = msg.author.display_name
-        lines.append(f"[{ts}] {name}: {content}")
+        if msg.author.id == user.id:
+            lines.append(f"[{ts}] You: {content}")
+        elif msg.author.id == bot_id:
+            lines.append(f"[{ts}] Jarvis: {content}")
     return "\n".join(lines)
 
 
-async def _fetch_messages_by_time(
-    channel: discord.TextChannel | discord.DMChannel,
-    seconds: int,
-) -> list[discord.Message]:
-    """Fetch up to MAX_MESSAGES messages from the last `seconds` seconds."""
+async def _fetch_by_time(channel, seconds: int) -> list[discord.Message]:
     after_dt = datetime.now(timezone.utc) - timedelta(seconds=seconds)
-    messages = []
-    async for msg in channel.history(limit=MAX_MESSAGES, after=after_dt, oldest_first=True):
-        messages.append(msg)
-    return messages
+    msgs = []
+    async for m in channel.history(limit=MAX_SCAN, after=after_dt, oldest_first=True):
+        msgs.append(m)
+    return msgs
 
 
-async def _fetch_messages_default(
-    channel: discord.TextChannel | discord.DMChannel,
-) -> list[discord.Message]:
-    """Fetch the last DEFAULT_MESSAGES messages (no time filter)."""
-    messages = []
-    async for msg in channel.history(limit=DEFAULT_MESSAGES, oldest_first=True):
-        messages.append(msg)
-    return messages
+async def _fetch_default(channel) -> list[discord.Message]:
+    msgs = []
+    async for m in channel.history(limit=DEFAULT_SCAN, oldest_first=True):
+        msgs.append(m)
+    return msgs
 
 
-# ── AI call ───────────────────────────────────────────────────────────────────
+# ── AI summariser ─────────────────────────────────────────────────────────────
 
 async def _call_ai_summary(transcript: str, label: str) -> str:
-    """
-    Call Groq (preferred) or Gemini to summarise the transcript.
-    Falls back gracefully if providers fail.
-    """
     system = (
         "You are Jarvis, a helpful Discord assistant. "
-        "Your task is to summarise the conversation provided. "
-        "Be concise but thorough. Use bullet points for key topics. "
-        "Mention notable moments, decisions, or conclusions if any. "
-        "Do not repeat raw messages — synthesise them into a clear summary. "
-        "If the conversation is trivial or too short, say so briefly."
+        "You are given a transcript of a conversation between a user and yourself. "
+        "Summarise what the user asked about, what you helped with, and any key outcomes or answers. "
+        "Use bullet points for clarity. Be concise. "
+        "If there is very little content, say so briefly."
     )
     prompt = (
-        f"Please summarise the following Discord conversation ({label}):\n\n"
+        f"Summarise this conversation between me (Jarvis) and the user ({label}):\n\n"
         f"{transcript}\n\n"
-        "Provide a clear, structured summary."
+        "Provide a clear, structured summary of what was discussed."
     )
 
-    # Lazy import to avoid circular deps (ai.py imports state, etc.)
     from cogs.ai import _try_groq, _try_gemini, GEMINI_MODEL_FLASH, GEMINI_API_KEY
 
     messages = [{"role": "user", "content": prompt}]
 
-    # Try Groq first
     try:
         result = await asyncio.wait_for(_try_groq(messages, system), timeout=SUMMARY_TIMEOUT)
         if result:
@@ -141,7 +131,6 @@ async def _call_ai_summary(transcript: str, label: str) -> str:
     except asyncio.TimeoutError:
         pass
 
-    # Fallback to Gemini Flash
     try:
         result = await asyncio.wait_for(
             _try_gemini(GEMINI_API_KEY, GEMINI_MODEL_FLASH, messages, system),
@@ -158,24 +147,24 @@ async def _call_ai_summary(transcript: str, label: str) -> str:
 # ── Core logic ────────────────────────────────────────────────────────────────
 
 async def _do_summary(
-    channel: discord.TextChannel | discord.DMChannel,
+    bot: commands.Bot,
+    channel,
     invoker: discord.User | discord.Member,
-    reply_target,          # discord.Message (prefix) or discord.Interaction (slash)
+    reply_target,
     window_arg: str | None,
     is_slash: bool = False,
 ) -> None:
-    """Shared implementation for both prefix and slash commands."""
 
-    # ── Parse time window ──
-    label = f"last {DEFAULT_MESSAGES} messages"
+    # ── Parse window ──────────────────────────────────────────────────────────
+    label   = "your recent conversation with me"
     seconds = None
 
     if window_arg:
         parsed = _parse_window(window_arg)
         if parsed is None:
             msg = (
-                "❌ Invalid time format. Use `!summary 30m`, `!summary 2h`, or `!summary 1d`.\n"
-                "Supported units: `m` (minutes), `h` (hours), `d` (days)."
+                "❌ Invalid format. Use `!summary 30m`, `!summary 2h`, or `!summary 1d`.\n"
+                "Supported units: `m` minutes · `h` hours · `d` days"
             )
             if is_slash:
                 await reply_target.followup.send(msg, ephemeral=True)
@@ -183,10 +172,8 @@ async def _do_summary(
                 await safe_reply(reply_target, msg)
             return
 
-        seconds, label = parsed
-        max_seconds = MAX_LOOKBACK_H * 3600
-
-        if seconds > max_seconds:
+        seconds, human = parsed
+        if seconds > MAX_LOOKBACK_H * 3600:
             msg = f"⏳ Maximum lookback is **{MAX_LOOKBACK_H} hours**. Please use a shorter window."
             if is_slash:
                 await reply_target.followup.send(msg, ephemeral=True)
@@ -194,9 +181,9 @@ async def _do_summary(
                 await safe_reply(reply_target, msg)
             return
 
-        label = f"last {label}"
+        label = f"last {human}"
 
-    # ── Check AI rate limit ──
+    # ── Rate limit ────────────────────────────────────────────────────────────
     if is_ai_rate_limited(invoker.id):
         msg = "⏳ You've hit your daily AI message limit. Try again tomorrow!"
         if is_slash:
@@ -205,12 +192,9 @@ async def _do_summary(
             await safe_reply(reply_target, msg)
         return
 
-    # ── Fetch messages ──
+    # ── Fetch channel history ─────────────────────────────────────────────────
     try:
-        if seconds is not None:
-            raw_messages = await _fetch_messages_by_time(channel, seconds)
-        else:
-            raw_messages = await _fetch_messages_default(channel)
+        raw = await (_fetch_by_time(channel, seconds) if seconds else _fetch_default(channel))
     except discord.Forbidden:
         msg = "❌ I don't have permission to read message history in this channel."
         if is_slash:
@@ -220,77 +204,70 @@ async def _do_summary(
         return
     except Exception as e:
         print(f"[Summary] fetch error: {e}")
-        msg = "❌ Something went wrong while fetching messages. Please try again."
+        msg = "❌ Something went wrong fetching messages. Please try again."
         if is_slash:
             await reply_target.followup.send(msg, ephemeral=True)
         else:
             await safe_reply(reply_target, msg)
         return
 
-    # Filter out bot messages from transcript (keep human convo only)
-    human_messages = [m for m in raw_messages if not m.author.bot]
+    # ── Filter: only user ↔ Jarvis messages ──────────────────────────────────
+    convo = [m for m in raw if m.author.id in (invoker.id, bot.user.id)]
 
-    if not human_messages:
-        msg = f"📭 No messages found for the **{label}**."
+    if not convo:
+        msg = f"📭 I couldn't find any messages between you and me for the **{label}**."
         if is_slash:
             await reply_target.followup.send(msg, ephemeral=True)
         else:
             await safe_reply(reply_target, msg)
         return
 
-    if len(human_messages) < 3:
-        msg = f"📭 Only **{len(human_messages)}** message(s) found — not enough to summarise."
+    user_msgs = [m for m in convo if m.author.id == invoker.id]
+    if len(user_msgs) < 2:
+        msg = f"📭 Only **{len(user_msgs)}** message(s) from you found — not enough to summarise."
         if is_slash:
             await reply_target.followup.send(msg, ephemeral=True)
         else:
             await safe_reply(reply_target, msg)
         return
 
-    # ── Build transcript ──
-    transcript = _format_messages(human_messages)
+    # ── Build transcript ──────────────────────────────────────────────────────
+    transcript = _format_conversation(convo, invoker, bot.user.id)
 
-    # Truncate if transcript is huge (keep last ~8000 chars to stay within token limits)
+    # Truncate if massive — keep last ~8000 chars
     if len(transcript) > 8000:
-        transcript = "...[earlier messages truncated]...\n" + transcript[-8000:]
+        transcript = "...[earlier messages omitted]...\n" + transcript[-8000:]
 
-    # ── Call AI ──
+    # ── Call AI ───────────────────────────────────────────────────────────────
     increment_ai_usage(invoker.id)
     summary = await _call_ai_summary(transcript, label)
 
-    # ── Build embed ──
+    # ── Build embed ───────────────────────────────────────────────────────────
+    bot_msgs  = len(convo) - len(user_msgs)
     embed = discord.Embed(
-        title=f"📋 Chat Summary — {label.title()}",
+        title=f"📋 Your Conversation Summary",
         description=summary,
         color=discord.Color.blurple(),
         timestamp=datetime.now(timezone.utc),
     )
-    embed.set_footer(
-        text=f"Based on {len(human_messages)} message(s) • Requested by {invoker.display_name}"
-    )
+    embed.add_field(name="Window",       value=label.title(),       inline=True)
+    embed.add_field(name="Your messages", value=str(len(user_msgs)), inline=True)
+    embed.add_field(name="My replies",   value=str(bot_msgs),       inline=True)
+    embed.set_footer(text=f"Requested by {invoker.display_name}")
+    embed.set_thumbnail(url=invoker.display_avatar.url)
 
-    # ── Send ──
+    # ── Send ──────────────────────────────────────────────────────────────────
     if is_slash:
-        # Slash: followup (we deferred earlier)
         if len(summary) > 4000:
-            # Embed description limit — send as plain text split across messages
-            await reply_target.followup.send(
-                f"**📋 Chat Summary — {label.title()}**\n*(based on {len(human_messages)} messages)*"
-            )
-            # send_long_message expects a discord.Message; use channel.send for slash overflow
-            chunks = [summary[i:i+1900] for i in range(0, len(summary), 1900)]
-            for chunk in chunks:
+            await reply_target.followup.send(f"**📋 Your Conversation Summary** — {label}")
+            for chunk in [summary[i:i+1900] for i in range(0, len(summary), 1900)]:
                 await channel.send(chunk)
         else:
             await reply_target.followup.send(embed=embed)
     else:
-        # Prefix: reply with embed
         if len(summary) > 4000:
-            await safe_reply(
-                reply_target,
-                f"**📋 Chat Summary — {label.title()}**\n*(based on {len(human_messages)} messages)*",
-            )
-            chunks = [summary[i:i+1900] for i in range(0, len(summary), 1900)]
-            for chunk in chunks:
+            await safe_reply(reply_target, f"**📋 Your Conversation Summary** — {label}")
+            for chunk in [summary[i:i+1900] for i in range(0, len(summary), 1900)]:
                 await channel.send(chunk)
         else:
             await safe_reply(reply_target, embed=embed)
@@ -302,21 +279,20 @@ class Summary(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ── Prefix command: !summary [window] ────────────────────────────────────
-
     @commands.command(name="summary")
     async def prefix_summary(self, ctx: commands.Context, window: str = None):
         """
-        Summarise recent chat messages.
+        Summarise your personal conversation with Jarvis.
 
         Examples:
-          !summary         — last 50 messages
-          !summary 30m     — last 30 minutes
-          !summary 2h      — last 2 hours
-          !summary 1d      — last 24 hours (max)
+          !summary       — your last ~50 exchanges
+          !summary 30m   — last 30 minutes
+          !summary 2h    — last 2 hours
+          !summary 1d    — last 24 hours (max)
         """
         async with ctx.typing():
             await _do_summary(
+                bot=self.bot,
                 channel=ctx.channel,
                 invoker=ctx.author,
                 reply_target=ctx.message,
@@ -324,18 +300,17 @@ class Summary(commands.Cog):
                 is_slash=False,
             )
 
-    # ── Slash command: /summary [window] ─────────────────────────────────────
-
     @app_commands.command(
         name="summary",
-        description="Summarise recent chat messages (e.g. last 1h, 30m, or last 50 messages)",
+        description="Summarise your personal conversation with Jarvis (e.g. last 1h, 30m)",
     )
     @app_commands.describe(
-        window="Time window to summarise (e.g. 30m, 1h, 2h, 1d). Leave blank for last 50 messages."
+        window="Time window: 30m, 1h, 2h, 1d. Leave blank for your last ~50 exchanges."
     )
     async def slash_summary(self, interaction: discord.Interaction, window: str = None):
         await interaction.response.defer(thinking=True)
         await _do_summary(
+            bot=self.bot,
             channel=interaction.channel,
             invoker=interaction.user,
             reply_target=interaction,
