@@ -45,12 +45,7 @@ def _build_activities(bot: commands.Bot) -> list[discord.BaseActivity]:
             type=discord.ActivityType.watching,
             name=f"{_fmt(guild_count)} server{'s' if guild_count != 1 else ''}",
         ),
-        # Slide 3 — personality / brand
-        discord.Activity(
-            type=discord.ActivityType.listening,
-            name="your questions",
-        ),
-        # Slide 4 — call-to-action
+        # Slide 3 — call-to-action
         discord.Activity(
             type=discord.ActivityType.playing,
             name="Ready to help • /help",
