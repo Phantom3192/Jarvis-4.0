@@ -27,7 +27,7 @@ from cogs.state import (
     DAILY_AI_LIMIT, WARN_AT, check_burst_and_maybe_timeout, check_cooldown, get_setting,
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
-from cogs.http_session import get_session
+from cogs.http_session import get_session, safe_reply, safe_send
 from cogs.history import add_message as _db_add_message, get_history as _db_get_history
 from cogs.memory import extract_facts, save_facts, get_facts, build_memory_prompt, forget_facts, get_facts_count
 
@@ -274,6 +274,7 @@ def end_group(channel_id: int) -> None:
 
 def get_group_members(channel_id: int) -> set[int] | None:
     return active_groups.get(channel_id)
+
 
 
 # ── Webhook logger ────────────────────────────────────────────────────────────
@@ -560,7 +561,7 @@ async def _try_intent_intercept(
         from cogs.system import _ping_colour
         ws_ms  = round(bot.latency * 1000)
         before = _time.monotonic()
-        msg    = await message.reply("🏓 Pinging…")
+        msg    = await safe_reply(message, "🏓 Pinging…")
         api_ms = round((_time.monotonic() - before) * 1000)
         embed  = discord.Embed(title="🏓 Pong!", color=_ping_colour(ws_ms))
         embed.add_field(name="WebSocket",      value=f"`{ws_ms} ms`",  inline=True)
@@ -579,16 +580,16 @@ async def _try_intent_intercept(
             color=discord.Color.green(),
         )
         embed.set_footer(text="Jarvis")
-        await message.reply(embed=embed)
+        await safe_reply(message, embed=embed)
         return True
 
     # ── system usage (admin only) ─────────────────────────────────────────
     if _INTENT_USAGE.search(user_text):
         if not _is_admin(message.author):
-            await message.reply("🚫 System usage stats are admin-only.", mention_author=False)
+            await safe_reply(message, "🚫 System usage stats are admin-only.", mention_author=False)
             return True
         from cogs.system import _build_usage_embed
-        await message.reply(embed=_build_usage_embed(bot))
+        await safe_reply(message, embed=_build_usage_embed(bot))
         return True
 
     # ── personal stats ────────────────────────────────────────────────────
@@ -597,7 +598,7 @@ async def _try_intent_intercept(
         from cogs.stats import _format_stats, _no_stats_embed
         data = _get_stats(message.author.id)
         if not data:
-            await message.reply(embed=_no_stats_embed(message.author, True))
+            await safe_reply(message, embed=_no_stats_embed(message.author, True))
         else:
             # Get rank and memory count
             try:
@@ -607,31 +608,31 @@ async def _try_intent_intercept(
                 mem  = await cog._memory_count(message.author.id) if cog else 0
             except Exception:
                 rank, mem = None, 0
-            await message.reply(embed=_format_stats(message.author, data, rank=rank, memory_count=mem))
+            await safe_reply(message, embed=_format_stats(message.author, data, rank=rank, memory_count=mem))
         return True
 
     # ── daily AI limit ────────────────────────────────────────────────────
     if _INTENT_LIMIT.search(user_text):
-        await message.reply(embed=_build_mylimit_embed(message.author.id))
+        await safe_reply(message, embed=_build_mylimit_embed(message.author.id))
         return True
 
     # ── help / command list ───────────────────────────────────────────────
     if _INTENT_HELP.search(user_text):
         from cogs.help import _build_overview_embed, HelpView
         view = HelpView(author_id=message.author.id)
-        await message.reply(embed=_build_overview_embed(), view=view)
+        await safe_reply(message, embed=_build_overview_embed(), view=view)
         return True
 
     # ── memory ────────────────────────────────────────────────────────────
     if _INTENT_MEMORY.search(user_text):
         from cogs.memory import get_facts as _get_facts
         facts = await _get_facts(message.author.id)
-        await message.reply(embed=_build_memory_embed(message.author, facts))
+        await safe_reply(message, embed=_build_memory_embed(message.author, facts))
         return True
 
     # ── current model ─────────────────────────────────────────────────────
     if _INTENT_MODEL.search(user_text):
-        await message.reply(embed=_build_model_embed(message.author.id))
+        await safe_reply(message, embed=_build_model_embed(message.author.id))
         return True
 
     return False
@@ -1105,19 +1106,19 @@ class AI(commands.Cog):
             try:
                 from cogs.admin import _guild_bans
                 if message.guild.id in _guild_bans:
-                    await message.reply("🚫 This server has been banned from using Jarvis.")
+                    await safe_reply(message, "🚫 This server has been banned from using Jarvis.")
                     return
             except Exception:
                 pass
 
         if is_bot_banned(message.author.id):
-            await message.reply("🚫 You've been banned from Jarvis. Contact the bot owner if you think this is a mistake.")
+            await safe_reply(message, "🚫 You've been banned from Jarvis. Contact the bot owner if you think this is a mistake.")
             return
 
         if not await self.bot.is_owner(message.author):
             allowed, t = check_burst_and_maybe_timeout(message.author.id)
             if not allowed:
-                await message.reply(
+                await safe_reply(message, 
                     f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to flooding."
                 )
                 return
@@ -1131,7 +1132,7 @@ class AI(commands.Cog):
             participants = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot]
             all_ids      = list({message.author.id} | {u.id for u in participants})
             if len(all_ids) < 2:
-                await message.reply(
+                await safe_reply(message, 
                     "⚠️ Mention at least one other person to start a group conversation.\n"
                     "**Example:** `Jarvis group conversation @friend`"
                 )
@@ -1141,7 +1142,7 @@ class AI(commands.Cog):
                 (message.guild.get_member(uid) or message.author).display_name
                 for uid in all_ids
             )
-            await message.reply(
+            await safe_reply(message, 
                 f"👥 **Group conversation started!**\n"
                 f"**Participants:** {names}\n"
                 "Your messages to Jarvis in this channel are now shared between you.\n"
@@ -1153,27 +1154,27 @@ class AI(commands.Cog):
         if re.search(r"\badd\b.+\bto\s+group\b", lower) or re.search(r"\badd\b.+\bgroup\b", lower):
             members = get_group_members(message.channel.id)
             if not members:
-                await message.reply("⚠️ There's no active group conversation. Start one first with `Jarvis group conversation @user`.")
+                await safe_reply(message, "⚠️ There's no active group conversation. Start one first with `Jarvis group conversation @user`.")
                 return
             to_add = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot and u.id not in members]
             if not to_add:
-                await message.reply("⚠️ Those users are already in the group, or no valid users were mentioned.")
+                await safe_reply(message, "⚠️ Those users are already in the group, or no valid users were mentioned.")
                 return
             active_groups[message.channel.id].update(u.id for u in to_add)
             names = ", ".join(u.display_name for u in to_add)
             total = len(active_groups[message.channel.id])
-            await message.reply(f"➕ **{names}** joined the group conversation! ({total} participants total)")
+            await safe_reply(message, f"➕ **{names}** joined the group conversation! ({total} participants total)")
             return
 
         # ── Remove from group ──────────────────────────────────────────────
         if re.search(r"\bremove\b.+\bfrom\s+group\b", lower) or re.search(r"\bkick\b.+\bgroup\b", lower):
             members = get_group_members(message.channel.id)
             if not members:
-                await message.reply("⚠️ There's no active group conversation in this channel.")
+                await safe_reply(message, "⚠️ There's no active group conversation in this channel.")
                 return
             to_remove = [u for u in message.mentions if u.id != self.bot.user.id and not u.bot and u.id in members]
             if not to_remove:
-                await message.reply("⚠️ Those users aren't in the group, or no valid users were mentioned.")
+                await safe_reply(message, "⚠️ Those users aren't in the group, or no valid users were mentioned.")
                 return
             for u in to_remove:
                 active_groups[message.channel.id].discard(u.id)
@@ -1181,18 +1182,18 @@ class AI(commands.Cog):
             total = len(active_groups[message.channel.id])
             if total < 2:
                 end_group(message.channel.id)
-                await message.reply(f"➖ **{names}** left the group. Not enough participants — group ended. Everyone is back to private mode.")
+                await safe_reply(message, f"➖ **{names}** left the group. Not enough participants — group ended. Everyone is back to private mode.")
             else:
-                await message.reply(f"➖ **{names}** removed from the group conversation. ({total} participants remaining)")
+                await safe_reply(message, f"➖ **{names}** removed from the group conversation. ({total} participants remaining)")
             return
 
         # ── End group ──────────────────────────────────────────────────────
         if re.search(r"\b(end|stop)\s+group\b", lower):
             if get_group_members(message.channel.id):
                 end_group(message.channel.id)
-                await message.reply("🔒 Group conversation ended. Everyone is back to private mode.")
+                await safe_reply(message, "🔒 Group conversation ended. Everyone is back to private mode.")
             else:
-                await message.reply("ℹ️ There's no active group conversation in this channel.")
+                await safe_reply(message, "ℹ️ There's no active group conversation in this channel.")
             return
 
         # ── Normal message ─────────────────────────────────────────────────
@@ -1207,7 +1208,7 @@ class AI(commands.Cog):
                 break
 
         if not user_text and not image_b64:
-            await message.reply("Yes? What can I help you with?")
+            await safe_reply(message, "Yes? What can I help you with?")
             return
 
         # ── Intent intercept — run real command logic, skip the AI API ────
@@ -1320,7 +1321,7 @@ class AI(commands.Cog):
     @commands.command(name="mylimit")
     async def prefix_mylimit(self, ctx: commands.Context):
         """Check how many AI messages you have left today."""
-        await ctx.reply(embed=_build_mylimit_embed(ctx.author.id))
+        await safe_reply(ctx.message, embed=_build_mylimit_embed(ctx.author.id))
 
     # ── /clearhistory & !clearhistory ─────────────────────────────────────────
 
@@ -1338,7 +1339,7 @@ class AI(commands.Cog):
         """Clear your conversation history with Jarvis."""
         clear_history(ctx.author.id, ctx.channel.id)
         in_group = bool(get_group_members(ctx.channel.id))
-        await ctx.reply(f"🧹 {'Group conversation' if in_group else 'Your'} history has been cleared!")
+        await safe_reply(ctx.message, f"🧹 {'Group conversation' if in_group else 'Your'} history has been cleared!")
 
     # ── /setmodel & !setmodel ─────────────────────────────────────────────────
 
@@ -1357,14 +1358,14 @@ class AI(commands.Cog):
         """Choose your AI model. Usage: !setmodel <auto|groq|gemini-flash|gemini-lite>"""
         if not model or model not in MODELS:
             keys = ", ".join(f"`{k}`" for k in MODELS)
-            await ctx.reply(
+            await safe_reply(ctx.message, 
                 f"**Usage:** `!setmodel <model>`\n"
                 f"**Available:** {keys}\n\n"
                 + "\n".join(f"**`{k}`** — {v['label']}: {v['desc']}" for k, v in MODELS.items())
             )
             return
         set_user_model(ctx.author.id, model)
-        await ctx.reply(embed=_build_model_embed(ctx.author.id))
+        await safe_reply(ctx.message, embed=_build_model_embed(ctx.author.id))
 
     # ── /mymodel & !mymodel ───────────────────────────────────────────────────
 
@@ -1377,7 +1378,7 @@ class AI(commands.Cog):
     @commands.command(name="mymodel")
     async def prefix_mymodel(self, ctx: commands.Context):
         """Check your current AI model preference."""
-        await ctx.reply(embed=_build_model_embed(ctx.author.id))
+        await safe_reply(ctx.message, embed=_build_model_embed(ctx.author.id))
 
     # ── /mymemory & !mymemory ─────────────────────────────────────────────────
 
@@ -1393,7 +1394,7 @@ class AI(commands.Cog):
         """See what Jarvis remembers about you."""
         facts = await get_facts(ctx.author.id)
         embed = _build_memory_embed(ctx.author, facts)
-        await ctx.reply(embed=embed)
+        await safe_reply(ctx.message, embed=embed)
 
     # ── /forgetme & !forgetme ─────────────────────────────────────────────────
 
@@ -1416,9 +1417,9 @@ class AI(commands.Cog):
         """Make Jarvis forget everything it remembers about you."""
         count = await forget_facts(ctx.author.id)
         if count:
-            await ctx.reply(f"🧹 Done — I've forgotten **{count}** thing(s) about you. Fresh start!")
+            await safe_reply(ctx.message, f"🧹 Done — I've forgotten **{count}** thing(s) about you. Fresh start!")
         else:
-            await ctx.reply("I don't have anything stored about you yet.")
+            await safe_reply(ctx.message, "I don't have anything stored about you yet.")
 
 
 def _build_memory_embed(user: discord.User | discord.Member, facts: list[str]) -> discord.Embed:

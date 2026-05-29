@@ -10,6 +10,7 @@ This module owns one session that is created at startup and closed on shutdown.
 All cogs import `get_session()` instead of constructing their own.
 """
 import aiohttp
+import discord
 
 _session: aiohttp.ClientSession | None = None
 
@@ -43,3 +44,18 @@ async def close_session():
     if _session and not _session.closed:
         await _session.close()
         _session = None
+
+async def safe_reply(message: discord.Message, *args, **kwargs) -> discord.Message | None:
+    """Reply to a message, silently ignoring Forbidden (public bot — not our problem)."""
+    try:
+        return await message.reply(*args, **kwargs)
+    except discord.Forbidden:
+        return None
+
+
+async def safe_send(channel, *args, **kwargs) -> discord.Message | None:
+    """Send to a channel, silently ignoring Forbidden."""
+    try:
+        return await channel.send(*args, **kwargs)
+    except discord.Forbidden:
+        return None
