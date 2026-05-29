@@ -84,25 +84,21 @@ def _build_url(prompt: str, style: str | None, seed: int) -> str:
 async def _fetch_image(prompt: str, style: str | None, seed: int) -> bytes | None:
     session = get_session()
     for attempt in range(1, POLL_RETRIES + 1):
-        # Fresh seed on retries so we don't get a cached bad response
         attempt_seed = seed if attempt == 1 else random.randint(1, 999_999)
         try:
             url = _build_url(prompt, style, attempt_seed)
             async with session.get(url, timeout=POLL_TIMEOUT) as resp:
                 if resp.status == 200:
                     data = await resp.read()
-                    if len(data) > 1000:  # real images are never <1 KB
+                    if len(data) > 1000:
                         return data
-                    print(f"[Pollinations] Attempt {attempt}: response too small ({len(data)} bytes), retrying…")
-                else:
-                    print(f"[Pollinations] Attempt {attempt}: HTTP {resp.status}, retrying…")
-        except Exception as e:
-            print(f"[Pollinations] Attempt {attempt} error: {e}, retrying…")
+                # fall through to retry
+        except Exception:
+            pass  # network blip — retry silently
 
         if attempt < POLL_RETRIES:
             await asyncio.sleep(POLL_RETRY_DELAY)
 
-    print("[Pollinations] All attempts failed.")
     return None
 
 

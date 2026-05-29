@@ -26,8 +26,7 @@ async def _send_bugreport(user: discord.User | discord.Member, text: str, guild:
         embed.set_footer(text="Jarvis Bug Reports")
         await webhook.send(embed=embed, username="Jarvis Bug Reports")
         return True
-    except Exception as e:
-        print(f"❌ Bug report webhook error: {e}")
+    except Exception:
         return False
 
 

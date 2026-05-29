@@ -7,30 +7,30 @@ import traceback
 import sys
 from cogs.http_session import get_session
 
-ERROR_WEBHOOK_URL  = os.getenv("ERROR_WEBHOOK_URL", "")
-MAX_TRACEBACK_LEN  = 1900
+ERROR_WEBHOOK_URL = os.getenv("ERROR_WEBHOOK_URL", "")
+MAX_TRACEBACK_LEN = 1900
 
 
 async def _send_error(title: str, description: str, extra_fields: list[tuple] = None):
-    """Send an error embed to the configured webhook. Never raises."""
+    """Send an error embed to the error webhook. Never raises, never prints."""
     if not ERROR_WEBHOOK_URL:
         return
     try:
         session = get_session()
         webhook = discord.Webhook.from_url(ERROR_WEBHOOK_URL, session=session)
         embed = discord.Embed(
-            title=f"❌ {title}",
-            description=f"```py\n{description[:MAX_TRACEBACK_LEN]}\n```",
-            color=discord.Color.red(),
-            timestamp=discord.utils.utcnow(),
+            title       = f"🐛 {title}",
+            description = f"```py\n{description[:MAX_TRACEBACK_LEN]}\n```",
+            color       = discord.Color.red(),
+            timestamp   = discord.utils.utcnow(),
         )
         if extra_fields:
             for name, value in extra_fields:
                 embed.add_field(name=name, value=str(value)[:1024], inline=False)
         embed.set_footer(text="Jarvis Error Logger")
-        await webhook.send(embed=embed, username="Jarvis Errors")
-    except Exception as e:
-        print(f"❌ Error webhook failed: {e}")
+        await webhook.send(embed=embed, username="Jarvis Bug Reports")
+    except Exception:
+        pass  # webhook itself failed — nowhere left to report, stay silent
 
 
 class ErrorHandler(commands.Cog):
@@ -43,18 +43,18 @@ class ErrorHandler(commands.Cog):
             exception = context.get("exception")
             message   = context.get("message", "Unknown asyncio error")
 
+            # Ignore routine network noise
             if exception is None:
-                print(f"❌ Asyncio error (no exception): {message}")
                 loop.create_task(_send_error("Asyncio Error (no exception)", message))
                 return
 
-            if isinstance(exception, (ConnectionResetError, asyncio.CancelledError)):
+            if isinstance(exception, (ConnectionResetError, asyncio.CancelledError,
+                                      discord.Forbidden)):
                 return
 
             tb = "".join(
                 traceback.format_exception(type(exception), exception, exception.__traceback__)
             )
-            print(f"❌ Asyncio unhandled exception: {tb}")
             loop.create_task(_send_error("Asyncio Unhandled Exception", tb))
 
         asyncio.get_running_loop().set_exception_handler(_asyncio_exception_handler)
@@ -63,7 +63,6 @@ class ErrorHandler(commands.Cog):
 
         def _custom_excepthook(exc_type, exc_value, exc_tb):
             tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-            print(tb)
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
@@ -74,14 +73,19 @@ class ErrorHandler(commands.Cog):
 
         sys.excepthook = _custom_excepthook
 
+    # ── Prefix command errors ─────────────────────────────────────────────────
+
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, (commands.CheckFailure, commands.CommandNotFound)):
             return
 
         original = getattr(error, "original", error)
+
+        if isinstance(original, discord.Forbidden):
+            return  # missing permissions — silent
+
         tb = "".join(traceback.format_exception(type(original), original, original.__traceback__))
-        print(f"❌ Command error in '{ctx.command}': {tb}")
 
         fields = [
             ("Command", f"`{ctx.command}`"),
@@ -99,6 +103,8 @@ class ErrorHandler(commands.Cog):
         except Exception:
             pass
 
+    # ── Slash command errors ──────────────────────────────────────────────────
+
     async def on_app_command_error(
         self,
         interaction: discord.Interaction,
@@ -108,8 +114,11 @@ class ErrorHandler(commands.Cog):
             return
 
         original = getattr(error, "original", error)
+
+        if isinstance(original, discord.Forbidden):
+            return  # missing permissions — silent
+
         tb = "".join(traceback.format_exception(type(original), original, original.__traceback__))
-        print(f"❌ Slash command error in '{interaction.command}': {tb}")
 
         fields = [
             ("Command", f"`/{interaction.command.name if interaction.command else 'unknown'}`"),
@@ -130,10 +139,11 @@ class ErrorHandler(commands.Cog):
         except Exception:
             pass
 
+    # ── Event listener errors ─────────────────────────────────────────────────
+
     @commands.Cog.listener()
     async def on_error(self, event_method: str, *args, **kwargs):
         tb = traceback.format_exc()
-        print(f"❌ Event error in '{event_method}':\n{tb}")
         await _send_error(f"Event Listener Error: `{event_method}`", tb)
 
 
