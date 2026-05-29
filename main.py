@@ -42,6 +42,7 @@ COGS = [
     "cogs.fun",
     "cogs.imagine",
     "cogs.system",
+    "cogs.image_search",
 ]
 
 # Track users we've already DM'd about their ban this session — avoid spamming.
