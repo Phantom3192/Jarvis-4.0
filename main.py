@@ -40,7 +40,6 @@ COGS = [
     "cogs.errorhandler",
     "cogs.help",
     "cogs.fun",
-    "cogs.imagine",
     "cogs.system",
     "cogs.image_search",
 ]

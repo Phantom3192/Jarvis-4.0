@@ -29,8 +29,7 @@ CATEGORIES = {
         "description": "Generate AI images from text prompts — free, no limits.",
         "color": 0xE91E63,
         "commands": [
-            ("!imagine  /imagine <prompt>",  "Generate an image from a text prompt"),
-            ("--style <name>",               "Style flag: anime · realistic · pixel · cartoon · sketch · watercolor · cinematic · fantasy"),
+            ("!image  /image <name>",  "Sends an Image from Web based on your prompt"),
         ],
     },
     "🎉 Fun": {
