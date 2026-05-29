@@ -14,6 +14,7 @@ CATEGORIES = {
             ("@mention / reply",      "Mention Jarvis or reply to his messages to chat"),
             ("!mylimit  /mylimit",    "Check how many AI messages you have left today"),
             ("!summary  /summary",   "Summarise your chat — e.g. `!summary 1h`, `!summary 30m`"),
+            ("!clearsummary  /clearsummary", "Clear your summary log"),
         ],
     },
     "🧠 Memory": {

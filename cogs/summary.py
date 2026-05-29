@@ -282,6 +282,21 @@ class Summary(commands.Cog):
         else:
             await interaction.followup.send("Something went wrong generating the summary.")
 
+    # ── !clearsummary ─────────────────────────────────────────────────────────
+
+    @commands.command(name="clearsummary")
+    async def prefix_clearsummary(self, ctx: commands.Context):
+        """Clear your summary log (the timestamped conversation history used by !summary)."""
+        _timestamped_log.pop(ctx.author.id, None)
+        await safe_reply(ctx.message, "🧹 Your summary log has been cleared!")
+
+    # ── /clearsummary ─────────────────────────────────────────────────────────
+
+    @app_commands.command(name="clearsummary", description="Clear your summary conversation log")
+    async def slash_clearsummary(self, interaction: discord.Interaction):
+        _timestamped_log.pop(interaction.user.id, None)
+        await interaction.response.send_message("🧹 Your summary log has been cleared!", ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Summary(bot))

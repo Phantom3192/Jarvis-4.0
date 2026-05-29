@@ -28,7 +28,7 @@ from cogs.state import (
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session, safe_reply, safe_send
-from cogs.history import add_message as _db_add_message, get_history as _db_get_history
+from cogs.history import add_message as _db_add_message, get_history as _db_get_history, clear_history as _db_clear_history
 from cogs.memory import extract_facts, save_facts, get_facts, build_memory_prompt, forget_facts, get_facts_count
 
 # ── API keys & models ─────────────────────────────────────────────────────────
@@ -255,6 +255,8 @@ def clear_history(user_id: int, channel_id: int | None = None) -> None:
         group_history[channel_id].clear()
     else:
         private_history[user_id].clear()
+        # Also wipe the persisted DB history so it doesn't reload on next restart
+        asyncio.create_task(_db_clear_history(user_id))
 
 _MAX_REPLY_ROOT_CACHE = 10_000
 
