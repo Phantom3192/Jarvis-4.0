@@ -114,7 +114,7 @@ async def _call_ai_summary(transcript: str, window_label: str) -> str:
     without importing the whole cog (avoids circular imports).
     """
     # Import lazily to avoid circular-import issues at module load time
-    from cogs.ai import _try_groq, _try_gemini_flash
+    from cogs.ai import _try_groq, _try_gemini, GEMINI_API_KEY, GEMINI_API_KEY_2, GEMINI_MODEL_FLASH
 
     system_prompt = (
         "You are a helpful assistant summarising a conversation between a user and "
@@ -137,9 +137,12 @@ async def _call_ai_summary(transcript: str, window_label: str) -> str:
     if result:
         return result
 
-    result = await _try_gemini_flash(messages, system_prompt, None, None, user_msg)
-    if result:
-        return result
+    for gemini_key in (GEMINI_API_KEY, GEMINI_API_KEY_2):
+        if not gemini_key:
+            continue
+        result = await _try_gemini(gemini_key, GEMINI_MODEL_FLASH, messages, system_prompt)
+        if result:
+            return result
 
     return "⚠️ AI providers are currently unavailable. Please try again in a moment."
 
