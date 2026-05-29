@@ -243,6 +243,12 @@ def _background_record(user_id: int, user_message: str, reply: str) -> None:
         record_message(user_id, user_message, reply)
     except Exception as e:
         print(f"[Background Task] DB record error: {e}")
+    # Also log the turn with a timestamp so !summary can filter by time window
+    try:
+        from cogs.summary import record_turn
+        record_turn(user_id, user_message, reply)
+    except Exception as e:
+        print(f"[Background Task] summary record_turn error: {e}")
 
 def clear_history(user_id: int, channel_id: int | None = None) -> None:
     if channel_id and _is_in_group(user_id, channel_id):
