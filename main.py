@@ -43,6 +43,8 @@ COGS = [
     "cogs.image_search",
     "cogs.summary",
     "cogs.presence",
+    "cogs.youtube",
+    "cogs.music",
 ]
 
 # Track users we've already DM'd about their ban this session — avoid spamming.
