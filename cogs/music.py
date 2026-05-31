@@ -31,7 +31,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import wavelink
-import os
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -42,10 +41,11 @@ MUSIC_COLOR  = discord.Color.from_rgb(29, 185, 84)
 ERROR_COLOR  = discord.Color.red()
 
 # Your self-hosted Lavalink on Wispbyte
-
 LAVALINK_NODES = [
-    {"uri": "http://remarkable-joy.railway.internal:2333", "password": "jarvisbot"},
+    {"uri": "http://93.115.101.176:13101", "password": "jarvisbot"},
 ]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -88,26 +88,22 @@ class Music(commands.Cog):
         self.bot = bot
 
     # ── Lavalink node setup ───────────────────────────────────────────────────
-    async def cog_load(self) -> None:
-        self.bot.loop.create_task(self._connect_lavalink())
 
-    async def _connect_lavalink(self) -> None:
-        await self.bot.wait_until_ready()
-        await asyncio.sleep(2)  # small delay to ensure everything is ready
+    async def cog_load(self) -> None:
         nodes = [
             wavelink.Node(uri=n["uri"], password=n["password"])
             for n in LAVALINK_NODES
         ]
         await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
-        print("✅ Music: connected to Lavalink!")
+        print(f"✅ Music: registered {len(nodes)} Lavalink nodes")
+
     # ── wavelink events ───────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
         player: wavelink.Player = payload.player
         if not player.queue.is_empty:
-            next_track = player.queue.get()
-            await player.play(next_track, volume=100)
+            await player.play(player.queue.get(), volume=100)
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload) -> None:
@@ -162,36 +158,20 @@ class Music(commands.Cog):
             return
 
         track: wavelink.Playable = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
-        track.extras = {"requester": author}  # store who requested
 
-        # if player.playing or player.paused:
-        #     player.queue.put(track)
-        #     embed = discord.Embed(
-        #         title       = "➕ Added to Queue",
-        #         description = f"**[{track.title}]({track.uri})**\n"
-        #                       f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
-        #         color       = MUSIC_COLOR,
-        #     )
-        #     if track.artwork:
-        #         embed.set_thumbnail(url=track.artwork)
-        #     await send_fn(embed=embed)
-        # else:
-        #     await player.play(track)
-        #     await send_fn(embed=_track_embed(track, requester=author))
-        
         if player.playing or player.paused:
             player.queue.put(track)
             embed = discord.Embed(
                 title       = "➕ Added to Queue",
                 description = f"**[{track.title}]({track.uri})**\n"
-                            f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
+                              f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
                 color       = MUSIC_COLOR,
             )
             if track.artwork:
                 embed.set_thumbnail(url=track.artwork)
             await send_fn(embed=embed)
         else:
-            await player.play(track, volume=100)  # add volume=100
+            await player.play(track, volume=100)
             await send_fn(embed=_track_embed(track, requester=author))
 
     async def _do_skip(self, guild, send_fn) -> None:
@@ -245,8 +225,7 @@ class Music(commands.Cog):
         if not player or not player.current:
             await send_fn(embed=_err("Nothing is playing right now."))
             return
-        requester = getattr(player.current.extras, "requester", None)
-        await send_fn(embed=_track_embed(player.current, requester=requester))
+        await send_fn(embed=_track_embed(player.current))
 
     async def _do_volume(self, guild, vol: int, send_fn) -> None:
         if not (0 <= vol <= 100):
