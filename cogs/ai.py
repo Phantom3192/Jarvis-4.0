@@ -584,7 +584,8 @@ _INTENT_IMAGE = re.compile(
 
 # ── Music controls intent ─────────────────────────────────────────────────────
 _INTENT_CONTROLS = re.compile(
-    r"\b(music\s+controls?|player\s+controls?|control\s+panel|open\s+controls?|show\s+controls?)\b",
+    r"\b(controls?|music\s+controls?|player\s+controls?|control\s+panel|"
+    r"(open|show|bring\s+up|pull\s+up|give\s+me)(\s+the)?\s+controls?)\b",
     re.IGNORECASE,
 )
 
