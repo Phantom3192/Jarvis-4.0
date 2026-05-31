@@ -227,17 +227,17 @@ class MusicControlsView(discord.ui.View):
 
     @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.secondary, row=0)
     async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog._do_pause(self._guild(), lambda **kw: None)
+        await self.cog._do_pause(self._guild(), lambda *a, **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.primary, row=0)
     async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog._do_skip(self._guild(), lambda **kw: None)
+        await self.cog._do_skip(self._guild(), lambda *a, **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger, row=0)
     async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog._do_stop(self._guild(), lambda **kw: None)
+        await self.cog._do_stop(self._guild(), lambda *a, **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="🔉 Vol -10", style=discord.ButtonStyle.secondary, row=1)
@@ -245,7 +245,7 @@ class MusicControlsView(discord.ui.View):
         player = self._player()
         if player:
             new_vol = max(0, player.volume - 10)
-            await self.cog._do_volume(self._guild(), new_vol, lambda **kw: None)
+            await self.cog._do_volume(self._guild(), new_vol, lambda *a, **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="🔊 Vol +10", style=discord.ButtonStyle.secondary, row=1)
@@ -253,7 +253,7 @@ class MusicControlsView(discord.ui.View):
         player = self._player()
         if player:
             new_vol = min(100, player.volume + 10)
-            await self.cog._do_volume(self._guild(), new_vol, lambda **kw: None)
+            await self.cog._do_volume(self._guild(), new_vol, lambda *a, **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="🎶 Queue", style=discord.ButtonStyle.secondary, row=1)
