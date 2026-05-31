@@ -6,4 +6,5 @@ aiohttp
 libsql-experimental
 psutil
 PyNaCl
+yt-dlp
 wavelink
