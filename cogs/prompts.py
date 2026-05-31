@@ -3,6 +3,19 @@ from discord.ext import commands
 from discord import app_commands
 from cogs.state import get_guild_prompt, set_guild_prompt, reset_guild_prompt
 
+def _clear_prompt_cache(guild_id: int) -> None:
+    """Evict all cached system prompts for users in this guild.
+    Called whenever the guild prompt is set or reset so the new prompt
+    takes effect immediately without needing a bot restart.
+    """
+    try:
+        from cogs.ai import _system_prompt_cache
+        keys_to_delete = [k for k in _system_prompt_cache]
+        for k in keys_to_delete:
+            _system_prompt_cache.pop(k, None)
+    except Exception:
+        pass  # ai cog not loaded yet — nothing to clear
+
 MAX_PROMPT_LEN = 1000  # characters
 
 
@@ -36,6 +49,7 @@ class Prompts(commands.Cog):
             await ctx.reply(f"❌ Prompt is too long. Maximum is {MAX_PROMPT_LEN} characters.")
             return
         set_guild_prompt(ctx.guild.id, prompt)
+        _clear_prompt_cache(ctx.guild.id)
         await ctx.reply(
             f"✅ Custom system prompt set for **{ctx.guild.name}**.\n"
             f"```\n{prompt[:200]}{'…' if len(prompt) > 200 else ''}\n```"
@@ -49,6 +63,7 @@ class Prompts(commands.Cog):
             await ctx.reply("🚫 You need the **Manage Server** permission to reset the prompt.")
             return
         existed = reset_guild_prompt(ctx.guild.id)
+        _clear_prompt_cache(ctx.guild.id)
         if existed:
             await ctx.reply(f"✅ Custom prompt removed. **{ctx.guild.name}** is back to the default Jarvis personality.")
         else:
@@ -88,6 +103,7 @@ class Prompts(commands.Cog):
             )
             return
         set_guild_prompt(interaction.guild_id, prompt)
+        _clear_prompt_cache(interaction.guild_id)
         await interaction.response.send_message(
             f"✅ Custom system prompt set for **{interaction.guild.name}**.\n"
             f"```\n{prompt[:200]}{'…' if len(prompt) > 200 else ''}\n```"
@@ -103,6 +119,7 @@ class Prompts(commands.Cog):
             )
             return
         existed = reset_guild_prompt(interaction.guild_id)
+        _clear_prompt_cache(interaction.guild_id)
         if existed:
             await interaction.response.send_message(
                 f"✅ Custom prompt removed. **{interaction.guild.name}** is back to the default Jarvis personality."
