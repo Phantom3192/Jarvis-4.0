@@ -42,8 +42,9 @@ ERROR_COLOR  = discord.Color.red()
 
 # Your self-hosted Lavalink on Wispbyte
 LAVALINK_NODES = [
-    {"uri": "http://remarkable-joy.railway.internal:2333", "password": "jarvisbot"},
+    {"uri": "http://93.115.101.176:13101", "password": "jarvisbot"},
 ]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -89,12 +90,17 @@ class Music(commands.Cog):
     # ── Lavalink node setup ───────────────────────────────────────────────────
 
     async def cog_load(self) -> None:
+        self.bot.loop.create_task(self._connect_lavalink())
+
+    async def _connect_lavalink(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)
         nodes = [
             wavelink.Node(uri=n["uri"], password=n["password"])
             for n in LAVALINK_NODES
         ]
         await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
-        print(f"✅ Music: registered {len(nodes)} Lavalink nodes")
+        print("✅ Music: connected to Lavalink!")
 
     # ── wavelink events ───────────────────────────────────────────────────────
 
