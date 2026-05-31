@@ -367,6 +367,7 @@ class Music(commands.Cog):
     def _controls_embed(self, guild: discord.Guild) -> discord.Embed:
         """Build the now-playing embed for the controls panel."""
         player: wavelink.Player | None = guild.voice_client
+        print(f"[Controls] guild={guild.id} player={player} current={getattr(player, 'current', None)} playing={getattr(player, 'playing', None)}")
         if not player or not player.current:
             embed = discord.Embed(
                 title       = "🎵 Music Controls",
