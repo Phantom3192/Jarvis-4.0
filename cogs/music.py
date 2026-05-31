@@ -82,6 +82,74 @@ def _err(msg: str) -> discord.Embed:
 # Music Controls Panel
 # ══════════════════════════════════════════════════════════════════════════════
 
+class SearchResultsView(discord.ui.View):
+    """Dropdown of search results to pick from."""
+
+    def __init__(
+        self,
+        cog:     "Music",
+        guild:   discord.Guild,
+        author:  discord.Member | discord.User,
+        tracks:  list[wavelink.Playable],
+    ) -> None:
+        super().__init__(timeout=60)
+        self.cog    = cog
+        self.guild  = guild
+        self.author = author
+        self.tracks = tracks
+
+        options = [
+            discord.SelectOption(
+                label       = t.title[:100],
+                description = f"{t.author or '?'}  •  {_fmt_duration(t.length)}"[:100],
+                value       = str(i),
+                emoji       = "🎵",
+            )
+            for i, t in enumerate(tracks)
+        ]
+        select = discord.ui.Select(
+            placeholder = "Choose a song to play…",
+            options     = options,
+            min_values  = 1,
+            max_values  = 1,
+        )
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author.id:
+            await interaction.response.send_message("❌ This isn't your search!", ephemeral=True)
+            return
+        idx   = int(interaction.data["values"][0])
+        track = self.tracks[idx]
+
+        player = await self.cog._get_player(self.guild, interaction.user,
+                                             interaction.followup.send)
+        if not player:
+            await interaction.response.defer()
+            return
+
+        if player.playing or player.paused:
+            player.queue.put(track)
+            embed = discord.Embed(
+                title       = "➕ Added to Queue",
+                description = f"**[{track.title}]({track.uri})**"
+                              f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
+                color       = MUSIC_COLOR,
+            )
+        else:
+            await player.play(track, volume=100)
+            embed = _track_embed(track)
+
+        if track.artwork:
+            embed.set_thumbnail(url=track.artwork)
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+
 class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
     """Modal popup with a text input for song search."""
 
@@ -92,20 +160,38 @@ class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
         max_length  = 200,
     )
 
-    def __init__(self, cog: "Music", guild: discord.Guild, channel) -> None:
+    def __init__(self, cog: "Music", guild: discord.Guild, author) -> None:
         super().__init__()
-        self.cog     = cog
-        self.guild   = guild
-        self.channel = channel
+        self.cog    = cog
+        self.guild  = guild
+        self.author = author
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        await self.cog._do_play(
-            self.guild,
-            interaction.user,
-            self.query.value.strip(),
-            interaction.followup.send,
+        query  = self.query.value.strip()
+        # Search for 5 results
+        tracks: wavelink.Search = await wavelink.Playable.search(
+            f"ytsearch5:{query}", source=wavelink.TrackSource.YouTube
         )
+        if not tracks:
+            await interaction.followup.send(embed=_err(f"No results found for **{query}**"))
+            return
+
+        track_list = tracks[:5] if isinstance(tracks, list) else list(tracks.tracks)[:5]
+        embed = discord.Embed(
+            title       = f"🔍 Search results for: {query}",
+            description = "\n".join(
+                f"`{i+1}.` **{t.title}** — {t.author or '?'} [{_fmt_duration(t.length)}]"
+                for i, t in enumerate(track_list)
+            ),
+            color       = MUSIC_COLOR,
+        )
+        embed.set_footer(text="Pick a song from the dropdown below")
+        view = SearchResultsView(
+            cog=self.cog, guild=self.guild,
+            author=interaction.user, tracks=track_list
+        )
+        await interaction.followup.send(embed=embed, view=view)
 
 
 class MusicControlsView(discord.ui.View):
@@ -188,7 +274,7 @@ class MusicControlsView(discord.ui.View):
 
     @discord.ui.button(label="🔍 Search", style=discord.ButtonStyle.primary, row=2)
     async def btn_search(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        modal = SearchModal(cog=self.cog, guild=self.guild, channel=interaction.channel)
+        modal = SearchModal(cog=self.cog, guild=self.guild, author=interaction.user)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
