@@ -45,7 +45,6 @@ LAVALINK_NODES = [
     {"uri": "http://remarkable-joy.railway.internal:2333", "password": "jarvisbot"},
 ]
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ══════════════════════════════════════════════════════════════════════════════
@@ -222,7 +221,7 @@ class MusicControlsView(discord.ui.View):
         self.btn_pause.style    = discord.ButtonStyle.success if paused else discord.ButtonStyle.secondary
         self.btn_pause.disabled = not playing
         self.btn_skip.disabled  = not playing
-        self.btn_stop.disabled  = not (player and player.is_connected())
+        self.btn_stop.disabled  = not (player and player.connected)
         self.btn_vol_down.disabled = not playing
         self.btn_vol_up.disabled   = not playing
 
