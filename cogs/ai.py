@@ -550,6 +550,58 @@ _INTENT_LIMIT = re.compile(
     re.IGNORECASE,
 )
 
+# ── Music intents ─────────────────────────────────────────────────────────────
+_INTENT_PLAY = re.compile(
+    r"\b(play|put\s+on|start\s+playing|queue\s+up|add\s+to\s+queue)\b",
+    re.IGNORECASE,
+)
+_INTENT_SKIP = re.compile(
+    r"\b(skip|next\s+song|next\s+track|skip\s+(this|the\s+current)?(\s+song|\s+track)?)\b",
+    re.IGNORECASE,
+)
+_INTENT_STOP_MUSIC = re.compile(
+    r"\b(stop\s+(the\s+)?(music|song|playing|playback)|leave\s+(the\s+)?vc|disconnect\s+from\s+(vc|voice)|stop\s+playing)\b",
+    re.IGNORECASE,
+)
+_INTENT_PAUSE_MUSIC = re.compile(
+    r"\b(pause(\s+the\s+music|\s+the\s+song)?|resume(\s+the\s+music|\s+the\s+song)?|unpause)\b",
+    re.IGNORECASE,
+)
+_INTENT_QUEUE = re.compile(
+    r"\b(show\s+(the\s+)?queue|what'?s?\s+(in\s+)?(the\s+)?queue|song\s+queue|music\s+queue|queue\s+list)\b",
+    re.IGNORECASE,
+)
+_INTENT_NOWPLAYING = re.compile(
+    r"\b(what'?s?\s+(currently\s+)?playing|now\s+playing|current\s+(song|track)|what\s+(song|track)\s+is\s+this)\b",
+    re.IGNORECASE,
+)
+
+# ── Image search intent ───────────────────────────────────────────────────────
+_INTENT_IMAGE = re.compile(
+    r"\b(send\s+(me\s+)?(an?\s+)?(image|photo|picture|pic)\s+(of|for)|show\s+(me\s+)?(an?\s+)?(image|photo|picture|pic)\s+(of|for)|(find|get|search(\s+for)?)\s+(an?\s+)?(image|photo|picture|pic)\s+(of|for)|image\s+of|picture\s+of|photo\s+of)\b",
+    re.IGNORECASE,
+)
+
+# ── Music controls intent ─────────────────────────────────────────────────────
+_INTENT_CONTROLS = re.compile(
+    r"\b(music\s+controls?|player\s+controls?|control\s+panel|open\s+controls?|show\s+controls?)\b",
+    re.IGNORECASE,
+)
+
+# ── YouTube intents ───────────────────────────────────────────────────────────
+_INTENT_YT_SEARCH = re.compile(
+    r"\b(search\s+(youtube|yt)\s+(for)?|youtube\s+search|find\s+(on\s+)?(youtube|yt)|look\s+up\s+(on\s+)?(youtube|yt)|(youtube|yt)\s+(video|videos?)\s+(of|for|about))\b",
+    re.IGNORECASE,
+)
+_INTENT_YT_TREND = re.compile(
+    r"\b(trending\s+(on\s+)?(youtube|yt)|(youtube|yt)\s+trend(ing)?|what'?s?\s+trending\s+(on\s+)?(youtube|yt)|top\s+(youtube|yt)\s+videos?)\b",
+    re.IGNORECASE,
+)
+_INTENT_YT_INFO = re.compile(
+    r"\b(youtube\s+info|ytinfo|video\s+info\s+for|details\s+(for|about|of)\s+(this\s+)?(youtube|yt)|get\s+info\s+(for|about|on)\s+(https?://|youtu\.?be))\b",
+    re.IGNORECASE,
+)
+
 
 async def _try_intent_intercept(
     message: discord.Message,
@@ -642,6 +694,142 @@ async def _try_intent_intercept(
     if _INTENT_MODEL.search(user_text):
         await safe_reply(message, embed=_build_model_embed(message.author.id))
         return True
+
+    # ── music: play ───────────────────────────────────────────────────────────
+    if _INTENT_PLAY.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            query = re.sub(
+                r"^\s*(play|put\s+on|start\s+playing|queue\s+up|add\s+to\s+queue)\s*",
+                "", user_text, flags=re.IGNORECASE
+            ).strip(" ,:-")
+            if not query:
+                await safe_reply(message, "\U0001f3b5 What song would you like me to play?")
+                return True
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._do_play(message.guild, message.author, query, send_fn)
+            return True
+
+    # ── music: skip ───────────────────────────────────────────────────────────
+    if _INTENT_SKIP.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._do_skip(message.guild, send_fn)
+            return True
+
+    # ── music: stop ───────────────────────────────────────────────────────────
+    if _INTENT_STOP_MUSIC.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._do_stop(message.guild, send_fn)
+            return True
+
+    # ── music: pause / resume ─────────────────────────────────────────────────
+    if _INTENT_PAUSE_MUSIC.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._do_pause(message.guild, send_fn)
+            return True
+
+    # ── music: queue ──────────────────────────────────────────────────────────
+    if _INTENT_QUEUE.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._do_queue(message.guild, send_fn)
+            return True
+
+    # ── music: now playing ────────────────────────────────────────────────────
+    if _INTENT_NOWPLAYING.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._do_np(message.guild, send_fn)
+            return True
+
+    # ── image search ──────────────────────────────────────────────────────────
+    if _INTENT_IMAGE.search(user_text):
+        image_cog = bot.cogs.get("ImageSearch")
+        if image_cog:
+            query = re.sub(
+                r".*?\b(image|photo|picture|pic)\s+(of|for)\s*",
+                "", user_text, count=1, flags=re.IGNORECASE
+            ).strip(" ,:-")
+            if not query:
+                query = re.sub(
+                    r"^\s*(send\s+(me\s+)?(an?\s+)?(image|photo|picture|pic)|show\s+(me\s+)?(an?\s+)?(image|photo|picture|pic)|(find|get|search(\s+for)?)\s+(an?\s+)?(image|photo|picture|pic))\s*",
+                    "", user_text, flags=re.IGNORECASE
+                ).strip(" ,:-")
+            if not query:
+                await safe_reply(message, "\U0001f50d What would you like me to search an image for?")
+                return True
+            await image_cog._send_image(message, query)
+            return True
+
+    # ── music controls panel ──────────────────────────────────────────────────
+    if _INTENT_CONTROLS.search(user_text) and message.guild:
+        music_cog = bot.cogs.get("Music")
+        if music_cog:
+            send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
+            await music_cog._send_controls(message.guild, send_fn)
+            return True
+
+    # ── youtube: search ───────────────────────────────────────────────────────
+    if _INTENT_YT_SEARCH.search(user_text):
+        yt_cog = bot.cogs.get("YouTube")
+        if yt_cog:
+            query = re.sub(
+                r"\b(search\s+(youtube|yt)\s+(for)?|youtube\s+search|find\s+(on\s+)?(youtube|yt)|look\s+up\s+(on\s+)?(youtube|yt)|(youtube|yt)\s+(video|videos?)\s+(of|for|about))\s*",
+                "", user_text, flags=re.IGNORECASE
+            ).strip(" ,:-")
+            if not query:
+                await safe_reply(message, "\U0001f3ac What would you like me to search on YouTube?")
+                return True
+            await yt_cog._do_search(
+                query        = query,
+                user         = message.author,
+                send_fn      = lambda **kw: safe_reply(message, **kw),
+                ephemeral_fn = lambda **kw: safe_reply(message, **kw),
+            )
+            return True
+
+    # ── youtube: trending ─────────────────────────────────────────────────────
+    if _INTENT_YT_TREND.search(user_text):
+        yt_cog = bot.cogs.get("YouTube")
+        if yt_cog:
+            import discord as _discord
+            embed = _discord.Embed(
+                title       = "\U0001f525 YouTube Trending",
+                description = "Pick a category from the dropdown to see what\'s trending.",
+                color       = 0xFF0000,
+            )
+            from cogs.youtube import TrendingView
+            view = TrendingView(message.author)
+            await safe_reply(message, embed=embed, view=view)
+            return True
+
+    # ── youtube: video info ───────────────────────────────────────────────────
+    if _INTENT_YT_INFO.search(user_text):
+        yt_cog = bot.cogs.get("YouTube")
+        if yt_cog:
+            # Extract URL or video ID from the message
+            url_match = re.search(r"https?://\S+", user_text)
+            vid_match = re.search(r"\b([A-Za-z0-9_-]{11})\b", user_text)
+            target = (url_match.group(0) if url_match else
+                      vid_match.group(1) if vid_match else "")
+            if not target:
+                await safe_reply(message, "\U0001f4cb Please include a YouTube URL or video ID.")
+                return True
+            await yt_cog._do_info(
+                target       = target,
+                user         = message.author,
+                send_fn      = lambda **kw: safe_reply(message, **kw),
+                ephemeral_fn = lambda **kw: safe_reply(message, **kw),
+            )
+            return True
 
     return False
 

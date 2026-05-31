@@ -258,6 +258,16 @@ class ImageSearch(commands.Cog):
         _mark_searched(user.id)
         await reply_fn(embed=embed)
 
+    async def _send_image(self, message: discord.Message, query: str, index: int = 1) -> None:
+        """Called from ai.py intent intercept — searches and replies to a discord.Message."""
+        await self._handle(
+            query    = query,
+            index    = index,
+            user     = message.author,
+            reply_fn = lambda **kw: message.reply(**kw),
+            error_fn = lambda **kw: message.reply(**kw),
+        )
+
     # ── Prefix command: !image <query> [--index <n>] ──────────────────────────
 
     @commands.command(name="image", aliases=["img", "imgsearch"])
