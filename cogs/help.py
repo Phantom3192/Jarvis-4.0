@@ -43,6 +43,30 @@ CATEGORIES = {
             ("!compliment  /compliment @user", "Send someone a nice compliment"),
         ],
     },
+    "🎵 Music": {
+        "description": "Play music in voice channels via YouTube.",
+        "color": 0x1DB954,
+        "commands": [
+            ("!controls / !ctrl  /controls", "Open the interactive music control panel"),
+            ("!play / !p <song>  /play",      "Join VC and play a song or YouTube URL"),
+            ("!skip / !s  /skip",             "Skip the current track"),
+            ("!stop  /stop",                  "Stop music and disconnect"),
+            ("!pause  /pause",                "Pause the current track"),
+            ("!resume  /resume",              "Resume a paused track"),
+            ("!queue / !q  /queue",           "Show the current song queue"),
+            ("!np  /nowplaying",              "Show what's currently playing"),
+            ("!volume / !vol <0-100>  /volume", "Set playback volume"),
+        ],
+    },
+    "🔍 YouTube": {
+        "description": "Search YouTube, browse trending, and get video info.",
+        "color": 0xFF0000,
+        "commands": [
+            ("!youtube / !yt <query>  /youtube", "Search YouTube and pick from results"),
+            ("!yttrend / !trending    /yttrend",  "Browse trending YouTube videos by category"),
+            ("!ytinfo / !ytvideo <url>  /ytinfo", "Get detailed info about a YouTube video"),
+        ],
+    },
     "📊 Stats": {
         "description": "View your Jarvis usage stats.",
         "color": 0x2ECC71,

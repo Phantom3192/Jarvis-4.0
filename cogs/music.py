@@ -77,6 +77,129 @@ def _err(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Music Controls Panel
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
+    """Modal popup with a text input for song search."""
+
+    query = discord.ui.TextInput(
+        label       = "Song name or YouTube URL",
+        placeholder = "e.g. Blinding Lights, or paste a YouTube link…",
+        min_length  = 1,
+        max_length  = 200,
+    )
+
+    def __init__(self, cog: "Music", guild: discord.Guild, channel) -> None:
+        super().__init__()
+        self.cog     = cog
+        self.guild   = guild
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True)
+        await self.cog._do_play(
+            self.guild,
+            interaction.user,
+            self.query.value.strip(),
+            interaction.followup.send,
+        )
+
+
+class MusicControlsView(discord.ui.View):
+    """Interactive music control panel with buttons."""
+
+    def __init__(self, cog: "Music", guild: discord.Guild) -> None:
+        super().__init__(timeout=180)
+        self.cog  = cog
+        self.guild = guild
+
+    def _player(self) -> wavelink.Player | None:
+        return self.guild.voice_client
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        player = self._player()
+        embed   = self.cog._controls_embed(self.guild)
+        self._update_buttons(player)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    def _update_buttons(self, player: wavelink.Player | None) -> None:
+        playing = bool(player and (player.playing or player.paused))
+        paused  = bool(player and player.paused)
+        self.btn_pause.label    = "▶ Resume" if paused else "⏸ Pause"
+        self.btn_pause.style    = discord.ButtonStyle.success if paused else discord.ButtonStyle.secondary
+        self.btn_pause.disabled = not playing
+        self.btn_skip.disabled  = not playing
+        self.btn_stop.disabled  = not (player and player.is_connected())
+        self.btn_vol_down.disabled = not playing
+        self.btn_vol_up.disabled   = not playing
+
+    @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog._do_pause(self.guild, lambda **kw: None)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.primary, row=0)
+    async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog._do_skip(self.guild, lambda **kw: None)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger, row=0)
+    async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self.cog._do_stop(self.guild, lambda **kw: None)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="🔉 Vol -10", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_vol_down(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = self._player()
+        if player:
+            new_vol = max(0, player.volume - 10)
+            await self.cog._do_volume(self.guild, new_vol, lambda **kw: None)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="🔊 Vol +10", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_vol_up(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = self._player()
+        if player:
+            new_vol = min(100, player.volume + 10)
+            await self.cog._do_volume(self.guild, new_vol, lambda **kw: None)
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="🎶 Queue", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        player = self._player()
+        if not player or (not player.current and player.queue.is_empty):
+            await interaction.response.send_message("📭 The queue is empty.", ephemeral=True)
+            return
+        lines: list[str] = []
+        if player.current:
+            t = player.current
+            lines.append(f"**Now playing:** [{t.title}]({t.uri}) [{_fmt_duration(t.length)}]")
+        if not player.queue.is_empty:
+            lines.append("\n**Up next:**")
+            for i, t in enumerate(list(player.queue)[:10], 1):
+                lines.append(f"`{i}.` **{t.title}** [{_fmt_duration(t.length)}]")
+            if len(player.queue) > 10:
+                lines.append(f"… and {len(player.queue) - 10} more")
+        embed = discord.Embed(title="🎶 Queue", description="\n".join(lines), color=MUSIC_COLOR)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🔍 Search", style=discord.ButtonStyle.primary, row=2)
+    async def btn_search(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        modal = SearchModal(cog=self.cog, guild=self.guild, channel=interaction.channel)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        await self._refresh(interaction)
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Cog
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,8 +230,6 @@ class Music(commands.Cog):
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
         player: wavelink.Player = payload.player
-        if not player:
-            return
         if not player.queue.is_empty:
             await player.play(player.queue.get(), volume=100)
 
@@ -142,7 +263,7 @@ class Music(commands.Cog):
 
         if player is None:
             try:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=True, timeout=120.0)
+                player = await channel.connect(cls=wavelink.Player, self_deaf=True)
             except Exception as e:
                 await send_fn(embed=_err(f"Couldn't connect to VC: {e}"))
                 return None
@@ -152,6 +273,33 @@ class Music(commands.Cog):
         return player
 
     # ── Core play logic ───────────────────────────────────────────────────────
+
+    def _controls_embed(self, guild: discord.Guild) -> discord.Embed:
+        """Build the now-playing embed for the controls panel."""
+        player: wavelink.Player | None = guild.voice_client
+        if not player or not player.current:
+            embed = discord.Embed(
+                title       = "🎵 Music Controls",
+                description = "Nothing is playing right now.",
+                color       = MUSIC_COLOR,
+            )
+            return embed
+        t = player.current
+        status = "⏸ Paused" if player.paused else "▶ Playing"
+        embed = discord.Embed(
+            title       = "🎵 Music Controls",
+            description = f"**[{t.title}]({t.uri})**",
+            color       = MUSIC_COLOR,
+        )
+        embed.add_field(name="Status",   value=status,                    inline=True)
+        embed.add_field(name="Duration", value=_fmt_duration(t.length),   inline=True)
+        embed.add_field(name="Volume",   value=f"{player.volume}%",       inline=True)
+        embed.add_field(name="Author",   value=t.author or "?",           inline=True)
+        embed.add_field(name="Queue",    value=f"{len(player.queue)} songs", inline=True)
+        if t.artwork:
+            embed.set_thumbnail(url=t.artwork)
+        embed.set_footer(text="Controls auto-update when you click buttons")
+        return embed
 
     async def _do_play(self, guild, author, query: str, send_fn) -> None:
         player = await self._get_player(guild, author, send_fn)
@@ -245,7 +393,21 @@ class Music(commands.Cog):
         await player.set_volume(vol)
         await send_fn(f"🔊 Volume set to **{vol}%**")
 
+    # ── Controls panel ───────────────────────────────────────────────────────────
+
+    async def _send_controls(self, guild, send_fn) -> None:
+        view = MusicControlsView(cog=self, guild=guild)
+        player: wavelink.Player | None = guild.voice_client
+        view._update_buttons(player)
+        embed = self._controls_embed(guild)
+        await send_fn(embed=embed, view=view)
+
     # ── Slash commands ────────────────────────────────────────────────────────
+
+    @app_commands.command(name="controls", description="Open the music control panel 🎛️")
+    async def slash_controls(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=True)
+        await self._send_controls(interaction.guild, interaction.followup.send)
 
     @app_commands.command(name="play", description="Play a song in your voice channel 🎵")
     @app_commands.describe(query="Song name or YouTube URL")
@@ -286,6 +448,10 @@ class Music(commands.Cog):
         await self._do_volume(interaction.guild, level, interaction.followup.send)
 
     # ── Prefix commands ───────────────────────────────────────────────────────
+
+    @commands.command(name="controls", aliases=["ctrl", "panel", "cp"])
+    async def prefix_controls(self, ctx: commands.Context) -> None:
+        await self._send_controls(ctx.guild, ctx.reply)
 
     @commands.command(name="play", aliases=["p"])
     async def prefix_play(self, ctx: commands.Context, *, query: str = "") -> None:
