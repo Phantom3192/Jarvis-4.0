@@ -88,14 +88,6 @@ class Music(commands.Cog):
         self.bot = bot
 
     # ── Lavalink node setup ───────────────────────────────────────────────────
-
-    #async def cog_load(self) -> None:
-    #    nodes = [
-    #        wavelink.Node(uri=n["uri"], password=n["password"])
-    #        for n in LAVALINK_NODES
-    #    ]
-    #   await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
-    #    print(f"✅ Music: registered {len(nodes)} Lavalink nodes")
     async def cog_load(self) -> None:
         self.bot.loop.create_task(self._connect_lavalink())
 
@@ -114,7 +106,8 @@ class Music(commands.Cog):
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
         player: wavelink.Player = payload.player
         if not player.queue.is_empty:
-            await player.play(player.queue.get())
+            next_track = player.queue.get()
+            await player.play(next_track, volume=100)
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload) -> None:
@@ -171,19 +164,34 @@ class Music(commands.Cog):
         track: wavelink.Playable = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
         track.extras = {"requester": author}  # store who requested
 
+        # if player.playing or player.paused:
+        #     player.queue.put(track)
+        #     embed = discord.Embed(
+        #         title       = "➕ Added to Queue",
+        #         description = f"**[{track.title}]({track.uri})**\n"
+        #                       f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
+        #         color       = MUSIC_COLOR,
+        #     )
+        #     if track.artwork:
+        #         embed.set_thumbnail(url=track.artwork)
+        #     await send_fn(embed=embed)
+        # else:
+        #     await player.play(track)
+        #     await send_fn(embed=_track_embed(track, requester=author))
+        
         if player.playing or player.paused:
             player.queue.put(track)
             embed = discord.Embed(
                 title       = "➕ Added to Queue",
                 description = f"**[{track.title}]({track.uri})**\n"
-                              f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
+                            f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
                 color       = MUSIC_COLOR,
             )
             if track.artwork:
                 embed.set_thumbnail(url=track.artwork)
             await send_fn(embed=embed)
         else:
-            await player.play(track)
+            await player.play(track, volume=100)  # add volume=100
             await send_fn(embed=_track_embed(track, requester=author))
 
     async def _do_skip(self, guild, send_fn) -> None:
