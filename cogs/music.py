@@ -140,7 +140,7 @@ class Music(commands.Cog):
 
         if player is None:
             try:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=True)
+                player = await channel.connect(cls=wavelink.Player, self_deaf=True, timeout=60.0)
             except Exception as e:
                 await send_fn(embed=_err(f"Couldn't connect to VC: {e}"))
                 return None
