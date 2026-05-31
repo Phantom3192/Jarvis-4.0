@@ -98,15 +98,13 @@ class Music(commands.Cog):
     #    print(f"✅ Music: registered {len(nodes)} Lavalink nodes")
 
     async def cog_load(self) -> None:
+        await self.bot.wait_until_ready()  # wait for bot to fully login first
         nodes = [
             wavelink.Node(uri=n["uri"], password=n["password"])
             for n in LAVALINK_NODES
         ]
-        try:
-            await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
-            print(f"✅ Music: connected to Lavalink!")
-        except Exception as e:
-            print(f"❌ Music: Lavalink connection failed: {e}")
+        await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
+        print(f"✅ Music: connected to Lavalink!")
     # ── wavelink events ───────────────────────────────────────────────────────
 
     @commands.Cog.listener()

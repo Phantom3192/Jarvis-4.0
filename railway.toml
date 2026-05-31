@@ -2,4 +2,4 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python test_lavalink.py && echo DONE"
+startCommand = "python main.py"
