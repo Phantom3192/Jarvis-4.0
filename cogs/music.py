@@ -31,6 +31,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import wavelink
+import os
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -42,7 +43,10 @@ ERROR_COLOR  = discord.Color.red()
 
 # Your self-hosted Lavalink on Wispbyte
 LAVALINK_NODES = [
-    {"uri": "http://zephyr.proxy.rlwy.net:59029", "password": "jarvisbot"},
+    {
+        "uri": f"http://{os.getenv('LAVALINK_HOST', 'remarkable-joy.railway.internal')}:{os.getenv('LAVALINK_PORT', '2333')}",
+        "password": os.getenv('LAVALINK_PASSWORD', 'jarvisbot')
+    },
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
