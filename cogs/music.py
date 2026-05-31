@@ -42,7 +42,7 @@ ERROR_COLOR  = discord.Color.red()
 
 # Your self-hosted Lavalink on Wispbyte
 LAVALINK_NODES = [
-    {"uri": "http://resourceful-embrace.railway.internal:2333", "password": "jarvisbot"},
+    {"uri": "http://remarkable-joy.railway.internal:2333", "password": "jarvisbot"},
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
