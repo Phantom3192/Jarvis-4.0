@@ -170,9 +170,7 @@ class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
         await interaction.response.defer(thinking=True)
         query  = self.query.value.strip()
         # Search for 5 results
-        tracks: wavelink.Search = await wavelink.Playable.search(
-            f"ytsearch5:{query}", source=wavelink.TrackSource.YouTube
-        )
+        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
         if not tracks:
             await interaction.followup.send(embed=_err(f"No results found for **{query}**"))
             return
