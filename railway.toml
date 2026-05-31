@@ -2,4 +2,4 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python -c \"import socket; s=socket.socket(); s.settimeout(5); result=s.connect_ex(('remarkable-joy.railway.internal', 2333)); print('OPEN' if result==0 else f'CLOSED: {result}'); s.close()\""
+startCommand = "python main.py"
