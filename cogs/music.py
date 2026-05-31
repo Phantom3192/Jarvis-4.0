@@ -197,15 +197,21 @@ class MusicControlsView(discord.ui.View):
 
     def __init__(self, cog: "Music", guild: discord.Guild) -> None:
         super().__init__(timeout=180)
-        self.cog  = cog
-        self.guild = guild
+        self.cog      = cog
+        self.guild_id = guild.id
+        self.bot      = cog.bot
+
+    def _guild(self) -> discord.Guild | None:
+        return self.bot.get_guild(self.guild_id)
 
     def _player(self) -> wavelink.Player | None:
-        return self.guild.voice_client
+        guild = self._guild()
+        return guild.voice_client if guild else None
 
     async def _refresh(self, interaction: discord.Interaction) -> None:
         player = self._player()
-        embed   = self.cog._controls_embed(self.guild)
+        guild  = self._guild()
+        embed  = self.cog._controls_embed(guild) if guild else discord.Embed(title="🎵 Music Controls", description="Error getting guild.", color=ERROR_COLOR)
         self._update_buttons(player)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -222,17 +228,17 @@ class MusicControlsView(discord.ui.View):
 
     @discord.ui.button(label="⏸ Pause", style=discord.ButtonStyle.secondary, row=0)
     async def btn_pause(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog._do_pause(self.guild, lambda **kw: None)
+        await self.cog._do_pause(self._guild(), lambda **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="⏭ Skip", style=discord.ButtonStyle.primary, row=0)
     async def btn_skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog._do_skip(self.guild, lambda **kw: None)
+        await self.cog._do_skip(self._guild(), lambda **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="⏹ Stop", style=discord.ButtonStyle.danger, row=0)
     async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog._do_stop(self.guild, lambda **kw: None)
+        await self.cog._do_stop(self._guild(), lambda **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="🔉 Vol -10", style=discord.ButtonStyle.secondary, row=1)
@@ -240,7 +246,7 @@ class MusicControlsView(discord.ui.View):
         player = self._player()
         if player:
             new_vol = max(0, player.volume - 10)
-            await self.cog._do_volume(self.guild, new_vol, lambda **kw: None)
+            await self.cog._do_volume(self._guild(), new_vol, lambda **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="🔊 Vol +10", style=discord.ButtonStyle.secondary, row=1)
@@ -248,7 +254,7 @@ class MusicControlsView(discord.ui.View):
         player = self._player()
         if player:
             new_vol = min(100, player.volume + 10)
-            await self.cog._do_volume(self.guild, new_vol, lambda **kw: None)
+            await self.cog._do_volume(self._guild(), new_vol, lambda **kw: None)
         await self._refresh(interaction)
 
     @discord.ui.button(label="🎶 Queue", style=discord.ButtonStyle.secondary, row=1)
@@ -272,7 +278,7 @@ class MusicControlsView(discord.ui.View):
 
     @discord.ui.button(label="🔍 Search", style=discord.ButtonStyle.primary, row=2)
     async def btn_search(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        modal = SearchModal(cog=self.cog, guild=self.guild, author=interaction.user)
+        modal = SearchModal(cog=self.cog, guild=self._guild(), author=interaction.user)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2)
@@ -480,10 +486,10 @@ class Music(commands.Cog):
     # ── Controls panel ───────────────────────────────────────────────────────────
 
     async def _send_controls(self, guild, send_fn) -> None:
-        view = MusicControlsView(cog=self, guild=guild)
-        player: wavelink.Player | None = guild.voice_client
+        view   = MusicControlsView(cog=self, guild=guild)
+        player = guild.voice_client
         view._update_buttons(player)
-        embed = self._controls_embed(guild)
+        embed  = self._controls_embed(guild)
         await send_fn(embed=embed, view=view)
 
     # ── Slash commands ────────────────────────────────────────────────────────
