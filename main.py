@@ -40,7 +40,7 @@ COGS = [
     "cogs.bugreport",
     "cogs.errorhandler",
     "cogs.help",
-    "cogs.fun",
+    "cogs.game",
     "cogs.system",
     "cogs.image_search",
     "cogs.summary",
