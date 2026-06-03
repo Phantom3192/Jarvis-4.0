@@ -365,50 +365,8 @@ class Stats(commands.Cog):
         mem  = await self._memory_count(target.id)
         await interaction.followup.send(embed=_format_stats(target, data, rank=rank, memory_count=mem))
 
-    # ── !users & /users ───────────────────────────────────────────────────────
-
-    @commands.command(name="users")
-    async def prefix_users(self, ctx: commands.Context):
-        """[Admin] Browse all users Jarvis has seen, with arrow buttons."""
-        if not is_admin(ctx.author):
-            await ctx.reply("🚫 This command is for admins only.")
-            return
-
-        rows = _collect_user_rows(self.bot)
-        if not rows:
-            await ctx.reply(embed=discord.Embed(
-                title="📭 No Users Yet",
-                description="No one has interacted with Jarvis yet.",
-                color=discord.Color.greyple(),
-            ))
-            return
-
-        view = UsersView(author_id=ctx.author.id, rows=rows)
-        await ctx.reply(embed=view.current_embed(), view=view)
-
-    @app_commands.command(name="users", description="[Admin] Browse all users Jarvis has seen")
-    async def slash_users(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 This command is for admins only.", ephemeral=True
-            )
-            return
-
-        rows = _collect_user_rows(self.bot)
-        if not rows:
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="📭 No Users Yet",
-                    description="No one has interacted with Jarvis yet.",
-                    color=discord.Color.greyple(),
-                ),
-                ephemeral=True,
-            )
-            return
-
-        view = UsersView(author_id=interaction.user.id, rows=rows)
-        await interaction.response.send_message(embed=view.current_embed(), view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Stats(bot))
+    

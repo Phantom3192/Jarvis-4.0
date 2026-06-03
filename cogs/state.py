@@ -27,24 +27,32 @@ _conn = None  # libsql connection
 # ── In-memory mirrors ─────────────────────────────────────────────────────────
 
 _data: dict[str, Any] = {
-    "bans":        {},    # str(user_id) → {"reason": str, "expires": float|None}
-    "seen":        set(), # set of int user_ids
-    "stats":       {},    # str(user_id) → {"messages", "tokens_est", "first_seen", "last_seen"}
-    "prompts":     {},    # str(guild_id) → prompt string
-    "rate_limits": {},    # str(user_id)  → {"count": int, "day": "YYYY-MM-DD"}
-    "settings":   {},    # arbitrary bot settings persisted (e.g. cooldowns)
-    "guild_bans":  {},    # str(guild_id) → {"reason": str, "banned_at": float}
+    "bans":           {},    # str(user_id) → {"reason": str, "expires": float|None}
+    "seen":           set(), # set of int user_ids
+    "stats":          {},    # str(user_id) → {"messages", "tokens_est", "first_seen", "last_seen"}
+    "prompts":        {},    # str(guild_id) → prompt string
+    "rate_limits":    {},    # str(user_id)  → {"count": int, "day": "YYYY-MM-DD"}
+    "settings":       {},    # arbitrary bot settings persisted (e.g. cooldowns)
+    "preferred_names": {},   # str(user_id) → preferred display name
+    "reminders":      {},    # str(user_id) → list of reminder objects
+    "playlists":      {},    # str(user_id) -> {playlist_name: [track_info, ...]}
+    "song_history":   {},    # str(user_id) -> [track_info, ...]
+    "guild_bans":     {},    # str(guild_id) → {"reason": str, "banned_at": float}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
 _SERIALISE: dict[str, Any] = {
-    "bans":        lambda: _data["bans"],
-    "seen":        lambda: list(_data["seen"]),
-    "stats":       lambda: _data["stats"],
-    "prompts":     lambda: _data["prompts"],
-    "rate_limits": lambda: _data["rate_limits"],
-    "settings":    lambda: _data["settings"],
-    "guild_bans":  lambda: _data["guild_bans"],
+    "bans":            lambda: _data["bans"],
+    "seen":            lambda: list(_data["seen"]),
+    "stats":           lambda: _data["stats"],
+    "prompts":         lambda: _data["prompts"],
+    "rate_limits":     lambda: _data["rate_limits"],
+    "settings":        lambda: _data["settings"],
+    "preferred_names": lambda: _data["preferred_names"],
+    "reminders":       lambda: _data["reminders"],
+    "playlists":       lambda: _data["playlists"],
+    "song_history":    lambda: _data["song_history"],
+    "guild_bans":      lambda: _data["guild_bans"],
 }
 
 
@@ -80,13 +88,17 @@ async def init_db():
         rows = _conn.execute("SELECT key, value FROM state").fetchall()
         db   = {row[0]: json.loads(row[1]) for row in rows}
 
-        if "bans"        in db: _data["bans"]        = db["bans"]
-        if "seen"        in db: _data["seen"]         = set(db["seen"])
-        if "stats"       in db: _data["stats"]        = db["stats"]
-        if "prompts"     in db: _data["prompts"]      = db["prompts"]
-        if "settings"    in db: _data["settings"]     = db["settings"]
-        if "rate_limits" in db: _data["rate_limits"]  = db["rate_limits"]
-        if "guild_bans"  in db: _data["guild_bans"]   = db["guild_bans"]
+        if "bans"           in db: _data["bans"]           = db["bans"]
+        if "seen"           in db: _data["seen"]           = set(db["seen"])
+        if "stats"          in db: _data["stats"]          = db["stats"]
+        if "prompts"        in db: _data["prompts"]        = db["prompts"]
+        if "settings"       in db: _data["settings"]       = db["settings"]
+        if "preferred_names" in db: _data["preferred_names"] = db["preferred_names"]
+        if "reminders"      in db: _data["reminders"]      = db["reminders"]
+        if "playlists"      in db: _data["playlists"]      = db["playlists"]
+        if "song_history"   in db: _data["song_history"]   = db["song_history"]
+        if "rate_limits"    in db: _data["rate_limits"]    = db["rate_limits"]
+        if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
 
         print("✅ Turso state DB connected")
 
@@ -349,6 +361,140 @@ def set_setting(key: str, value) -> None:
     _data["settings"][key] = value
     _settings_cache[key] = value  # update cache immediately
     _schedule_save("settings")
+
+
+def get_preferred_name(user_id: int) -> str | None:
+    return _data.get("preferred_names", {}).get(str(user_id))
+
+
+def set_preferred_name(user_id: int, name: str) -> None:
+    if "preferred_names" not in _data:
+        _data["preferred_names"] = {}
+    _data["preferred_names"][str(user_id)] = name
+    _schedule_save("preferred_names")
+
+
+def clear_preferred_name(user_id: int) -> bool:
+    uid = str(user_id)
+    if uid in _data.get("preferred_names", {}):
+        del _data["preferred_names"][uid]
+        _schedule_save("preferred_names")
+        return True
+    return False
+
+
+def get_reminders(user_id: int) -> list[dict[str, object]]:
+    return list(_data.get("reminders", {}).get(str(user_id), []))
+
+
+def add_reminder(user_id: int, when: float, content: str) -> int:
+    if "reminders" not in _data:
+        _data["reminders"] = {}
+    uid = str(user_id)
+    if uid not in _data["reminders"]:
+        _data["reminders"][uid] = []
+    reminders = _data["reminders"][uid]
+    new_id = max((reminder.get("id", 0) for reminder in reminders), default=0) + 1
+    reminder = {"id": new_id, "when": when, "content": content}
+    reminders.append(reminder)
+    _schedule_save("reminders")
+    return new_id
+
+
+def delete_reminder(user_id: int, reminder_id: int) -> bool:
+    uid = str(user_id)
+    reminders = _data.get("reminders", {}).get(uid)
+    if not reminders:
+        return False
+    new_reminders = [r for r in reminders if r.get("id") != reminder_id]
+    if len(new_reminders) == len(reminders):
+        return False
+    _data["reminders"][uid] = new_reminders
+    _schedule_save("reminders")
+    return True
+
+
+def pop_due_reminders(now: float | None = None) -> list[tuple[int, dict[str, object]]]:
+    if now is None:
+        now = time.time()
+    due: list[tuple[int, dict[str, object]]] = []
+    for uid_str, reminders in list(_data.get("reminders", {}).items()):
+        remaining = []
+        for reminder in reminders:
+            if reminder.get("when", 0) <= now:
+                try:
+                    uid = int(uid_str)
+                except ValueError:
+                    continue
+                due.append((uid, reminder))
+            else:
+                remaining.append(reminder)
+        if remaining:
+            _data["reminders"][uid_str] = remaining
+        else:
+            del _data["reminders"][uid_str]
+    if due:
+        _schedule_save("reminders")
+    return due
+
+
+def get_user_playlists(user_id: int) -> dict[str, list[dict[str, object]]]:
+    return _data.get("playlists", {}).get(str(user_id), {})
+
+
+def set_user_playlist(user_id: int, name: str, tracks: list[dict[str, object]]) -> None:
+    if "playlists" not in _data:
+        _data["playlists"] = {}
+    uid = str(user_id)
+    if uid not in _data["playlists"]:
+        _data["playlists"][uid] = {}
+    _data["playlists"][uid][name] = tracks
+    _schedule_save("playlists")
+
+
+def delete_user_playlist(user_id: int, name: str) -> bool:
+    uid = str(user_id)
+    if "playlists" not in _data or uid not in _data["playlists"]:
+        return False
+    if name not in _data["playlists"][uid]:
+        return False
+    del _data["playlists"][uid][name]
+    _schedule_save("playlists")
+    return True
+
+
+def get_song_history(user_id: int, limit: int = 50) -> list[dict[str, object]]:
+    history = _data.get("song_history", {}).get(str(user_id), [])
+    return history[-limit:]
+
+
+def set_dnd(user_id: int, enabled: bool) -> None:
+    """Enable or disable Do Not Disturb mode for a user."""
+    if "dnd_users" not in _data:
+        _data["dnd_users"] = {}
+    if enabled:
+        _data["dnd_users"][str(user_id)] = True
+    else:
+        _data["dnd_users"].pop(str(user_id), None)
+    _schedule_save("dnd_users")
+
+
+def is_dnd(user_id: int) -> bool:
+    """Check if user has DND mode enabled."""
+    return str(user_id) in _data.get("dnd_users", {})
+
+
+def append_song_history(user_id: int, track: dict[str, object], max_items: int = 50) -> None:
+    if "song_history" not in _data:
+        _data["song_history"] = {}
+    uid = str(user_id)
+    if uid not in _data["song_history"]:
+        _data["song_history"][uid] = []
+    history = _data["song_history"][uid]
+    history.append(track)
+    if len(history) > max_items:
+        del history[:-max_items]
+    _schedule_save("song_history")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

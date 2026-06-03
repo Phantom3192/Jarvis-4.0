@@ -18,6 +18,7 @@ import asyncio
 import os
 import time
 from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage, get_setting, set_setting, _data, _schedule_save
+from cogs.help import AdminHelpView, _build_admin_overview_embed
 import re
 
 
@@ -476,87 +477,101 @@ class Admin(commands.Cog):
 
         await ctx.reply("✅ Burst settings updated.")
 
-    # ── Slash commands ────────────────────────────────────────────────────────
+    @commands.command(name="settings", aliases=["config"])
+    async def prefix_settings(self, ctx: commands.Context, option: str = None, value: str = None):
+        """View or manage channel settings. Only admins can modify settings."""
+        if ctx.guild is None:
+            await ctx.reply("⚠️ Channel settings can only be configured in a server.")
+            return
 
-    @app_commands.command(name="botban", description="Ban a user from using Jarvis")
-    @app_commands.describe(
-        user="User to ban",
-        reason="Reason for the ban",
-        duration="Duration (e.g. 7). Leave 0 for permanent.",
-        unit="Time unit",
-    )
-    @app_commands.choices(unit=[
-        app_commands.Choice(name="Permanent", value="permanent"),
-        app_commands.Choice(name="Minutes",   value="minutes"),
-        app_commands.Choice(name="Hours",     value="hours"),
-        app_commands.Choice(name="Days",      value="days"),
-        app_commands.Choice(name="Weeks",     value="weeks"),
-    ])
-    async def slash_botban(
-        self,
-        interaction: discord.Interaction,
-        user: discord.User,
-        reason: str = "No reason provided",
-        duration: int = 0,
-        unit: str = "permanent",
-    ):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+        auto_key = f"auto_respond_channel_{ctx.channel.id}"
+        restrict_key = f"restrict_channel_{ctx.channel.id}"
+        current_auto = bool(get_setting(auto_key, False))
+        current_restrict = bool(get_setting(restrict_key, False))
+
+        # Allow everyone to view settings
+        if option is None:
+            embed = discord.Embed(
+                title="Channel Settings",
+                description=(
+                    f"**auto_respond** — `{'on' if current_auto else 'off'}`\n"
+                    "Respond to every message in this channel without needing a mention.\n"
+                    f"**restrict_mode** — `{'on' if current_restrict else 'off'}`\n"
+                    "Prevent Jarvis from replying in this channel entirely.\n\n"
+                    "_(Only moderators and admins can change these settings)_"
+                ),
+                color=discord.Color.blurple(),
+            )
+            await ctx.reply(embed=embed)
             return
-        if user.id == interaction.user.id:
-            await interaction.response.send_message("❌ You can't ban yourself.", ephemeral=True)
+
+        # Require manage_channels permission to modify settings
+        if not (is_admin(ctx.author) or ctx.author.guild_permissions.manage_channels):
+            await ctx.reply("🚫 You need Manage Channels permission to modify channel settings.")
             return
-        if is_admin(user):
-            await interaction.response.send_message("❌ You can't ban another admin.", ephemeral=True)
+
+        normalized = option.lower()
+        if normalized not in {
+            "auto_respond", "autorespond", "respond_all",
+            "restrict_mode", "restrict", "no_respond", "mute_channel",
+        }:
+            await ctx.reply("⚠️ Unknown setting. Available: `auto_respond`, `restrict_mode`.")
             return
-        if is_bot_banned(user.id):
-            await interaction.response.send_message(
-                f"⚠️ **{user}** is already banned from Jarvis.", ephemeral=True
+
+        if value is None:
+            current_value = (
+                current_auto if normalized in {"auto_respond", "autorespond", "respond_all"}
+                else current_restrict
+            )
+            await ctx.reply(
+                f"`{normalized}` is currently `{'on' if current_value else 'off'}`."
             )
             return
-        await interaction.response.defer()
-        await self._do_botban(
-            user, reason, duration, unit,
-            lambda msg: interaction.followup.send(msg)
-        )
 
-    @app_commands.command(name="botunban", description="Unban a user from Jarvis")
-    @app_commands.describe(user_id="The Discord user ID to unban")
-    async def slash_botunban(self, interaction: discord.Interaction, user_id: str):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+        normalized_value = value.lower()
+        if normalized_value in {"on", "true", "yes", "1"}:
+            new_value = True
+        elif normalized_value in {"off", "false", "no", "0"}:
+            new_value = False
+        else:
+            await ctx.reply("❌ Invalid value. Use `on` or `off`.")
             return
-        try:
-            uid = int(user_id)
-        except ValueError:
-            await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        await self._do_botunban(uid, lambda msg: interaction.followup.send(msg))
 
-    @app_commands.command(name="botbans", description="List all users banned from Jarvis")
-    async def slash_botbans(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        if not bot_bans:
-            await interaction.followup.send("✅ No users are currently banned from Jarvis.")
-            return
-        lines = await _format_ban_lines(self.bot)
-        await interaction.followup.send(embed=_build_ban_list_embed(lines))
+        setting_key = auto_key if normalized in {"auto_respond", "autorespond", "respond_all"} else restrict_key
+        set_setting(setting_key, new_value)
 
-    @app_commands.command(name="resetlimit", description="Reset a user's daily AI message limit (admin only)")
-    @app_commands.describe(user="The user whose limit to reset")
-    async def slash_resetlimit(self, interaction: discord.Interaction, user: discord.User):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
+        if setting_key == auto_key:
+            await ctx.reply(f"✅ `auto_respond` has been turned {'on' if new_value else 'off'} for this channel.")
+        else:
+            await ctx.reply(f"✅ `restrict_mode` has been turned {'on' if new_value else 'off'} for this channel.")
+    @app_commands.command(name="adminhelp", description="Browse admin and moderator commands")
+    async def slash_adminhelp(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Admin help is only available in servers.", ephemeral=True
+            )
             return
-        reset_ai_usage(user.id)
-        await interaction.response.send_message(
-            f"✅ Daily AI limit reset for **{user}** — they can send AI messages again.",
-            ephemeral=True,
-        )
+        if not (is_admin(interaction.user) or interaction.user.guild_permissions.manage_channels):
+            await interaction.response.send_message(
+                "🚫 You need Manage Channels permission to view admin help.", ephemeral=True
+            )
+            return
+        view = AdminHelpView(author_id=interaction.user.id)
+        await interaction.response.send_message(embed=_build_admin_overview_embed(), view=view, ephemeral=True)
+
+    @commands.command(name="adminhelp")
+    async def prefix_adminhelp(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await ctx.reply("Admin help is only available in servers.")
+            return
+        if not (is_admin(ctx.author) or ctx.author.guild_permissions.manage_channels):
+            await ctx.reply("🚫 You need Manage Channels permission to view admin help.")
+            return
+        view = AdminHelpView(author_id=ctx.author.id)
+        await ctx.reply(embed=_build_admin_overview_embed(), view=view)
+    # ── Slash commands ────────────────────────────────────────────────────────
+
+
 
 
     # ── Guild-ban commands ────────────────────────────────────────────────────
@@ -601,43 +616,6 @@ class Admin(commands.Cog):
             return
         embed = await _build_guild_ban_embed(self.bot)
         await ctx.reply(embed=embed)
-
-    @app_commands.command(name="guildban", description="Ban a guild from using Jarvis (admin only)")
-    @app_commands.describe(guild_id="The Discord Guild ID to ban", reason="Reason for the ban")
-    async def slash_guild_ban(self, interaction: discord.Interaction, guild_id: str, reason: str = "No reason provided"):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
-            return
-        try:
-            gid = int(guild_id)
-        except ValueError:
-            await interaction.response.send_message("❌ Invalid guild ID.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        await self._do_guild_ban(gid, reason, lambda msg: interaction.followup.send(msg))
-
-    @app_commands.command(name="guildunban", description="Unban a guild from Jarvis (admin only)")
-    @app_commands.describe(guild_id="The Discord Guild ID to unban")
-    async def slash_guild_unban(self, interaction: discord.Interaction, guild_id: str):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
-            return
-        try:
-            gid = int(guild_id)
-        except ValueError:
-            await interaction.response.send_message("❌ Invalid guild ID.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        await self._do_guild_unban(gid, lambda msg: interaction.followup.send(msg))
-
-    @app_commands.command(name="guildbans", description="List all guild-banned servers (admin only)")
-    async def slash_guild_bans(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message("🚫 You don't have permission.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        embed = await _build_guild_ban_embed(self.bot)
-        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

@@ -31,6 +31,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import wavelink
+from cogs.state import (
+    append_song_history,
+    delete_user_playlist,
+    get_setting,
+    get_song_history,
+    get_user_playlists,
+    set_user_playlist,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,6 +82,43 @@ def _track_embed(track: wavelink.Playable, title: str = "🎵 Now Playing",
 
 def _err(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
+
+
+def _track_info(track: wavelink.Playable) -> dict[str, object]:
+    return {
+        "title":  track.title,
+        "uri":    track.uri,
+        "author": track.author or "",
+        "length": track.length,
+    }
+
+
+async def _resolve_saved_track(info: dict[str, object]) -> Optional[wavelink.Playable]:
+    uri = info.get("uri")
+    if not uri:
+        return None
+    tracks: wavelink.Search = await wavelink.Playable.search(uri, source=wavelink.TrackSource.YouTube)
+    if not tracks:
+        return None
+    return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
+
+
+async def _find_similar_track(history: list[dict[str, object]]) -> Optional[wavelink.Playable]:
+    if not history:
+        return None
+    last = history[-1]
+    author = last.get("author", "")
+    title = last.get("title", "")
+    if author:
+        query = f"{author} similar songs"
+    elif title:
+        query = f"songs like {title}"
+    else:
+        return None
+    tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+    if not tracks:
+        return None
+    return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
 
 
 
@@ -298,6 +343,7 @@ class Music(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._last_requester: dict[int, int] = {}
 
     # ── Lavalink node setup ───────────────────────────────────────────────────
 
@@ -321,6 +367,20 @@ class Music(commands.Cog):
         player: wavelink.Player = payload.player
         if not player.queue.is_empty:
             await player.play(player.queue.get(), volume=100)
+            return
+
+        autoplay = bool(get_setting(f"autoplay_channel_{player.guild.id}", False))
+        if not autoplay:
+            return
+
+        user_id = self._last_requester.get(player.guild.id)
+        if not user_id:
+            return
+
+        history = get_song_history(user_id)
+        similar = await _find_similar_track(history)
+        if similar:
+            await player.play(similar, volume=100)
 
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload) -> None:
@@ -417,6 +477,8 @@ class Music(commands.Cog):
             await send_fn(embed=embed)
         else:
             await player.play(track, volume=100)
+            self._last_requester[player.guild.id] = author.id
+            append_song_history(author.id, _track_info(track))
             await send_fn(embed=_track_embed(track, requester=author))
 
     async def _do_skip(self, guild, send_fn) -> None:
@@ -588,6 +650,130 @@ class Music(commands.Cog):
             await ctx.reply(f"🔊 Current volume: **{vol}%**")
             return
         await self._do_volume(ctx.guild, level, ctx.reply)
+
+    @commands.group(name="playlist", invoke_without_command=True)
+    async def prefix_playlist(self, ctx: commands.Context) -> None:
+        await ctx.reply(
+            "**Playlist commands:** `!playlist list`, `!playlist show <name>`, "
+            "`!playlist play <name>`, `!playlist add <name> <song>`, "
+            "`!playlist remove <name> <index>`, `!playlist delete <name>`"
+        )
+
+    @prefix_playlist.command(name="list")
+    async def playlist_list(self, ctx: commands.Context) -> None:
+        playlists = get_user_playlists(ctx.author.id)
+        if not playlists:
+            await ctx.reply("📂 You don't have any playlists yet.")
+            return
+        names = "\n".join(f"• {name}" for name in playlists)
+        await ctx.reply(embed=discord.Embed(title="Your Playlists", description=names, color=MUSIC_COLOR))
+
+    @prefix_playlist.command(name="show")
+    async def playlist_show(self, ctx: commands.Context, name: str) -> None:
+        playlists = get_user_playlists(ctx.author.id)
+        key = next((k for k in playlists if k.lower() == name.lower()), None)
+        if key is None:
+            await ctx.reply(f"❌ Playlist `{name}` not found.")
+            return
+        tracks = playlists[key]
+        if not tracks:
+            await ctx.reply(f"📂 Playlist `{key}` is empty.")
+            return
+        lines = [f"`{i+1}.` **{t['title']}**" for i, t in enumerate(tracks[:20])]
+        if len(tracks) > 20:
+            lines.append(f"… and {len(tracks) - 20} more")
+        await ctx.reply(embed=discord.Embed(title=f"Playlist: {key}", description="\n".join(lines), color=MUSIC_COLOR))
+
+    @prefix_playlist.command(name="play")
+    async def playlist_play(self, ctx: commands.Context, name: str) -> None:
+        playlists = get_user_playlists(ctx.author.id)
+        key = next((k for k in playlists if k.lower() == name.lower()), None)
+        if key is None:
+            await ctx.reply(f"❌ Playlist `{name}` not found.")
+            return
+        tracks = playlists[key]
+        if not tracks:
+            await ctx.reply(f"📂 Playlist `{key}` is empty.")
+            return
+
+        player = await self._get_player(ctx.guild, ctx.author, ctx.reply)
+        if not player:
+            return
+
+        playable_tracks: list[wavelink.Playable] = []
+        for info in tracks:
+            resolved = await _resolve_saved_track(info)
+            if resolved:
+                playable_tracks.append(resolved)
+
+        if not playable_tracks:
+            await ctx.reply("❌ Could not load any songs from that playlist.")
+            return
+
+        if player.playing or player.paused:
+            for track in playable_tracks:
+                player.queue.put(track)
+            await ctx.reply(f"✅ Added **{len(playable_tracks)}** songs from `{key}` to the queue.")
+        else:
+            await player.play(playable_tracks[0], volume=100)
+            self._last_requester[ctx.guild.id] = ctx.author.id
+            append_song_history(ctx.author.id, _track_info(playable_tracks[0]))
+            for track in playable_tracks[1:]:
+                player.queue.put(track)
+            await ctx.reply(embed=_track_embed(playable_tracks[0], requester=ctx.author))
+
+    @prefix_playlist.command(name="add")
+    async def playlist_add(self, ctx: commands.Context, name: str, *, query: str) -> None:
+        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+        if not tracks:
+            await ctx.reply(f"❌ No results found for **{query}**")
+            return
+        track = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
+        playlist = get_user_playlists(ctx.author.id)
+        key = next((k for k in playlist if k.lower() == name.lower()), name)
+        tracks_data = playlist.get(key, [])
+        tracks_data.append(_track_info(track))
+        set_user_playlist(ctx.author.id, key, tracks_data)
+        await ctx.reply(f"✅ Added **{track.title}** to playlist `{key}`.")
+
+    @prefix_playlist.command(name="remove")
+    async def playlist_remove(self, ctx: commands.Context, name: str, index: int) -> None:
+        playlists = get_user_playlists(ctx.author.id)
+        key = next((k for k in playlists if k.lower() == name.lower()), None)
+        if key is None:
+            await ctx.reply(f"❌ Playlist `{name}` not found.")
+            return
+        tracks = playlists[key]
+        if not (1 <= index <= len(tracks)):
+            await ctx.reply("❌ Invalid track index.")
+            return
+        removed = tracks.pop(index - 1)
+        set_user_playlist(ctx.author.id, key, tracks)
+        await ctx.reply(f"✅ Removed **{removed['title']}** from `{key}`.")
+
+    @prefix_playlist.command(name="delete")
+    async def playlist_delete(self, ctx: commands.Context, name: str) -> None:
+        if not delete_user_playlist(ctx.author.id, name if name in get_user_playlists(ctx.author.id) else next((k for k in get_user_playlists(ctx.author.id) if k.lower() == name.lower()), name)):
+            await ctx.reply(f"❌ Playlist `{name}` not found.")
+            return
+        await ctx.reply(f"✅ Deleted playlist `{name}`.")
+
+    @commands.command(name="autoplay")
+    async def prefix_autoplay(self, ctx: commands.Context, value: str = None) -> None:
+        key = f"autoplay_channel_{ctx.guild.id}"
+        current = bool(get_setting(key, False))
+        if value is None:
+            await ctx.reply(f"🔁 Autoplay is currently `{'on' if current else 'off'}` for this channel.")
+            return
+        normalized = value.lower()
+        if normalized in {"on", "true", "yes", "1"}:
+            set_setting(key, True)
+            await ctx.reply("✅ Autoplay enabled for this channel.")
+        elif normalized in {"off", "false", "no", "0"}:
+            set_setting(key, False)
+            await ctx.reply("✅ Autoplay disabled for this channel.")
+        else:
+            await ctx.reply("❌ Invalid value. Use `on` or `off`.")
 
     # ── Auto-disconnect when VC empties ───────────────────────────────────────
 

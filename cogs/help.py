@@ -23,8 +23,19 @@ CATEGORIES = {
         "commands": [
             ("@Jarvis call me X",           "Tell Jarvis what to call you"),
             ("@Jarvis remember that …",     "Explicitly save a fact about yourself"),
+            ("!nickname <name>",            "Set the name Jarvis uses for you"),
             ("!mymemory  /mymemory",        "View everything Jarvis remembers about you"),
             ("!forgetme  /forgetme",        "Wipe all your saved memory"),
+            ("!dnd on/off  /dnd",           "Toggle Do Not Disturb mode (blocks all commands except !dnd off and !settings)"),
+        ],
+    },
+    "⏰ Reminders": {
+        "description": "Set DM reminders and manage active reminders.",
+        "color": 0xE74C3C,
+        "commands": [
+            ("!remindme <duration> <message>", "Create a DM reminder — e.g. `!remindme 15m Stretch your legs`"),
+            ("!myreminders",               "Show your active reminders"),
+            ("!cancelreminder <id>",       "Cancel a reminder by its ID"),
         ],
     },
     "🎨 Image Gen": {
@@ -56,6 +67,8 @@ CATEGORIES = {
             ("!queue / !q  /queue",           "Show the current song queue"),
             ("!np  /nowplaying",              "Show what's currently playing"),
             ("!volume / !vol <0-100>  /volume", "Set playback volume"),
+            ("!playlist ...",                 "Manage your saved playlists"),
+            ("!autoplay on/off",              "Auto-play similar songs when the queue ends"),
         ],
     },
     "🔍 YouTube": {
@@ -72,7 +85,6 @@ CATEGORIES = {
         "color": 0x2ECC71,
         "commands": [
             ("!stats  /stats",        "View your own usage stats"),
-            ("!stats @user",          "View another user's stats (admins only)"),
         ],
     },
     "💡 Feedback": {
@@ -99,29 +111,10 @@ CATEGORIES = {
             ("!ping  /ping",          "Check Jarvis latency"),
             ("!uptime  /uptime",      "See how long Jarvis has been online"),
             ("!guildinfo  /guildinfo","Detailed info about this server"),
-            ("!servers  /servers",    "List all servers Jarvis is in (admin only)"),
-            ("!usage  /usage",        "CPU, RAM and disk stats (admin only)"),
-        ],
-    },
-    "📢 Announce": {
-        "description": "Send announcements or DMs (admins only).",
-        "color": 0x3498DB,
-        "commands": [
-            ("!global-announce  /global-announce", "DM announcement to all Jarvis users"),
-            ("!announce  /announce @user",         "Send a DM to a specific user"),
-        ],
-    },
-    "🛡️ Admin": {
-        "description": "Bot moderation tools (admins only).",
-        "color": 0xE74C3C,
-        "commands": [
-            ("!global-ban  /botban @user",      "Ban a user from using Jarvis"),
-            ("!global-unban  /botunban <id>",   "Unban a user"),
-            ("!global-bans  /botbans",          "List all banned users"),
-            ("!guild-ban  /guildban <id>",      "Ban an entire server from Jarvis"),
-            ("!guild-unban  /guildunban <id>",  "Unban a server"),
-            ("!guild-bans  /guildbans",         "List all guild-banned servers"),
-            ("!resetlimit  /resetlimit @user",  "Reset a user's daily message limit"),
+            ("!adminhelp",            "Show the admin command menu for moderators and bot owners"),
+            ("!settings  /config",    "View channel Jarvis settings (admins can modify)"),
+            ("!settings restrict_mode on/off", "Stop Jarvis from responding in this channel (admin only)"),
+            ("!settings auto_respond on/off",  "Make Jarvis respond to every message (admin only)"),
         ],
     },
 }
@@ -144,7 +137,73 @@ def _build_overview_embed() -> discord.Embed:
             value=data["description"],
             inline=True,
         )
-    embed.set_footer(text="Jarvis  •  Use /chat or @mention to get started")
+    embed.set_footer(text="Jarvis — Use /chat or @mention to get started")
+    return embed
+
+
+
+ADMIN_CATEGORIES = {
+    "🔒 User Bans": {
+        "description": "Ban and unban individual users from using Jarvis.",
+        "color": 0xC0392B,
+        "commands": [
+            ("!global-ban @user [reason]",          "Ban a user from Jarvis globally (permanent or temp)"),
+            ("!global-unban <user_id>",             "Unban a user from Jarvis"),
+            ("!global-bans  /global-bans",          "View all currently banned users"),
+        ],
+    },
+    "🚫 Server Bans": {
+        "description": "Ban and unban entire servers from using Jarvis.",
+        "color": 0xE74C3C,
+        "commands": [
+            ("!guild-ban <guild_id> [reason]",      "Ban a server from using Jarvis (bot owner)"),
+            ("!guild-unban <guild_id>",             "Unban a server from Jarvis (bot owner)"),
+            ("!guild-bans  /guild-bans",            "View all currently banned servers (bot owner)"),
+        ],
+    },
+    "📊 Rate Limiting": {
+        "description": "Manage cooldowns and burst limits for the bot.",
+        "color": 0xF39C12,
+        "commands": [
+            ("!resetlimit @user",                   "Reset a user's daily AI message limit"),
+            ("!set-cooldown <seconds>",             "Set cooldown between AI requests (bot owner)"),
+            ("!set-burst <limit> <window> <timeout>", "Configure burst rate limiting (bot owner)"),
+        ],
+    },
+}
+
+
+def _build_admin_overview_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🛠️ Admin Commands",
+        description=(
+            "Browse admin and moderator utilities. Pick a category below.\n"
+            "Some commands are bot-owner only — they won't work for regular moderators.\n\u200b"
+        ),
+        color=0xE74C3C,
+    )
+    for cat, data in ADMIN_CATEGORIES.items():
+        embed.add_field(
+            name=cat,
+            value=data["description"],
+            inline=True,
+        )
+    embed.set_footer(text="Admin Menu")
+    return embed
+
+
+def _build_admin_category_embed(key: str) -> discord.Embed:
+    data = ADMIN_CATEGORIES[key]
+    embed = discord.Embed(
+        title=key,
+        description=f"_{data['description']}_\n\u200b",
+        color=data["color"],
+    )
+    for name, desc in data["commands"]:
+        embed.add_field(name=f"`{name}`", value=f"↳ {desc}", inline=False)
+    keys = list(ADMIN_CATEGORIES.keys())
+    idx = keys.index(key)
+    embed.set_footer(text=f"Category {idx + 1}/{len(keys)}  •  Admin Help")
     return embed
 
 
@@ -187,6 +246,28 @@ class CategorySelect(discord.ui.Select):
         )
 
 
+class AdminCategorySelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=key.split(" ", 1)[-1], emoji=key.split(" ", 1)[0], value=key)
+            for key in ADMIN_CATEGORIES
+        ]
+        super().__init__(placeholder="Choose a category…", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: AdminHelpView = self.view
+        if interaction.user.id != view.author_id:
+            await interaction.response.send_message(
+                "⚠️ Run your own `!adminhelp` to browse.", ephemeral=True
+            )
+            return
+        view.current_key = self.values[0]
+        view._update_nav()
+        await interaction.response.edit_message(
+            embed=_build_admin_category_embed(view.current_key), view=view
+        )
+
+
 # ── View ──────────────────────────────────────────────────────────────────────
 
 class HelpView(discord.ui.View):
@@ -225,6 +306,71 @@ class HelpView(discord.ui.View):
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
                 "⚠️ Run your own `/help` to browse.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_btn(self, interaction: discord.Interaction, _):
+        idx = self.keys.index(self.current_key)
+        self.current_key = self.keys[idx - 1]
+        await self._update(interaction)
+
+    @discord.ui.button(label="🏠 Home", style=discord.ButtonStyle.primary, row=1)
+    async def home_btn(self, interaction: discord.Interaction, _):
+        self.current_key = None
+        await self._update(interaction)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=1)
+    async def next_btn(self, interaction: discord.Interaction, _):
+        if self.current_key is None:
+            self.current_key = self.keys[0]
+        else:
+            idx = self.keys.index(self.current_key)
+            self.current_key = self.keys[idx + 1]
+        await self._update(interaction)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class AdminHelpView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=120)
+        self.author_id = author_id
+        self.keys = list(ADMIN_CATEGORIES.keys())
+        self.current_key: str | None = None  # None = overview
+
+        self.select = AdminCategorySelect()
+        self.add_item(self.select)
+        self._update_nav()
+
+    def _update_nav(self):
+        idx = self.keys.index(self.current_key) if self.current_key else -1
+        self.prev_btn.disabled = idx <= 0 and self.current_key is not None or self.current_key is None
+        self.next_btn.disabled = idx >= len(self.keys) - 1
+        self.home_btn.disabled = self.current_key is None
+
+        # Fix prev disabled logic
+        if self.current_key is None:
+            self.prev_btn.disabled = True
+        else:
+            self.prev_btn.disabled = idx <= 0
+
+    def current_embed(self) -> discord.Embed:
+        if self.current_key is None:
+            return _build_admin_overview_embed()
+        return _build_admin_category_embed(self.current_key)
+
+    async def _update(self, interaction: discord.Interaction):
+        self._update_nav()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "⚠️ Run your own `!adminhelp` to browse.", ephemeral=True
             )
             return False
         return True

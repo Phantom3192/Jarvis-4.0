@@ -25,6 +25,9 @@ from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
     is_ai_rate_limited, increment_ai_usage, get_ai_usage, get_ai_limit,
     DAILY_AI_LIMIT, WARN_AT, check_burst_and_maybe_timeout, check_cooldown, get_setting,
+    get_preferred_name, set_preferred_name, clear_preferred_name,
+    get_reminders, add_reminder, delete_reminder, pop_due_reminders,
+    set_dnd, is_dnd,
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session, safe_reply, safe_send
@@ -158,16 +161,16 @@ _groq_backoff_until: dict[str, float] = {}
 _groq_rr_index  = 0   # round-robin cursor
 
 if _groq_clients:
-    print(f"✅ Groq pool: {len(_groq_clients)} key(s) loaded")
+    print(f"Groq pool: {len(_groq_clients)} key(s) loaded")
 else:
-    print("⚠️  No GROQ_API_KEY* found — Groq disabled")
+    print("No GROQ_API_KEY* found - Groq disabled")
 
 def _groq_is_backed_off(api_key: str) -> bool:
     return time.time() < _groq_backoff_until.get(api_key, 0)
 
 def _groq_set_backoff(api_key: str) -> None:
     _groq_backoff_until[api_key] = time.time() + _GROQ_BACKOFF
-    print(f"[Groq] Key …{api_key[-6:]} backed off for {_GROQ_BACKOFF}s")
+    print(f"[Groq] Key ...{api_key[-6:]} backed off for {_GROQ_BACKOFF}s")
 
 def _next_groq_client() -> tuple[str, groq.AsyncGroq] | None:
     """Return the next available (non-backed-off) Groq client, round-robin."""
@@ -196,9 +199,9 @@ for _name in ("google.genai", "google.generativeai"):
         continue
 
 if genai is None:
-    print("⚠️ Warning: No supported Google GenAI package available. Gemini will be disabled.")
+    print("Warning: No supported Google GenAI package available. Gemini will be disabled.")
 else:
-    print(f"✅ Using Google GenAI package: {_GENAI_PACKAGE}")
+    print(f"Using Google GenAI package: {_GENAI_PACKAGE}")
 
 _gemini_clients: dict[str, object] = {}
 
@@ -604,6 +607,28 @@ _INTENT_YT_INFO = re.compile(
 )
 
 
+def _parse_relative_time(text: str) -> float | None:
+    """Parse a relative time duration like '10m', '1h 30m', or '2h' into seconds."""
+    text = text.strip().lower()
+    if text.startswith("in "):
+        text = text[3:]
+    if not text:
+        return None
+    total = 0.0
+    for part in re.findall(r"(\d+(?:\.\d+)?)([smhd])", text):
+        value = float(part[0])
+        unit = part[1]
+        if unit == "s":
+            total += value
+        elif unit == "m":
+            total += value * 60
+        elif unit == "h":
+            total += value * 3600
+        elif unit == "d":
+            total += value * 86400
+    return total if total > 0 else None
+
+
 async def _try_intent_intercept(
     message: discord.Message,
     user_text: str,
@@ -925,7 +950,7 @@ async def generate_ai_response(
     effective_base = base_prompt + memory_suffix
 
     if user:
-        name     = user.display_name if user.display_name != user.name else user.name
+        name     = get_preferred_name(user.id) or (user.display_name if user.display_name != user.name else user.name)
         username = user.name
         if in_merge:
             cache_key = (thread_root_id, "merge")
@@ -1237,11 +1262,64 @@ async def _extract_reply_context(message: discord.Message) -> list[dict]:
     return context
 
 
+# ── DND Check ────────────────────────────────────────────────────────────────
+def _dnd_check(ctx: commands.Context) -> bool:
+    """Allow commands if DND is off, or if command is whitelisted when DND is on."""
+    if not is_dnd(ctx.author.id):
+        return True  # DND off, allow all commands
+    
+    # DND is on — only allow these commands
+    allowed = {'settings', 'config', 'dnd'}
+    if ctx.command.name in allowed or (ctx.command.aliases and any(a in allowed for a in ctx.command.aliases)):
+        return True
+    return False
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class AI(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.reminder_task = asyncio.create_task(self._reminder_loop())
+
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        """Apply DND check to all commands in this cog."""
+        if not _dnd_check(ctx):
+            await ctx.reply("🔕 Do Not Disturb mode is ON. Only `!dnd off`, `!settings`, and `!config` are allowed.")
+            return False
+        return True
+
+    async def _reminder_loop(self) -> None:
+        while True:
+            try:
+                due = pop_due_reminders()
+                now = discord.utils.utcnow().timestamp()
+                for user_id, reminder in due:
+                    try:
+                        user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                        if not user:
+                            continue
+                        when = reminder.get("when")
+                        content = reminder.get("content", "(No content)")
+                        embed = discord.Embed(
+                            title="⏰ Reminder",
+                            description=content,
+                            color=discord.Color.blurple(),
+                        )
+                        if when:
+                            embed.add_field(
+                                name="Scheduled for",
+                                value=f"<t:{int(when)}:R>",
+                                inline=False,
+                            )
+                        await user.send(embed=embed)
+                    except discord.Forbidden:
+                        pass
+                    except Exception as e:
+                        print(f"[Reminder] Failed to deliver reminder for {user_id}: {e}")
+            except Exception as e:
+                print(f"[Reminder] Background reminder loop error: {e}")
+            await asyncio.sleep(20)
 
     # ── /chat ─────────────────────────────────────────────────────────────────
 
@@ -1283,6 +1361,10 @@ class AI(commands.Cog):
         if message.author.bot:
             return
 
+        # Skip all chat features if user has DND on
+        if is_dnd(message.author.id):
+            return
+
         content = message.content.strip()
         lower   = content.lower()
 
@@ -1295,7 +1377,19 @@ class AI(commands.Cog):
         )
         named = "jarvis" in lower
 
-        if not (mentioned or replied_to_me or named):
+        if content.startswith("!"):
+            return
+
+        auto_respond = False
+        restricted = False
+        if message.guild is not None:
+            auto_respond = bool(get_setting(f"auto_respond_channel_{message.channel.id}", False))
+            restricted = bool(get_setting(f"restrict_channel_{message.channel.id}", False))
+
+        if restricted:
+            return
+
+        if not (mentioned or replied_to_me or named or auto_respond):
             return
 
         # Guild-level ban check — on_message bypasses @bot.check so we must do this manually
@@ -1392,6 +1486,22 @@ class AI(commands.Cog):
             else:
                 await safe_reply(message, "ℹ️ There's no active group conversation in this channel.")
             return
+
+        # ── Who is this / who is @user ───────────────────────────────────────
+        if re.search(r"\bwho\s+is\b|\bwho's\b", lower):
+            target = None
+            for user in message.mentions:
+                if user.id != self.bot.user.id and not user.bot:
+                    target = user
+                    break
+            if target is None and message.reference is not None:
+                ref = message.reference.resolved
+                if isinstance(ref, discord.Message) and not ref.author.bot:
+                    target = ref.author
+            if target is not None:
+                name = get_preferred_name(target.id) or getattr(target, "display_name", str(target))
+                await safe_reply(message, f"That is {name}.")
+                return
 
         # ── Normal message ─────────────────────────────────────────────────
         user_text = _MENTION_RE.sub("", content)
@@ -1618,6 +1728,140 @@ class AI(commands.Cog):
         else:
             await safe_reply(ctx.message, "I don't have anything stored about you yet.")
 
+    # ── /nickname & !nickname ─────────────────────────────────────────────────
+
+    @app_commands.command(name="nickname", description="Tell Jarvis what to call you")
+    @app_commands.describe(name="The name Jarvis should use for you")
+    async def slash_nickname(self, interaction: discord.Interaction, name: str):
+        set_preferred_name(interaction.user.id, name)
+        await save_facts(interaction.user.id, [(f"User's name is {name}", "identity")])
+        await interaction.response.send_message(f"✅ Got it — I'll call you **{name}**.", ephemeral=True)
+
+    @commands.command(name="nickname")
+    async def prefix_nickname(self, ctx: commands.Context, *, name: str = None):
+        """Tell Jarvis what to call you."""
+        if not name:
+            await safe_reply(ctx.message, "**Usage:** `!nickname <name>`")
+            return
+        set_preferred_name(ctx.author.id, name)
+        await save_facts(ctx.author.id, [(f"User's name is {name}", "identity")])
+        await safe_reply(ctx.message, f"✅ Got it — I'll call you **{name}**.")
+
+    # ── /dnd & !dnd (Do Not Disturb) ──────────────────────────────────────────
+
+    @app_commands.command(name="dnd", description="Toggle Do Not Disturb mode (blocks most commands)")
+    @app_commands.describe(mode="on or off")
+    async def slash_dnd(self, interaction: discord.Interaction, mode: str):
+        if mode.lower() not in {"on", "off"}:
+            await interaction.response.send_message("❌ Use `on` or `off`.", ephemeral=True)
+            return
+        is_on = mode.lower() == "on"
+        set_dnd(interaction.user.id, is_on)
+        status = "🔕 **ON**" if is_on else "🔔 **OFF**"
+        msg = (
+            f"{status}\n"
+            f"When DND is **ON**, only these commands work:\n"
+            f"`!dnd off` — turn DND off\n"
+            f"`!settings` / `!config` — view channel settings"
+        ) if is_on else f"{status}\n All commands are now available again."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @commands.command(name="dnd")
+    async def prefix_dnd(self, ctx: commands.Context, mode: str = None):
+        """Toggle Do Not Disturb mode. Usage: !dnd on/off"""
+        if mode is None:
+            # Show current status
+            is_on = is_dnd(ctx.author.id)
+            status = "🔕 **ON**" if is_on else "🔔 **OFF**"
+            await safe_reply(ctx.message, f"Do Not Disturb: {status}")
+            return
+        
+        if mode.lower() not in {"on", "off"}:
+            await safe_reply(ctx.message, "❌ Use `on` or `off`.")
+            return
+        
+        is_on = mode.lower() == "on"
+        set_dnd(ctx.author.id, is_on)
+        status = "🔕 **ON**" if is_on else "🔔 **OFF**"
+        msg = (
+            f"{status}\n"
+            f"When DND is **ON**, only these commands work:\n"
+            f"`!dnd off` — turn DND off\n"
+            f"`!settings` / `!config` — view channel settings"
+        ) if is_on else f"{status}\nAll commands are now available again."
+        await safe_reply(ctx.message, msg)
+
+    # ── /remindme & !remindme ────────────────────────────────────────────────
+
+    @app_commands.command(name="remindme", description="Set a DM reminder for later")
+    @app_commands.describe(duration="When to remind me (e.g. 10m, 1h, 2d)", message="What should I remind you about")
+    async def slash_remindme(self, interaction: discord.Interaction, duration: str, message: str):
+        seconds = _parse_relative_time(duration)
+        if seconds is None:
+            await interaction.response.send_message(
+                "❌ Invalid time format. Use something like `10m`, `1h`, or `2h 30m`.",
+                ephemeral=True,
+            )
+            return
+        when = time.time() + seconds
+        reminder_id = add_reminder(interaction.user.id, when, message)
+        await interaction.response.send_message(
+            f"✅ Reminder set for <t:{int(when)}:R> (ID **{reminder_id}**).",
+            ephemeral=True,
+        )
+
+    @commands.command(name="remindme")
+    async def prefix_remindme(self, ctx: commands.Context, duration: str = None, *, message: str = None):
+        """Set a DM reminder. Usage: !remindme 10m Take a break"""
+        if not duration or not message:
+            await safe_reply(ctx.message, "**Usage:** `!remindme <duration> <message>`\nExample: `!remindme 15m Take a break`")
+            return
+        seconds = _parse_relative_time(duration)
+        if seconds is None:
+            await safe_reply(ctx.message, "❌ Invalid time format. Use something like `10m`, `1h`, or `2h 30m`.")
+            return
+        when = time.time() + seconds
+        reminder_id = add_reminder(ctx.author.id, when, message)
+        await safe_reply(ctx.message, f"✅ Reminder set for <t:{int(when)}:R> (ID **{reminder_id}**).")
+
+    # ── /myreminders & !myreminders ───────────────────────────────────────────
+
+    @app_commands.command(name="myreminders", description="View your active reminders")
+    async def slash_myreminders(self, interaction: discord.Interaction):
+        reminders = get_reminders(interaction.user.id)
+        embed = _build_reminders_embed(interaction.user, reminders)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.command(name="myreminders")
+    async def prefix_myreminders(self, ctx: commands.Context):
+        """View your active reminders."""
+        reminders = get_reminders(ctx.author.id)
+        embed = _build_reminders_embed(ctx.author, reminders)
+        await safe_reply(ctx.message, embed=embed)
+
+    # ── /cancelreminder & !cancelreminder ────────────────────────────────────
+
+    @app_commands.command(name="cancelreminder", description="Cancel one of your reminders")
+    @app_commands.describe(reminder_id="The ID of the reminder to cancel")
+    async def slash_cancelreminder(self, interaction: discord.Interaction, reminder_id: int):
+        if delete_reminder(interaction.user.id, reminder_id):
+            await interaction.response.send_message(f"✅ Reminder **{reminder_id}** cancelled.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"❌ I couldn't find reminder **{reminder_id}**.", ephemeral=True,
+            )
+
+    @commands.command(name="cancelreminder")
+    async def prefix_cancelreminder(self, ctx: commands.Context, reminder_id: int = None):
+        """Cancel one of your reminders. Usage: !cancelreminder <id>"""
+        if reminder_id is None:
+            await safe_reply(ctx.message, "**Usage:** `!cancelreminder <id>`")
+            return
+        if delete_reminder(ctx.author.id, reminder_id):
+            await safe_reply(ctx.message, f"✅ Reminder **{reminder_id}** cancelled.")
+        else:
+            await safe_reply(ctx.message, f"❌ I couldn't find reminder **{reminder_id}**.")
+
 
 def _build_memory_embed(user: discord.User | discord.Member, facts: list[str]) -> discord.Embed:
     if not facts:
@@ -1635,6 +1879,30 @@ def _build_memory_embed(user: discord.User | discord.Member, facts: list[str]) -
         )
         embed.set_footer(text=f"{len(facts)} thing(s) stored • Use /forgetme to clear all")
     embed.set_thumbnail(url=user.display_avatar.url)
+    return embed
+
+
+def _build_reminders_embed(user: discord.User | discord.Member, reminders: list[dict[str, object]]) -> discord.Embed:
+    if not reminders:
+        embed = discord.Embed(
+            title="⏰ Your reminders",
+            description="You don't have any reminders yet. Use `/remindme` or `!remindme` to set one.",
+            color=discord.Color.blurple(),
+        )
+    else:
+        lines = []
+        for reminder in sorted(reminders, key=lambda r: r.get("when", 0)):
+            when = reminder.get("when")
+            when_str = f"<t:{int(when)}:R>" if when else "Unknown time"
+            content = reminder.get("content", "(No content)")
+            lines.append(f"**{reminder.get('id')}** — {when_str}\n{content}")
+        embed = discord.Embed(
+            title="⏰ Your reminders",
+            description="\n\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text="Use /cancelreminder <id> or !cancelreminder <id> to remove one.")
     return embed
 
 
