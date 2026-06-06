@@ -325,6 +325,25 @@ class Stats(commands.Cog):
 
     # ── /stats & !stats ───────────────────────────────────────────────────────
 
+    @commands.command(name="users", aliases=["userlist", "members"])
+    @commands.has_permissions(administrator=True)
+    async def prefix_users(self, ctx: commands.Context):
+        """!users — Admin-only paginated list of all users Jarvis has seen."""
+        async with ctx.typing():
+            rows = _collect_user_rows(self.bot)
+        if not rows:
+            await ctx.reply("📭 No users found yet.")
+            return
+        total_pages = max(1, -(-len(rows) // USERS_PAGE_SIZE))
+        view  = UsersView(ctx.author.id, rows)
+        embed = _build_users_embed(rows, 0, total_pages)
+        await ctx.reply(embed=embed, view=view)
+
+    @prefix_users.error
+    async def users_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.reply("🚫 You need **Administrator** permission to use this command.")
+
     @commands.command(name="stats")
     async def prefix_stats(self, ctx: commands.Context, user: discord.User = None):
         """!stats — your stats  |  !stats @user — admin only"""
@@ -369,4 +388,3 @@ class Stats(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Stats(bot))
-    
