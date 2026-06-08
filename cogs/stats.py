@@ -326,7 +326,7 @@ class Stats(commands.Cog):
     # ── /stats & !stats ───────────────────────────────────────────────────────
 
     @commands.command(name="users", aliases=["userlist", "members"])
-    @commands.has_permissions(administrator=True)
+    @commands.is_owner()
     async def prefix_users(self, ctx: commands.Context):
         """!users — Admin-only paginated list of all users Jarvis has seen."""
         async with ctx.typing():
