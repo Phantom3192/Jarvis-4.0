@@ -35,6 +35,7 @@ from cogs.state import (
     append_song_history,
     delete_user_playlist,
     get_setting,
+    set_setting,
     get_song_history,
     get_user_playlists,
     set_user_playlist,
