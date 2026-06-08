@@ -49,8 +49,15 @@ MUSIC_COLOR  = discord.Color.from_rgb(29, 185, 84)
 ERROR_COLOR  = discord.Color.red()
 
 # Your self-hosted Lavalink on Wispbyte
+# LAVALINK_NODES = [
+#     {"uri": "http://remarkable-joy:2333", "password": "jarvisbot"},
+# ]
+
 LAVALINK_NODES = [
-    {"uri": "http://remarkable-joy:2333", "password": "jarvisbot"},
+    {
+        "uri": "http://noble-serenity.railway.internal:2333",
+        "password": "jarvisbot"
+    }
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
