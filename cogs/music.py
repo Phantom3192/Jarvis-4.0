@@ -350,31 +350,16 @@ class Music(commands.Cog):
     async def cog_load(self) -> None:
         self.bot.loop.create_task(self._connect_lavalink())
 
-    # async def _connect_lavalink(self) -> None:
-    #     await self.bot.wait_until_ready()
-    #     await asyncio.sleep(2)
-    #     nodes = [
-    #         wavelink.Node(uri=n["uri"], password=n["password"])
-    #         for n in LAVALINK_NODES
-    #     ]
-    #     await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
-    #     print("✅ Music: connected to Lavalink!")
-    
     async def _connect_lavalink(self) -> None:
         await self.bot.wait_until_ready()
         await asyncio.sleep(2)
-        import socket
-        try:
-            ip = socket.getaddrinfo("remarkable-joy.railway.internal", 2333)
-            print(f"DNS resolved: {ip}")
-        except Exception as e:
-            print(f"DNS failed: {e}")
         nodes = [
             wavelink.Node(uri=n["uri"], password=n["password"])
             for n in LAVALINK_NODES
         ]
         await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
         print("✅ Music: connected to Lavalink!")
+    
 
     # ── wavelink events ───────────────────────────────────────────────────────
 
