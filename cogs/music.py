@@ -104,7 +104,7 @@ async def _resolve_saved_track(info: dict[str, object]) -> Optional[wavelink.Pla
     uri = info.get("uri")
     if not uri:
         return None
-    tracks: wavelink.Search = await wavelink.Playable.search(uri, source=wavelink.TrackSource.SoundCloud)
+    tracks: wavelink.Search = await wavelink.Playable.search(uri, source=wavelink.TrackSource.YouTube)
     if not tracks:
         return None
     return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
@@ -122,7 +122,7 @@ async def _find_similar_track(history: list[dict[str, object]]) -> Optional[wave
         query = f"songs like {title}"
     else:
         return None
-    tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.SoundCloud)
+    tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
     if not tracks:
         return None
     return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
@@ -221,7 +221,7 @@ class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
         await interaction.response.defer(thinking=True)
         query  = self.query.value.strip()
         # Search for 5 results
-        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.SoundCloud)
+        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
         if not tracks:
             await interaction.followup.send(embed=_err(f"No results found for **{query}**"))
             return
@@ -465,7 +465,7 @@ class Music(commands.Cog):
             return
 
         # Search SoundCloud (wavelink handles this cleanly, no bot detection)
-        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.SoundCloud)
+        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
         if not tracks:
             await send_fn(embed=_err(f"No results found for **{query}**"))
             return
@@ -732,7 +732,7 @@ class Music(commands.Cog):
 
     @prefix_playlist.command(name="add")
     async def playlist_add(self, ctx: commands.Context, name: str, *, query: str) -> None:
-        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.SoundCloud)
+        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
         if not tracks:
             await ctx.reply(f"❌ No results found for **{query}**")
             return
