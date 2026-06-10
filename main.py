@@ -5,7 +5,7 @@ import asyncio
 import logging
 import time
 from dotenv import load_dotenv
-from cogs.state import is_bot_banned, init_db, get_setting, set_setting, check_burst_and_maybe_timeout, check_cooldown
+from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
