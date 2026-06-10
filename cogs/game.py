@@ -54,8 +54,8 @@ from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFon
 
 # ── Board image rendering — pure shapes, no font dependency ──────────────────
 
-_SQ     = 110
-_BORDER = 52
+_SQ     = 130
+_BORDER = 68
 _BSIZE  = _SQ * 8 + _BORDER * 2
 
 _COL_LIGHT  = (240, 217, 181)
@@ -75,7 +75,7 @@ def _label_font(size: int):
     ]:
         if _os.path.exists(p):
             return _ImageFont.truetype(p, size)
-    return _ImageFont.load_default()
+    return _ImageFont.load_default(size)
 
 
 def _draw_piece(draw, piece_type: int, is_white: bool, cx: int, cy: int, sq: int):
@@ -176,7 +176,7 @@ def _draw_piece(draw, piece_type: int, is_white: bool, cx: int, cy: int, sq: int
 def _render_board_image(board: "_chess.Board", flipped: bool = False, last_move=None) -> bytes:
     img  = _Image.new("RGB", (_BSIZE, _BSIZE), _COL_BG)
     draw = _ImageDraw.Draw(img, "RGBA")
-    lf   = _label_font(24)
+    lf   = _label_font(32)
 
     # Wood border
     draw.rectangle([0, 0, _BSIZE, _BSIZE], fill=_COL_BORDER)
@@ -388,10 +388,11 @@ class ChessDestSelect(discord.ui.View):
 
     def __init__(self, game: dict, player: discord.Member, from_sq: int, moves: list):
         super().__init__(timeout=120)
-        self.game    = game
-        self.player  = player
-        self.from_sq = from_sq
-        self.moves   = moves
+        self.game         = game
+        self.player       = player
+        self.from_sq      = from_sq
+        self.moves        = moves
+        self.pending_move = None   # uci string awaiting confirmation
         self._build()
 
     def _build(self):
@@ -413,8 +414,15 @@ class ChessDestSelect(discord.ui.View):
         select.callback = self._on_dest_select
         self.add_item(select)
 
+        # Confirm button (hidden until a move is selected)
+        confirm = discord.ui.Button(label="✅ Confirm Move", style=discord.ButtonStyle.success,
+                                    custom_id="confirm_move", disabled=True)
+        confirm.callback = self._on_confirm
+        self.add_item(confirm)
+
         # Back button
-        back = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary)
+        back = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary,
+                                 custom_id="back_move")
         back.callback = self._on_back
         self.add_item(back)
 
@@ -423,9 +431,37 @@ class ChessDestSelect(discord.ui.View):
             await interaction.response.send_message("❌ It\'s not your turn!", ephemeral=True)
             return
 
-        move_uci = interaction.data["values"][0]
+        move_uci         = interaction.data["values"][0]
+        self.pending_move = move_uci
+
+        # Enable the confirm button
+        for item in self.children:
+            if getattr(item, "custom_id", None) == "confirm_move":
+                item.disabled = False
+
         board    = self.game["board"]
-        move     = _chess.Move.from_uci(move_uci)
+        move_obj = _chess.Move.from_uci(move_uci)
+        piece    = board.piece_at(self.from_sq)
+        embed    = _chess_embed(
+            self.game,
+            msg=(
+                f"**{_piece_label(piece, self.from_sq)}**\n"
+                f"Wants to move **{_square_label(board, move_obj)}**\n\n"
+                f"Press **✅ Confirm Move** to play, or pick a different square."
+            )
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _on_confirm(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player.id:
+            await interaction.response.send_message("❌ It\'s not your turn!", ephemeral=True)
+            return
+        if not self.pending_move:
+            await interaction.response.send_message("⚠️ Select a destination first.", ephemeral=True)
+            return
+
+        board = self.game["board"]
+        move  = _chess.Move.from_uci(self.pending_move)
         board.push(move)
         self.game["draw_offered_by"] = None
 
@@ -443,7 +479,8 @@ class ChessDestSelect(discord.ui.View):
         if board.is_stalemate() or board.is_insufficient_material() or board.is_seventyfive_moves():
             embed = _chess_embed(self.game, title="♟️ Draw!")
             del active_chess[interaction.channel_id]
-            await interaction.response.edit_message(content="🤝 The game is a draw!", embed=embed, attachments=[_chess_file(self.game)], view=None)
+            await interaction.response.edit_message(content="🤝 The game is a draw!", embed=embed,
+                                                    attachments=[_chess_file(self.game)], view=None)
             return
 
         # Next player\'s turn
