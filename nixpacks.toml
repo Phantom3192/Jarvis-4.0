@@ -1,0 +1,2 @@
+[phases.install]
+cmds = ["pip install --timeout 300 --retries 10 --no-cache-dir -r requirements.txt"]
