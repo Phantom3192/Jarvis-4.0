@@ -13,12 +13,33 @@ INACTIVE_DAYS    = 30
 CLEANUP_INTERVAL = 86400
 
 _conn = None
+_turso_url   = ""
+_turso_token = ""
+
+
+def _reconnect() -> bool:
+    """Re-establish the libsql connection after a dropped stream.
+    Returns True on success, False if credentials are missing or import fails."""
+    global _conn
+    if not _turso_url or not _turso_token:
+        return False
+    try:
+        import libsql_experimental as libsql
+        _conn = libsql.connect(database=_turso_url, auth_token=_turso_token)
+        print("[History] Reconnected to Turso after stream error.")
+        return True
+    except Exception as e:
+        print(f"[History] Reconnect failed: {e}")
+        _conn = None
+        return False
 
 
 async def init_history():
-    global _conn
+    global _conn, _turso_url, _turso_token
     turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
+    _turso_url   = turso_url
+    _turso_token = turso_token
     if not turso_url or not turso_token:
         print("⚠️  History: TURSO_URL/TOKEN not set — session history won't persist across restarts.")
         return
@@ -64,8 +85,8 @@ async def init_history():
         _conn = None
 
 
-def _sync_add_message(uid: str, role: str, content: str) -> None:
-    """Blocking DB write — always call via asyncio.to_thread."""
+def _do_add_message(uid: str, role: str, content: str) -> None:
+    """Raw DB write without retry — used internally."""
     now = time.time()
     row = _conn.execute(
         "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
@@ -84,6 +105,21 @@ def _sync_add_message(uid: str, role: str, content: str) -> None:
     """, (uid, blob, now))
     _conn.commit()
 
+
+def _sync_add_message(uid: str, role: str, content: str) -> None:
+    """Blocking DB write with auto-reconnect on dropped stream errors."""
+    try:
+        _do_add_message(uid, role, content)
+    except Exception as e:
+        if "stream not found" in str(e).lower():
+            # Turso dropped the stream (idle timeout/server restart) — reconnect once and retry
+            if _reconnect():
+                _do_add_message(uid, role, content)
+            else:
+                raise
+        else:
+            raise
+
 async def add_message(user_id: int, role: str, content: str) -> None:
     """Append a message to the user's history blob, trimming to MAX_HISTORY."""
     if _conn is None:
@@ -97,10 +133,17 @@ async def add_message(user_id: int, role: str, content: str) -> None:
 
 def _sync_get_history(uid: str) -> list[dict]:
     """Blocking DB read — always call via asyncio.to_thread."""
-    row = _conn.execute(
-        "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
-    ).fetchone()
-    return json.loads(row[0]) if row else []
+    def _do():
+        row = _conn.execute(
+            "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+        ).fetchone()
+        return json.loads(row[0]) if row else []
+    try:
+        return _do()
+    except Exception as e:
+        if "stream not found" in str(e).lower() and _reconnect():
+            return _do()
+        raise
 
 async def get_history(user_id: int) -> list[dict]:
     """Return stored messages for a user, oldest first."""
@@ -116,11 +159,18 @@ async def get_history(user_id: int) -> list[dict]:
 
 def _sync_clear_history(uid: str) -> bool:
     """Blocking DB write — always call via asyncio.to_thread."""
-    _conn.execute(
-        "UPDATE user_history SET messages = '[]' WHERE user_id = ?", (uid,)
-    )
-    _conn.commit()
-    return True
+    def _do():
+        _conn.execute(
+            "UPDATE user_history SET messages = '[]' WHERE user_id = ?", (uid,)
+        )
+        _conn.commit()
+        return True
+    try:
+        return _do()
+    except Exception as e:
+        if "stream not found" in str(e).lower() and _reconnect():
+            return _do()
+        raise
 
 async def clear_history(user_id: int) -> bool:
     if _conn is None:

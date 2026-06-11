@@ -2000,7 +2000,11 @@ class AkinatorView(discord.ui.View):
             if interaction.user.id != self.game["user"].id:
                 await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
                 return
-            await interaction.response.defer()
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+            except discord.errors.NotFound:
+                return  # Interaction token expired — silently ignore duplicate/late click
             self.stop()
             game = self.game
             # Record the answer in history
@@ -2026,7 +2030,11 @@ class AkinatorView(discord.ui.View):
         if interaction.user.id != self.game["user"].id:
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
-        await interaction.response.defer()
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except discord.errors.NotFound:
+            return  # Interaction token expired — silently ignore
         self.stop()
         game = self.game
         game["finished"] = True
@@ -2041,7 +2049,11 @@ class AkinatorView(discord.ui.View):
         if interaction.user.id != self.game["user"].id:
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
-        await interaction.response.defer()
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+        except discord.errors.NotFound:
+            return  # Interaction token expired — silently ignore
         self.stop()
         game = self.game
         # Record the wrong guess and keep going
