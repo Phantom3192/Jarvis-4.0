@@ -1,233 +1,292 @@
-import discord
-from discord.ext import commands
+"""
+Conversation history — one row per user in Turso.
+Stores the last MAX_HISTORY messages as a JSON blob.
+50 users = 50 rows. No runaway growth.
+"""
 import os
-import asyncio
-import logging
+import json
 import time
-from dotenv import load_dotenv
-from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown
-import cogs.http_session as http_session
-from cogs.history import init_history, load_all_histories
-from cogs.memory import init_memory
+import asyncio
 
-load_dotenv()
+MAX_HISTORY      = 20
+INACTIVE_DAYS    = 30
+CLEANUP_INTERVAL = 86400
 
-logging.basicConfig(level=logging.WARNING)
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members         = True
-intents.voice_states = True
+_conn        = None
+_turso_url   = ""
+_turso_token = ""
 
 
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents,
-    help_command=None,
-    allowed_mentions=discord.AllowedMentions.none(),
-)
-
-COGS = [
-    "cogs.ai",
-    "cogs.admin",
-    "cogs.stats",
-    "cogs.prompts",
-    "cogs.announce",
-    "cogs.dm",
-    "cogs.suggestions",
-    "cogs.bugreport",
-    "cogs.errorhandler",
-    "cogs.help",
-    "cogs.game",
-    "cogs.system",
-    "cogs.image_search",
-    "cogs.summary",
-    "cogs.presence",
-    "cogs.youtube",
-    "cogs.music",
-]
-
-# Track users we've already DM'd about their ban this session — avoid spamming.
-_dm_sent_bans: set[int] = set()
+def _is_stream_error(e: Exception) -> bool:
+    """Detect Turso/Hrana stream-not-found errors regardless of wrapping."""
+    msg = str(e).lower()
+    return "stream not found" in msg or ("404" in msg and "hrana" in msg)
 
 
-def _is_guild_banned(guild_id: int) -> bool:
-    """Lazy import to avoid circular dependency at module load time."""
+def _reconnect() -> bool:
+    """Re-establish the libsql connection after a dropped stream.
+    Also re-creates the table so the fresh connection is fully ready.
+    Returns True on success, False if credentials are missing or import fails."""
+    global _conn
+    if not _turso_url or not _turso_token:
+        return False
     try:
-        from cogs.admin import _guild_bans
-        return guild_id in _guild_bans
-    except ImportError:
-        return False
-
-
-async def _notify_banned(user: discord.User | discord.Member) -> None:
-    """DM a banned user once per session to inform them."""
-    if user.id in _dm_sent_bans:
-        return
-    _dm_sent_bans.add(user.id)
-    try:
-        embed = discord.Embed(
-            title="🚫 Banned from Jarvis",
-            description="You are banned from using **Jarvis** and cannot use any of its commands.",
-            color=discord.Color.red(),
-        )
-        embed.set_footer(text="If you believe this is a mistake, contact Phantom.")
-        await user.send(embed=embed)
-    except discord.Forbidden:
-        pass
-
-
-@bot.check
-async def global_ban_check(ctx: commands.Context) -> bool:
-    # Guild-level ban check
-    if ctx.guild and _is_guild_banned(ctx.guild.id):
-        await ctx.reply("🚫 This server has been banned from using Jarvis.")
-        return False
-
-    if is_bot_banned(ctx.author.id):
-        await ctx.reply("🚫 You are banned from using Jarvis.")
-        await _notify_banned(ctx.author)
-        return False
-
-    if await bot.is_owner(ctx.author):
+        import libsql_experimental as libsql
+        _conn = libsql.connect(database=_turso_url, auth_token=_turso_token)
+        # Re-ensure table exists on the new connection
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_history (
+                user_id     TEXT PRIMARY KEY,
+                messages    TEXT NOT NULL DEFAULT '[]',
+                last_active REAL NOT NULL DEFAULT 0
+            )
+        """)
+        _conn.commit()
+        print("[History] Reconnected to Turso after stream error.")
         return True
-
-    # Burst/timeout check
-    allowed, t = check_burst_and_maybe_timeout(ctx.author.id)
-    if not allowed:
-        await ctx.reply(
-            f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding."
-        )
-        await _notify_banned(ctx.author)
-        return False
-    if not check_cooldown(ctx.author.id):
-        await ctx.message.add_reaction("⏳")
-        return False
-    return True
-
-
-async def slash_ban_check(interaction: discord.Interaction) -> bool:
-    if is_bot_banned(interaction.user.id):
-        await interaction.response.send_message("🚫 You are banned from using Jarvis.", ephemeral=True)
-        await _notify_banned(interaction.user)
-        return False
-    return True
-
-async def slash_interaction_check(interaction: discord.Interaction) -> bool:
-    # Guild-level ban check
-    if interaction.guild and _is_guild_banned(interaction.guild.id):
-        await interaction.response.send_message(
-            "🚫 This server has been banned from using Jarvis.", ephemeral=True
-        )
-        return False
-
-    if not await slash_ban_check(interaction):
-        return False
-
-    if await bot.is_owner(interaction.user):
-        return True
-
-    allowed, t = check_burst_and_maybe_timeout(interaction.user.id)
-    if not allowed:
-        await interaction.response.send_message(
-            f"⏱️ You have been temporarily blocked from using Jarvis for {int(t)} seconds due to command flooding.",
-            ephemeral=True,
-        )
-        await _notify_banned(interaction.user)
-        return False
-    if not check_cooldown(interaction.user.id):
-        await interaction.response.send_message("⏳", ephemeral=True)
-        return False
-    return True
-
-bot.tree.interaction_check = slash_interaction_check
-
-
-@bot.event
-async def on_ready():
-    guild_count = len(bot.guilds)
-    try:
-        synced = await bot.tree.sync()
-        print(
-            f"✅ Jarvis online as {bot.user} | "
-            f"Guilds: {guild_count} | "
-            f"Synced {len(synced)} slash command(s)"
-        )
     except Exception as e:
-        print(f"❌ Failed to sync commands: {e}")
+        print(f"[History] Reconnect failed: {e}")
+        _conn = None
+        return False
 
 
-async def main():
-    # Validate token early for a clear error message
-    if not TOKEN:
-        print("❌ DISCORD_TOKEN is not set in your .env file. Exiting.")
+async def init_history():
+    global _conn, _turso_url, _turso_token
+    turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
+    turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
+    _turso_url   = turso_url
+    _turso_token = turso_token
+    if not turso_url or not turso_token:
+        print("⚠️  History: TURSO_URL/TOKEN not set — session history won't persist across restarts.")
         return
+    try:
+        import libsql_experimental as libsql
+        _conn = libsql.connect(database=turso_url, auth_token=turso_token)
+        # One row per user — messages stored as JSON, last_active for cleanup
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_history (
+                user_id     TEXT PRIMARY KEY,
+                messages    TEXT NOT NULL DEFAULT '[]',
+                last_active REAL NOT NULL DEFAULT 0
+            )
+        """)
+        _conn.commit()
 
-    MAX_RETRIES = 5
-    BASE_DELAY  = 10    # seconds before first retry
-    MAX_DELAY   = 300   # cap at 5 minutes
-
-    for attempt in range(1, MAX_RETRIES + 1):
+        # Migrate from old multi-row history table if it exists
         try:
-            async with bot:
-                await http_session.create_session()
-                await init_db()
-                await init_history()
-                await init_memory()
+            old_rows = _conn.execute(
+                "SELECT user_id, role, content FROM history ORDER BY timestamp ASC"
+            ).fetchall()
+            if old_rows:
+                by_user: dict[str, list] = {}
+                for uid, role, content in old_rows:
+                    by_user.setdefault(uid, []).append({"role": role, "content": content})
+                now = time.time()
+                for uid, msgs in by_user.items():
+                    msgs = msgs[-MAX_HISTORY:]
+                    _conn.execute("""
+                        INSERT INTO user_history (user_id, messages, last_active)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id) DO NOTHING
+                    """, (uid, json.dumps(msgs), now))
+                _conn.execute("DROP TABLE IF EXISTS history")
+                _conn.commit()
+                print(f"✅ Migrated {len(by_user)} user(s) from old history table")
+        except Exception:
+            pass  # old table doesn't exist — nothing to migrate
 
-                # Restore persisted session histories into in-memory store
-                from cogs.ai import private_history
-                restored = await load_all_histories()
-                for uid, msgs in restored.items():
-                    private_history[uid].extend(msgs)
-                if restored:
-                    print(f"✅ Restored session history for {len(restored)} user(s)")
+        print("✅ History DB connected (compact mode: 1 row/user)")
+        asyncio.create_task(_cleanup_loop())
+    except Exception as e:
+        print(f"❌ History DB init failed: {e}")
+        _conn = None
 
-                for cog in COGS:
-                    try:
-                        await bot.load_extension(cog)
-                    except Exception as e:
-                        print(f"❌ Failed to load cog '{cog}': {e}")
 
-                try:
-                    await bot.start(TOKEN)
-                finally:
-                    await http_session.close_session()
+# ── add_message ───────────────────────────────────────────────────────────────
 
-            break  # clean exit
+def _do_add_message(uid: str, role: str, content: str) -> None:
+    """Raw DB write without retry — used internally."""
+    now = time.time()
+    row = _conn.execute(
+        "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+    ).fetchone()
+    msgs = json.loads(row[0]) if row else []
+    msgs.append({"role": role, "content": content})
+    if len(msgs) > MAX_HISTORY:
+        msgs = msgs[-MAX_HISTORY:]
+    blob = json.dumps(msgs)
+    _conn.execute("""
+        INSERT INTO user_history (user_id, messages, last_active)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            messages    = excluded.messages,
+            last_active = excluded.last_active
+    """, (uid, blob, now))
+    _conn.commit()
 
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
-                print(
-                    f"⚠️  Discord rate-limited on login (attempt {attempt}/{MAX_RETRIES}). "
-                    f"Waiting {delay}s before retrying…"
-                )
-                await asyncio.sleep(delay)
+
+def _sync_add_message(uid: str, role: str, content: str) -> None:
+    """Blocking DB write with auto-reconnect on dropped stream errors."""
+    try:
+        _do_add_message(uid, role, content)
+    except Exception as e:
+        if _is_stream_error(e):
+            # Turso dropped the stream (idle timeout / server restart) — reconnect once and retry
+            if _reconnect():
+                _do_add_message(uid, role, content)
             else:
                 raise
-
-        except discord.errors.LoginFailure:
-            print("❌ Invalid DISCORD_TOKEN — check your .env file. Not retrying.")
-            break
-
-        except Exception as e:
-            if attempt < MAX_RETRIES:
-                delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
-                print(
-                    f"❌ Unexpected error (attempt {attempt}/{MAX_RETRIES}): {e}\n"
-                    f"   Retrying in {delay}s…"
-                )
-                await asyncio.sleep(delay)
-            else:
-                print(f"❌ Failed after {MAX_RETRIES} attempts. Giving up.")
-                raise
-
-    else:
-        print(f"❌ Exhausted {MAX_RETRIES} login attempts. Exiting.")
+        else:
+            raise
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+async def add_message(user_id: int, role: str, content: str) -> None:
+    """Append a message to the user's history blob, trimming to MAX_HISTORY."""
+    if _conn is None:
+        return
+    uid = str(user_id)
+    try:
+        await asyncio.to_thread(_sync_add_message, uid, role, content)
+    except Exception as e:
+        print(f"[History] add_message error for {uid}: {e}")
+
+
+# ── get_history ───────────────────────────────────────────────────────────────
+
+def _do_get_history(uid: str) -> list[dict]:
+    """Raw DB read without retry — used internally."""
+    row = _conn.execute(
+        "SELECT messages FROM user_history WHERE user_id = ?", (uid,)
+    ).fetchone()
+    return json.loads(row[0]) if row else []
+
+
+def _sync_get_history(uid: str) -> list[dict]:
+    """Blocking DB read with auto-reconnect on dropped stream errors."""
+    try:
+        return _do_get_history(uid)
+    except Exception as e:
+        if _is_stream_error(e):
+            if _reconnect():
+                return _do_get_history(uid)
+        raise
+
+
+async def get_history(user_id: int) -> list[dict]:
+    """Return stored messages for a user, oldest first."""
+    if _conn is None:
+        return []
+    uid = str(user_id)
+    try:
+        return await asyncio.to_thread(_sync_get_history, uid)
+    except Exception as e:
+        print(f"[History] get_history error for {uid}: {e}")
+        return []
+
+
+# ── clear_history ─────────────────────────────────────────────────────────────
+
+def _do_clear_history(uid: str) -> bool:
+    """Raw DB write without retry — used internally."""
+    _conn.execute(
+        "UPDATE user_history SET messages = '[]' WHERE user_id = ?", (uid,)
+    )
+    _conn.commit()
+    return True
+
+
+def _sync_clear_history(uid: str) -> bool:
+    """Blocking DB write with auto-reconnect on dropped stream errors."""
+    try:
+        return _do_clear_history(uid)
+    except Exception as e:
+        if _is_stream_error(e):
+            if _reconnect():
+                return _do_clear_history(uid)
+        raise
+
+
+async def clear_history(user_id: int) -> bool:
+    if _conn is None:
+        return False
+    uid = str(user_id)
+    try:
+        return await asyncio.to_thread(_sync_clear_history, uid)
+    except Exception as e:
+        print(f"[History] clear error for {uid}: {e}")
+        return False
+
+
+# ── load_all_histories ────────────────────────────────────────────────────────
+
+def _do_load_all_histories() -> dict[int, list[dict]]:
+    """Raw DB read without retry — used internally."""
+    rows = _conn.execute(
+        "SELECT user_id, messages FROM user_history"
+    ).fetchall()
+    return {
+        int(uid): json.loads(msgs)
+        for uid, msgs in rows
+        if msgs and msgs != "[]"
+    }
+
+
+def _sync_load_all_histories() -> dict[int, list[dict]]:
+    """Blocking DB read with auto-reconnect on dropped stream errors."""
+    try:
+        return _do_load_all_histories()
+    except Exception as e:
+        if _is_stream_error(e):
+            if _reconnect():
+                return _do_load_all_histories()
+        raise
+
+
+async def load_all_histories() -> dict[int, list[dict]]:
+    """Load all persisted histories at startup. Returns {user_id: [messages]}."""
+    if _conn is None:
+        return {}
+    try:
+        return await asyncio.to_thread(_sync_load_all_histories)
+    except Exception as e:
+        print(f"[History] load_all_histories error: {e}")
+        return {}
+
+
+# ── cleanup ───────────────────────────────────────────────────────────────────
+
+async def _cleanup_loop():
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL)
+        await _cleanup_inactive()
+
+
+def _do_cleanup_inactive(cutoff: float) -> None:
+    """Raw DB write without retry — used internally."""
+    _conn.execute(
+        "DELETE FROM user_history WHERE last_active < ? AND last_active > 0", (cutoff,)
+    )
+    _conn.commit()
+
+
+def _sync_cleanup_inactive(cutoff: float) -> None:
+    """Blocking DB write with auto-reconnect on dropped stream errors."""
+    try:
+        _do_cleanup_inactive(cutoff)
+    except Exception as e:
+        if _is_stream_error(e):
+            if _reconnect():
+                _do_cleanup_inactive(cutoff)
+        else:
+            raise
+
+
+async def _cleanup_inactive():
+    if _conn is None:
+        return
+    cutoff = time.time() - (INACTIVE_DAYS * 86400)
+    try:
+        await asyncio.to_thread(_sync_cleanup_inactive, cutoff)
+        print(f"🧹 Cleaned up histories inactive for {INACTIVE_DAYS}+ days")
+    except Exception as e:
+        print(f"[History] cleanup error: {e}")
