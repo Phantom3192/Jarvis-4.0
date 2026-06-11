@@ -8,5 +8,5 @@ psutil
 PyNaCl
 yt-dlp
 wavelink
-Pillow==10.4.0
-chess==1.10.0
+Pillow
+chess
