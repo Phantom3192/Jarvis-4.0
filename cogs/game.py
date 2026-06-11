@@ -880,6 +880,8 @@ class MafiaJoinView(discord.ui.View):
             await interaction.response.send_message("❌ Need at least **4 players** to start!", ephemeral=True)
             return
         self.stop()
+        # Defer immediately — DM sending can take several seconds and would expire the 3s token
+        await interaction.response.defer()
         await _mafia_begin(interaction, game)
 
     async def on_timeout(self):
@@ -917,9 +919,13 @@ async def _mafia_begin(interaction: discord.Interaction, game: dict):
         fail_note = f"\n⚠️ Could not DM: {', '.join(dm_failures)} — they should enable DMs."
 
     embed = _mafia_embed(game, title="🎭 Mafia — Day 1 Begins",
-                         msg="Roles have been sent via DM! Discuss who you think the Mafia is.\nUse the **Vote** button or `!mafvote @user` to vote someone out.\nType `!mafnight` to end discussion and move to night."+fail_note)
+                         msg="Roles have been sent via DM! Discuss who you think the Mafia is.\nUse the **Vote** button or `!mafvote @user` to vote someone out."+fail_note)
     view  = MafiaDayView(game, interaction.channel_id)
-    await interaction.response.edit_message(content=None, embed=embed, view=view)
+    # Disable the lobby message so it doesn't stay interactive
+    await interaction.edit_original_response(content="✅ Game started! See below.", embed=None, view=None)
+    # Send a fresh message at the bottom so players don't have to scroll
+    msg = await interaction.channel.send(embed=embed, view=view)
+    game["last_msg"] = msg
 
 
 class MafiaDayView(discord.ui.View):
@@ -1003,7 +1009,10 @@ class MafiaDayView(discord.ui.View):
                              msg=f"{elim_msg}\n\n**Night falls...** Mafia, Detective, and Doctor: check your DMs and submit your action with `!mafaction @user`.")
         self.stop()
         view = MafiaNightView(game, self.channel_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+        # Disable the old message and send a fresh one at the bottom
+        await interaction.response.edit_message(embed=_mafia_embed(game, title=f"🌙 Night {game['day']} — see below"), view=None)
+        msg = await interaction.channel.send(embed=embed, view=view)
+        game["last_msg"] = msg
         # DM special roles
         for uid2, v in game["players"].items():
             if not v["alive"]:
@@ -1080,7 +1089,10 @@ class MafiaNightView(discord.ui.View):
                              msg="\n".join(msgs) + "\n\nDiscuss and vote! Use **Vote** or `!mafvote @user`.")
         self.stop()
         view = MafiaDayView(game, self.channel_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+        # Disable old night message and send a fresh one at the bottom
+        await interaction.response.edit_message(embed=_mafia_embed(game, title=f"☀️ Day {game['day']} — see below"), view=None)
+        msg = await interaction.channel.send(embed=embed, view=view)
+        game["last_msg"] = msg
 
     async def on_timeout(self):
         pass
@@ -1109,12 +1121,65 @@ async def _mafia_end(interaction: discord.Interaction, game: dict, winner: str, 
     if extra:
         embed.add_field(name="Last Event", value=extra, inline=False)
     embed.add_field(name="📋 Full Role Reveal", value=reveal, inline=False)
-    await interaction.response.edit_message(content=None, embed=embed, view=None)
+    # Disable the current phase message, then send the final result fresh at the bottom
+    try:
+        await interaction.response.edit_message(content="🏁 Game over — see below.", embed=None, view=None)
+    except Exception:
+        pass
+    await interaction.channel.send(embed=embed)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  COG
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def _mafia_guide_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🎭 How to Play Mafia",
+        color=discord.Color.dark_gold(),
+    )
+    embed.add_field(name="🎯 Goal", value=(
+        "**Village:** Find and eliminate all Mafia members.\n"
+        "**Mafia:** Outnumber the remaining villagers."
+    ), inline=False)
+    embed.add_field(name="👥 Roles", value=(
+        "🔫 **Mafia** — Each night, secretly eliminate one player.\n"
+        "🔍 **Detective** — Each night, investigate one player to learn if they're Mafia.\n"
+        "💉 **Doctor** — Each night, protect one player from being killed.\n"
+        "🏘️ **Villager** — No special power. Vote wisely!"
+    ), inline=False)
+    embed.add_field(name="🚀 Starting a Game", value=(
+        "1. Run `/mafia` or `!mafia` to open a lobby.\n"
+        "2. Everyone clicks **🙋 Join Game**.\n"
+        "3. Host clicks **🚀 Start** (needs 4+ players).\n"
+        "4. Roles are sent to each player via **DM** — keep yours secret!"
+    ), inline=False)
+    embed.add_field(name="☀️ Day Phase", value=(
+        "• Discuss openly — accuse, defend, bluff!\n"
+        "• Click **🗳️ Vote** or use `!mafvote @user` to vote someone out.\n"
+        "• Click **🌙 End Day** when ready — most-voted player is eliminated and their role is revealed."
+    ), inline=False)
+    embed.add_field(name="🌙 Night Phase", value=(
+        "Special roles get a DM prompt. Submit actions with `!mafaction @user`:\n"
+        "• 🔫 **Mafia** → choose someone to eliminate\n"
+        "• 🔍 **Detective** → investigate someone (result in DM)\n"
+        "• 💉 **Doctor** → protect someone\n"
+        "Then click **☀️ Resolve Night** to see what happened."
+    ), inline=False)
+    embed.add_field(name="💡 Tips", value=(
+        "• Mafia: vote with the village early so you blend in.\n"
+        "• Detective: don't reveal yourself too soon — you become a target.\n"
+        "• Doctor: consider protecting yourself or the Detective.\n"
+        "• Everyone: pay attention to *who* votes for *whom*."
+    ), inline=False)
+    embed.add_field(name="🛑 Other Commands", value=(
+        "`!stopmafia` — Stop the current game\n"
+        "`!mafvote @user` — Vote to eliminate\n"
+        "`!mafaction @user` — Submit your night action"
+    ), inline=False)
+    embed.set_footer(text="Roles scale with player count • Min 4 players to start")
+    return embed
+
 
 class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -1478,6 +1543,17 @@ class Fun(commands.Cog):
         del active_mafia[ctx.channel.id]
         await ctx.reply("🛑 Mafia game stopped.")
 
+
+    # ── Mafia Guide ───────────────────────────────────────────────────────────
+
+    @app_commands.command(name="mafguide", description="How to play Mafia 🎭")
+    async def slash_mafguide(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=_mafia_guide_embed(), ephemeral=False)
+
+    @commands.command(name="mafguide")
+    async def prefix_mafguide(self, ctx: commands.Context):
+        await ctx.reply(embed=_mafia_guide_embed())
+
     # ── Counting ──────────────────────────────────────────────────────────────
 
     @app_commands.command(name="countsetup", description="Set the counting channel for this server")
@@ -1729,70 +1805,122 @@ class Fun(commands.Cog):
                            ephemeral=True)
             return
 
-        await reply_fn(content="🔮 Starting Akinator... Think of something and I'll try to guess it!")
+        theme_labels = {"c": "characters (fictional/real people)", "a": "animals", "o": "objects"}
+        theme_desc   = theme_labels.get(theme, "characters")
 
-        try:
-            from akinator.async_client import AsyncClient
-            aki = AsyncClient()
-            await aki.start_game(theme=theme)
-        except Exception as e:
-            await channel.send(f"❌ Failed to connect to Akinator: `{e}`\nThe service may be temporarily down.")
-            return
-
+        # Build initial game state — no external API needed
         game = {
-            "aki":    aki,
-            "user":   user,
-            "theme":  theme,
-            "msg":    None,   # the current discord Message with buttons
+            "user":      user,
+            "theme":     theme,
+            "theme_desc": theme_desc,
+            "history":   [],       # list of {"question": ..., "answer": ...}
+            "step":      0,
+            "finished":  False,
+            "won":       False,
+            "guess":     None,     # current guess being proposed
+            "msg":       None,
         }
         active_akinator[channel.id] = game
+
+        await reply_fn(content="🔮 Starting Akinator... Think of something and I'll try to guess it!")
+
+        # Ask AI for the first question
+        question = await _aki_get_next_question(game, channel.guild.id if channel.guild else None)
+        game["current_question"] = question
 
         embed, view = _aki_embed_view(game, channel.id)
         msg = await channel.send(embed=embed, view=view)
         game["msg"] = msg
 
 
+# ── AI-powered Akinator helpers ───────────────────────────────────────────────
+
+_AKI_SYSTEM = """You are playing Akinator — a yes/no question game where you must guess what the player is thinking.
+Rules:
+- Ask ONE yes/no question per turn, or make a guess when confident (80%+ confidence).
+- To ask a question, respond ONLY with: QUESTION: <your question>
+- To make a guess, respond ONLY with: GUESS: <your guess>
+- When you have confirmed a correct guess, respond ONLY with: WIN: <the answer>
+- When you give up (after 20+ questions with no confidence), respond ONLY with: GIVE_UP
+- Never explain yourself. Only output one of the four formats above.
+- Base questions on the theme and narrow down systematically."""
+
+
+async def _aki_get_next_question(game: dict, guild_id) -> str:
+    """Ask AI for the next question or guess. Returns the question/guess text."""
+    theme_desc = game["theme_desc"]
+    history    = game["history"]
+    step       = game["step"]
+
+    history_text = "\n".join(
+        f"Q{i+1}: {h['question']} → {h['answer']}"
+        for i, h in enumerate(history)
+    ) or "None yet."
+
+    prompt = (
+        f"Theme: {theme_desc}. The player is thinking of something in this category.\n"
+        f"Questions asked so far ({step}):\n{history_text}\n\n"
+        f"What is your next move? Remember: QUESTION: / GUESS: / WIN: / GIVE_UP only."
+    )
+
+    raw = await generate_ai_response(0, f"{_AKI_SYSTEM}\n\n{prompt}", 0, guild_id)
+    raw = raw.strip()
+
+    # Parse the response
+    if raw.upper().startswith("GUESS:"):
+        game["guess"] = raw[6:].strip()
+        return f"Is it **{game['guess']}**?"
+    elif raw.upper().startswith("WIN:"):
+        game["finished"] = True
+        game["won"]      = True
+        game["guess"]    = raw[4:].strip()
+        return f"I knew it! It's **{game['guess']}**! 🎉"
+    elif raw.upper().startswith("GIVE_UP"):
+        game["finished"] = True
+        game["won"]      = False
+        return "You defeated me! I couldn't figure it out. 😔"
+    elif raw.upper().startswith("QUESTION:"):
+        return raw[9:].strip()
+    else:
+        # Fallback — treat whole response as question
+        return raw
+
+
 def _aki_embed_view(game: dict, channel_id: int):
-    aki   = game["aki"]
     theme_labels = {"c": "Characters 🧑", "a": "Animals 🐾", "o": "Objects 📦"}
     theme_label  = theme_labels.get(game["theme"], "Characters 🧑")
 
-    color = discord.Color.purple()
-    if aki.finished:
-        color = discord.Color.green() if aki.win else discord.Color.red()
+    finished = game.get("finished", False)
+    won      = game.get("won", False)
+    question = game.get("current_question", "...")
+    step     = game.get("step", 0)
+    guess    = game.get("guess")
+
+    if finished:
+        color = discord.Color.green() if won else discord.Color.red()
+    elif guess:
+        color = discord.Color.gold()
+    else:
+        color = discord.Color.purple()
 
     embed = discord.Embed(title="🔮 Akinator", color=color)
-    embed.set_thumbnail(url=aki.akitude_url)
+    embed.set_thumbnail(url="https://en.akinator.com/bundles/elokencobundle/img/akinator.png")
 
-    if aki.finished:
-        if aki.win:
-            embed.description = f"✨ **I got it!**\n\n{aki.question}"
-            if aki.photo:
-                embed.set_image(url=aki.photo)
-            if aki.name_proposition:
-                embed.add_field(name="My guess was:", value=f"**{aki.name_proposition}**", inline=False)
-                if aki.description_proposition:
-                    embed.add_field(name="About:", value=aki.description_proposition, inline=False)
-        else:
-            embed.description = f"😔 **You defeated me!**\n\n{aki.question}"
+    if finished:
+        embed.description = question
+    elif guess:
+        embed.description = f"🤔 **My guess — Question {step}**\n\n> {question}"
     else:
-        if aki.win:
-            # Akinator is proposing a guess — waiting for yes/no confirmation
-            embed.description = f"🤔 **Is it... {aki.name_proposition}?**"
-            if aki.description_proposition:
-                embed.add_field(name="About:", value=aki.description_proposition, inline=False)
-            if aki.photo:
-                embed.set_image(url=aki.photo)
-        else:
-            embed.description = f"**Question {aki.step + 1}**\n\n> {aki.question}"
-
-        bar_filled = round(aki.progression / 10)
+        # Confidence bar grows with step count (max 100% at step 25)
+        confidence = min(100, step * 4)
+        bar_filled = round(confidence / 10)
         bar = "█" * bar_filled + "░" * (10 - bar_filled)
-        embed.add_field(name="📊 Confidence", value=f"`[{bar}]` {aki.progression:.0f}%", inline=True)
+        embed.description = f"**Question {step + 1}**\n\n> {question}"
+        embed.add_field(name="📊 Confidence", value=f"`[{bar}]` {confidence}%", inline=True)
 
     embed.set_footer(text=f"Theme: {theme_label} • {game['user'].display_name}'s game • !stopaki to quit")
 
-    view = AkinatorView(game, channel_id) if not aki.finished else None
+    view = AkinatorView(game, channel_id) if not finished else None
     return embed, view
 
 
@@ -1801,85 +1929,94 @@ class AkinatorView(discord.ui.View):
         super().__init__(timeout=120)
         self.game       = game
         self.channel_id = channel_id
-        aki = game["aki"]
 
-        if aki.win:
-            # Propose mode: only Yes / No
+        if game.get("guess"):
+            # Guess-confirmation mode: Yes / No
             yes_btn = discord.ui.Button(label="✅ Yes, that's it!", style=discord.ButtonStyle.success, custom_id="aki_yes")
             no_btn  = discord.ui.Button(label="❌ No, wrong guess",  style=discord.ButtonStyle.danger,  custom_id="aki_no")
-            yes_btn.callback = self._on_yes
-            no_btn.callback  = self._on_no
+            yes_btn.callback = self._on_confirm_yes
+            no_btn.callback  = self._on_confirm_no
             self.add_item(yes_btn)
             self.add_item(no_btn)
         else:
             buttons = [
-                ("✅ Yes",         "yes",   discord.ButtonStyle.success),
-                ("❌ No",          "no",    discord.ButtonStyle.danger),
-                ("🤷 Don't Know", "i",     discord.ButtonStyle.secondary),
-                ("🟡 Probably",   "p",     discord.ButtonStyle.secondary),
-                ("🟠 Prob. Not",  "pn",    discord.ButtonStyle.secondary),
-                ("⬅️ Undo",       "_back", discord.ButtonStyle.secondary),
+                ("✅ Yes",         "yes", discord.ButtonStyle.success),
+                ("❌ No",          "no",  discord.ButtonStyle.danger),
+                ("🤷 Don't Know", "idk", discord.ButtonStyle.secondary),
+                ("🟡 Probably",   "p",   discord.ButtonStyle.secondary),
+                ("🟠 Prob. Not",  "pn",  discord.ButtonStyle.secondary),
             ]
-            for label, cid, style in buttons:
-                btn = discord.ui.Button(label=label, style=style, custom_id=f"aki_{cid}")
-                if cid == "_back":
-                    btn.disabled = (aki.step == 0)
-                    btn.callback = self._on_back
-                else:
-                    btn.callback = self._make_answer_callback(cid)
+            for label, answer_key, style in buttons:
+                btn = discord.ui.Button(label=label, style=style, custom_id=f"aki_{answer_key}")
+                btn.callback = self._make_answer_callback(answer_key)
                 self.add_item(btn)
 
-    def _make_answer_callback(self, answer: str):
+    def _make_answer_callback(self, answer_key: str):
+        _ANSWER_LABELS = {
+            "yes": "Yes", "no": "No", "idk": "Don't Know",
+            "p": "Probably", "pn": "Probably Not",
+        }
         async def callback(interaction: discord.Interaction):
-            await self._handle_answer(interaction, answer)
+            if interaction.user.id != self.game["user"].id:
+                await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+                return
+            await interaction.response.defer()
+            self.stop()
+            game = self.game
+            # Record the answer in history
+            game["history"].append({
+                "question": game.get("current_question", ""),
+                "answer":   _ANSWER_LABELS.get(answer_key, answer_key),
+            })
+            game["step"]  += 1
+            game["guess"]  = None  # clear pending guess
+
+            # Get next move from AI
+            next_q = await _aki_get_next_question(game, interaction.guild_id)
+            game["current_question"] = next_q
+
+            embed, view = _aki_embed_view(game, self.channel_id)
+            if game.get("finished") and self.channel_id in active_akinator:
+                del active_akinator[self.channel_id]
+            await interaction.message.edit(embed=embed, view=view)
         return callback
 
-    async def _check_user(self, interaction: discord.Interaction) -> bool:
+    async def _on_confirm_yes(self, interaction: discord.Interaction):
         if interaction.user.id != self.game["user"].id:
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
-            return False
-        return True
-
-    async def _handle_answer(self, interaction: discord.Interaction, answer: str):
-        if not await self._check_user(interaction):
             return
         await interaction.response.defer()
         self.stop()
         game = self.game
-        aki  = game["aki"]
-        try:
-            await aki.answer(answer)
-        except Exception as e:
-            await interaction.followup.send(f"❌ Akinator error: `{e}`", ephemeral=True)
-            if self.channel_id in active_akinator:
-                del active_akinator[self.channel_id]
-            return
+        game["finished"] = True
+        game["won"]      = True
+        game["current_question"] = f"I knew it! It's **{game['guess']}**! 🎉"
+        if self.channel_id in active_akinator:
+            del active_akinator[self.channel_id]
+        embed, _ = _aki_embed_view(game, self.channel_id)
+        await interaction.message.edit(embed=embed, view=None)
 
-        embed, view = _aki_embed_view(game, self.channel_id)
-        if aki.finished:
-            if self.channel_id in active_akinator:
-                del active_akinator[self.channel_id]
-        await interaction.message.edit(embed=embed, view=view)
-
-    async def _on_yes(self, interaction: discord.Interaction):
-        await self._handle_answer(interaction, "yes")
-
-    async def _on_no(self, interaction: discord.Interaction):
-        await self._handle_answer(interaction, "no")
-
-    async def _on_back(self, interaction: discord.Interaction):
-        if not await self._check_user(interaction):
+    async def _on_confirm_no(self, interaction: discord.Interaction):
+        if interaction.user.id != self.game["user"].id:
+            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
         await interaction.response.defer()
         self.stop()
         game = self.game
-        aki  = game["aki"]
-        try:
-            await aki.back()
-        except Exception as e:
-            await interaction.followup.send(f"❌ Can't go back: `{e}`", ephemeral=True)
-            return
+        # Record the wrong guess and keep going
+        game["history"].append({
+            "question": game.get("current_question", ""),
+            "answer":   "No (wrong guess)",
+        })
+        game["step"]  += 1
+        game["guess"]  = None
+
+        next_q = await _aki_get_next_question(game, interaction.guild_id)
+        game["current_question"] = next_q
+
         embed, view = _aki_embed_view(game, self.channel_id)
+        if game.get("finished") and self.channel_id in active_akinator:
+            del active_akinator[self.channel_id]
         await interaction.message.edit(embed=embed, view=view)
 
     async def on_timeout(self):
