@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 _conn = None  # libsql connection
+_turso_url   = ""
+_turso_token = ""
 
 # ── In-memory mirrors ─────────────────────────────────────────────────────────
 
@@ -58,12 +60,17 @@ _SERIALISE: dict[str, Any] = {
 
 # ── DB init ───────────────────────────────────────────────────────────────────
 
+
+
 async def init_db():
     """Call once at startup. Connects to Turso and loads all state into memory."""
-    global _conn
+    global _conn , _turso_url, _turso_token
 
     turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
+
+    _turso_url = turso_url
+    _turso_token = turso_token
 
     if not turso_url or not turso_token:
         print(
@@ -112,19 +119,73 @@ async def init_db():
 
 # ── Save helpers ──────────────────────────────────────────────────────────────
 
+def _is_stream_error(e: Exception) -> bool:
+    """Detect Turso/Hrana stream-not-found errors."""
+    msg = str(e).lower()
+    return "stream not found" in msg or ("404" in msg and "hrana" in msg)
+
+
+def _reconnect() -> bool:
+    """Re-establish the libsql connection after a dropped stream."""
+    global _conn
+    if not _turso_url or not _turso_token:
+        return False
+    try:
+        import libsql_experimental as libsql
+        _conn = libsql.connect(database=_turso_url, auth_token=_turso_token)
+        # Re-create the state table to ensure the connection is ready
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        _conn.commit()
+        print("[State] Reconnected to Turso after stream error.")
+        return True
+    except Exception as e:
+        print(f"[State] Reconnect failed: {e}")
+        _conn = None
+        return False
+
 def _save_key(key: str, value: Any) -> None:
-    """Upsert a single key into the state table."""
+    """Upsert a single key into the state table with auto-reconnect."""
     if _conn is None:
         return
-    try:
+    
+    def _do_save():
         _conn.execute(
             "INSERT INTO state (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, json.dumps(value))
         )
         _conn.commit()
+    
+    try:
+        _do_save()
     except Exception as e:
-        print(f"❌ Turso save error ({key}): {e}")
+        if _is_stream_error(e):
+            print(f"[State] Stream error on save, attempting reconnect...")
+            if _reconnect():
+                _do_save()
+            else:
+                print(f"❌ Turso save error ({key}) after reconnect failed: {e}")
+        else:
+            print(f"❌ Turso save error ({key}): {e}")
+
+# def _save_key(key: str, value: Any) -> None:
+#     """Upsert a single key into the state table."""
+#     if _conn is None:
+#         return
+#     try:
+#         _conn.execute(
+#             "INSERT INTO state (key, value) VALUES (?, ?) "
+#             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+#             (key, json.dumps(value))
+#         )
+#         _conn.commit()
+#     except Exception as e:
+#         print(f"❌ Turso save error ({key}): {e}")
 
 
 # ── Debounced save ────────────────────────────────────────────────────────────
