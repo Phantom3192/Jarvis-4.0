@@ -203,11 +203,51 @@ _PIECE_GLYPH = {
 
 _CHESS_FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
 _LABEL_FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
+_BUNDLED_FONT_PATH = os.path.join(os.path.dirname(__file__), "FreeSerif.ttf")
 
+_CHESS_FONT_FALLBACKS = [
+    "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/TTF/FreeSerif.ttf",
+    "/usr/share/fonts/gnu-free/FreeSerif.ttf",
+]
+
+_cached_piece_font: dict = {}
+
+
+# Download FreeSerif if not available (e.g. Railway Linux containers)
+def _ensure_chess_font():
+    if os.path.exists(_CHESS_FONT_PATH) or os.path.exists(_BUNDLED_FONT_PATH):
+        return
+    try:
+        import urllib.request
+        url = "https://github.com/opensymbol/free-fonts/raw/master/FreeSerif.ttf"
+        urllib.request.urlretrieve(url, _BUNDLED_FONT_PATH)
+    except Exception:
+        pass
+
+_ensure_chess_font()
 
 def _get_piece_font(size: int):
-    if os.path.exists(_CHESS_FONT_PATH):
-        return _ImageFont.truetype(_CHESS_FONT_PATH, size)
+    if size in _cached_piece_font:
+        return _cached_piece_font[size]
+    for path in _CHESS_FONT_FALLBACKS:
+        if os.path.exists(path):
+            font = _ImageFont.truetype(path, size)
+            _cached_piece_font[size] = font
+            return font
+    # Last resort: download FreeSerif at runtime
+    try:
+        import urllib.request, tempfile
+        url = "https://github.com/opensourcedesign/fonts/raw/master/gnu-freefont_freefont-20120503/FreeSerif.ttf"
+        tmp = os.path.join(tempfile.gettempdir(), "FreeSerif.ttf")
+        if not os.path.exists(tmp):
+            urllib.request.urlretrieve(url, tmp)
+        font = _ImageFont.truetype(tmp, size)
+        _cached_piece_font[size] = font
+        return font
+    except Exception:
+        pass
     return _ImageFont.load_default(size)
 
 
@@ -1971,14 +2011,15 @@ class AkinatorView(discord.ui.View):
             game["step"]  += 1
             game["guess"]  = None  # clear pending guess
 
-            # Get next move from AI
+            # Get next move from AI (can take a few seconds — defer keeps token alive)
             next_q = await _aki_get_next_question(game, interaction.guild_id)
             game["current_question"] = next_q
 
             embed, view = _aki_embed_view(game, self.channel_id)
             if game.get("finished") and self.channel_id in active_akinator:
                 del active_akinator[self.channel_id]
-            await interaction.message.edit(embed=embed, view=view)
+            # Must use edit_original_response after defer(), not interaction.message.edit()
+            await interaction.edit_original_response(embed=embed, view=view)
         return callback
 
     async def _on_confirm_yes(self, interaction: discord.Interaction):
@@ -1994,7 +2035,7 @@ class AkinatorView(discord.ui.View):
         if self.channel_id in active_akinator:
             del active_akinator[self.channel_id]
         embed, _ = _aki_embed_view(game, self.channel_id)
-        await interaction.message.edit(embed=embed, view=None)
+        await interaction.edit_original_response(embed=embed, view=None)
 
     async def _on_confirm_no(self, interaction: discord.Interaction):
         if interaction.user.id != self.game["user"].id:
@@ -2017,7 +2058,7 @@ class AkinatorView(discord.ui.View):
         embed, view = _aki_embed_view(game, self.channel_id)
         if game.get("finished") and self.channel_id in active_akinator:
             del active_akinator[self.channel_id]
-        await interaction.message.edit(embed=embed, view=view)
+        await interaction.edit_original_response(embed=embed, view=view)
 
     async def on_timeout(self):
         if self.channel_id in active_akinator:
