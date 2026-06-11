@@ -129,7 +129,6 @@ async def slash_interaction_check(interaction: discord.Interaction) -> bool:
     if await bot.is_owner(interaction.user):
         return True
 
-    # Burst/timeout check for interactions
     allowed, t = check_burst_and_maybe_timeout(interaction.user.id)
     if not allowed:
         await interaction.response.send_message(
