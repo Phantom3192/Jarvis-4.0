@@ -70,7 +70,6 @@ CATEGORIES = {
             ("🔮 **AKINATOR**", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             ("!akinator / /akinator", "Think of a character — I'll guess it!"),
             ("!stopaki / /stopaki", "Stop the current Akinator game"),
-            ("", ""),
         ],
     },
     "🎉 Fun": {
@@ -85,7 +84,6 @@ CATEGORIES = {
             ("!countstats / /countstats", "Show current count and high score"),
             ("!countreset / /countreset", "Reset the count (admin only)"),
             ("!countremove / /countremove", "Remove counting channel setup"),
-            ("", ""),
         ],
     },
     "🎵 Music": {
