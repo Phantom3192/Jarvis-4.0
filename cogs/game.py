@@ -181,173 +181,141 @@ import chess as _chess
 import io as _io
 from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont
 
-_SQ     = 130
-_BORDER = 68
+_SQ     = 100
+_BORDER = 52
 _BSIZE  = _SQ * 8 + _BORDER * 2
 
-_COL_LIGHT  = (240, 217, 181)
-_COL_DARK   = (181, 136,  99)
-_COL_BG     = ( 22,  21,  28)
-_COL_BORDER = ( 58,  46,  36)
-_COL_LABEL  = (255, 220, 160)
+_COL_LIGHT      = (240, 217, 181)
+_COL_DARK       = (181, 136,  99)
+_COL_BG         = ( 22,  21,  28)
+_COL_BORDER     = ( 49,  46,  43)
+_COL_LABEL      = (200, 170, 120)
+
+# Unicode chess piece glyphs: index 0 = white, 1 = black
+_PIECE_GLYPH = {
+    _chess.KING:   ("♔", "♚"),
+    _chess.QUEEN:  ("♕", "♛"),
+    _chess.ROOK:   ("♖", "♜"),
+    _chess.BISHOP: ("♗", "♝"),
+    _chess.KNIGHT: ("♘", "♞"),
+    _chess.PAWN:   ("♙", "♟"),
+}
+
+_CHESS_FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
+_LABEL_FONT_PATH = "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"
 
 
-def _label_font(size: int):
+def _get_piece_font(size: int):
+    if os.path.exists(_CHESS_FONT_PATH):
+        return _ImageFont.truetype(_CHESS_FONT_PATH, size)
+    return _ImageFont.load_default(size)
+
+
+def _get_label_font(size: int):
     for p in [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
+        _LABEL_FONT_PATH,
     ]:
         if os.path.exists(p):
             return _ImageFont.truetype(p, size)
     return _ImageFont.load_default(size)
 
 
-def _draw_piece(draw, piece_type: int, is_white: bool, cx: int, cy: int, sq: int):
-    import math as _math
-    s       = sq
-    fill    = (252, 252, 248) if is_white else (18,  18,  22)
-    mid     = (200, 195, 185) if is_white else (60,  58,  65)
-    outline = (50,  45,  40)  if is_white else (230, 225, 220)
-    lw      = max(2, s // 28)
-
-    def rect(x0, y0, x1, y1):
-        draw.rectangle([x0, y0, x1, y1], fill=fill, outline=outline, width=lw)
-    def ellipse(x0, y0, x1, y1):
-        draw.ellipse([x0, y0, x1, y1], fill=fill, outline=outline, width=lw)
-    def poly(pts):
-        draw.polygon(pts, fill=fill, outline=outline)
-
-    def base(w=0.62):
-        bw = int(s*w); bh = int(s*0.13); by = cy+int(s*0.32)
-        rect(cx-bw//2, by, cx+bw//2, by+bh)
-        draw.line([cx-bw//2+lw, by+lw, cx+bw//2-lw, by+lw], fill=mid, width=max(1, lw-1))
-
-    if piece_type == _chess.PAWN:
-        base(0.46)
-        nw = int(s*0.16)
-        rect(cx-nw//2, cy+int(s*0.08), cx+nw//2, cy+int(s*0.32))
-        r = int(s*0.22); hy = cy-int(s*0.10)
-        ellipse(cx-r, hy-r, cx+r, hy+r)
-
-    elif piece_type == _chess.ROOK:
-        base(0.58)
-        bw = int(s*0.44)
-        rect(cx-bw//2, cy-int(s*0.20), cx+bw//2, cy+int(s*0.32))
-        draw.rectangle([cx-bw//2+lw*2, cy-int(s*0.20)+lw*2,
-                        cx+bw//2-lw*2, cy-int(s*0.20)+lw*4], fill=mid)
-        tw = int(s*0.13); th = int(s*0.14); ty = cy-int(s*0.20)-th
-        for tx in [cx-int(s*0.16), cx, cx+int(s*0.16)]:
-            rect(tx-tw//2, ty, tx+tw//2, ty+th)
-
-    elif piece_type == _chess.KNIGHT:
-        base(0.54)
-        pts = [
-            (cx-int(s*0.20), cy+int(s*0.32)), (cx+int(s*0.22), cy+int(s*0.32)),
-            (cx+int(s*0.22), cy+int(s*0.04)), (cx+int(s*0.32), cy-int(s*0.18)),
-            (cx+int(s*0.20), cy-int(s*0.36)), (cx+int(s*0.00), cy-int(s*0.30)),
-            (cx-int(s*0.10), cy-int(s*0.16)), (cx-int(s*0.20), cy-int(s*0.04)),
-        ]
-        poly(pts); draw.polygon(pts, outline=outline)
-        ellipse(cx+int(s*0.04), cy-int(s*0.10), cx+int(s*0.26), cy+int(s*0.08))
-        nr = max(2, int(s*0.03)); nx, ny = cx+int(s*0.18), cy+int(s*0.00)
-        draw.ellipse([nx-nr, ny-nr, nx+nr, ny+nr], fill=outline)
-        er = max(2, int(s*0.05)); ex, ey = cx+int(s*0.10), cy-int(s*0.22)
-        draw.ellipse([ex-er, ey-er, ex+er, ey+er], fill=outline)
-
-    elif piece_type == _chess.BISHOP:
-        base(0.52)
-        poly([(cx-int(s*0.22), cy+int(s*0.32)), (cx+int(s*0.22), cy+int(s*0.32)),
-              (cx+int(s*0.12), cy-int(s*0.02)), (cx-int(s*0.12), cy-int(s*0.02))])
-        r1 = int(s*0.16)
-        ellipse(cx-r1, cy-int(s*0.20)-r1, cx+r1, cy-int(s*0.02))
-        r2 = int(s*0.12); hy = cy-int(s*0.34)
-        ellipse(cx-r2, hy-r2, cx+r2, hy+r2)
-        draw.polygon([(cx, hy-r2-int(s*0.12)), (cx-int(s*0.04), hy-r2), (cx+int(s*0.04), hy-r2)],
-                     fill=fill, outline=outline)
-        draw.line([cx-int(s*0.06), hy, cx+int(s*0.06), hy], fill=mid, width=max(1, lw-1))
-
-    elif piece_type == _chess.QUEEN:
-        base(0.62)
-        ellipse(cx-int(s*0.24), cy-int(s*0.16), cx+int(s*0.24), cy+int(s*0.32))
-        cr = int(s*0.24); top_y = cy-int(s*0.16)
-        draw.arc([cx-cr, top_y-int(s*0.04), cx+cr, top_y+int(s*0.08)], 180, 360,
-                 fill=outline, width=lw)
-        ball_r = max(3, int(s*0.08))
-        for i in range(5):
-            import math as _math
-            angle = _math.pi + (i/4)*_math.pi
-            bx2 = cx + int(cr*_math.cos(angle))
-            by2 = top_y + int((s*0.06)*_math.sin(angle)) - int(s*0.02)
-            draw.ellipse([bx2-ball_r, by2-ball_r, bx2+ball_r, by2+ball_r],
-                         fill=fill, outline=outline, width=max(1, lw-1))
-
-    elif piece_type == _chess.KING:
-        base(0.62)
-        ellipse(cx-int(s*0.22), cy-int(s*0.12), cx+int(s*0.22), cy+int(s*0.32))
-        cr = int(s*0.22); top_y = cy-int(s*0.12)
-        import math as _math
-        for angle in [_math.pi+0.3, _math.pi*1.5, _math.pi*2-0.3]:
-            px = cx + int(cr*_math.cos(angle)); py = top_y + int((s*0.14)*_math.sin(angle))
-            draw.line([cx, top_y, px, py], fill=outline, width=lw*2)
-            ball_r = max(3, int(s*0.07))
-            draw.ellipse([px-ball_r, py-ball_r, px+ball_r, py+ball_r],
-                         fill=fill, outline=outline, width=max(1, lw-1))
-        arm = int(s*0.13); cw = max(2, int(s*0.05)); cross_y = top_y-int(s*0.16)
-        rect(cx-cw, cross_y-arm, cx+cw, cross_y+arm)
-        rect(cx-arm, cross_y-cw, cx+arm, cross_y+cw)
-
-
 def _render_board_image(board: "_chess.Board", flipped: bool = False, last_move=None) -> bytes:
-    img  = _Image.new("RGB", (_BSIZE, _BSIZE), _COL_BG)
+    img = _Image.new("RGB", (_BSIZE, _BSIZE), _COL_BG)
     draw = _ImageDraw.Draw(img, "RGBA")
-    lf   = _label_font(32)
 
-    draw.rectangle([0, 0, _BSIZE, _BSIZE], fill=_COL_BORDER)
-    draw.rectangle([_BORDER-4, _BORDER-4, _BSIZE-_BORDER+4, _BSIZE-_BORDER+4],
-                   fill=(22, 21, 28), outline=(80, 65, 50), width=3)
+    # Layered border for depth
+    for i in range(8):
+        shade = tuple(max(0, c - i * 3) for c in _COL_BORDER)
+        draw.rectangle([i, i, _BSIZE - i, _BSIZE - i], outline=shade, width=1)
+    draw.rectangle([_BORDER - 5, _BORDER - 5, _BSIZE - _BORDER + 5, _BSIZE - _BORDER + 5],
+                   outline=(80, 65, 50), width=2)
+    draw.rectangle([_BORDER - 3, _BORDER - 3, _BSIZE - _BORDER + 3, _BSIZE - _BORDER + 3],
+                   outline=(55, 44, 33), width=2)
 
     ranks = range(7, -1, -1) if not flipped else range(8)
     files = range(8)          if not flipped else range(7, -1, -1)
 
+    # Draw squares + overlays
     for ri, rank in enumerate(ranks):
         for fi, file in enumerate(files):
             sq    = _chess.square(file, rank)
             x     = _BORDER + fi * _SQ
             y     = _BORDER + ri * _SQ
             color = _COL_LIGHT if (rank + file) % 2 == 1 else _COL_DARK
-            draw.rectangle([x, y, x+_SQ, y+_SQ], fill=color)
+            draw.rectangle([x, y, x + _SQ - 1, y + _SQ - 1], fill=color)
             if last_move and sq in (last_move.from_square, last_move.to_square):
-                ov = _Image.new("RGBA", (_SQ, _SQ), (30, 130, 50, 130))
+                ov = _Image.new("RGBA", (_SQ, _SQ), (100, 180, 70, 110))
                 img.paste(ov, (x, y), ov)
             piece = board.piece_at(sq)
             if (piece and piece.piece_type == _chess.KING
                     and piece.color == board.turn and board.is_check()):
-                ov = _Image.new("RGBA", (_SQ, _SQ), (220, 40, 40, 160))
+                ov = _Image.new("RGBA", (_SQ, _SQ), (220, 40, 40, 170))
                 img.paste(ov, (x, y), ov)
 
+    # Draw pieces using Unicode glyphs with outline + shadow
+    pfont = _get_piece_font(int(_SQ * 0.70))
+    # Make coordinate font MUCH larger (was 18, now 28)
+    lfont = _get_label_font(28)
     draw2 = _ImageDraw.Draw(img, "RGBA")
+
     for ri, rank in enumerate(ranks):
         for fi, file in enumerate(files):
             sq    = _chess.square(file, rank)
             x     = _BORDER + fi * _SQ
             y     = _BORDER + ri * _SQ
             piece = board.piece_at(sq)
-            if piece:
-                _draw_piece(draw2, piece.piece_type, piece.color == _chess.WHITE,
-                            x + _SQ//2, y + _SQ//2, _SQ)
+            if not piece:
+                continue
+            glyph = _PIECE_GLYPH[piece.piece_type][0 if piece.color == _chess.WHITE else 1]
+            cx, cy = x + _SQ // 2, y + _SQ // 2
 
+            # Drop shadow
+            draw2.text((cx + 2, cy + 2), glyph, font=pfont, fill=(0, 0, 0, 100), anchor="mm")
+
+            if piece.color == _chess.WHITE:
+                # Outline for white pieces
+                for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                    draw2.text((cx + dx, cy + dy), glyph, font=pfont,
+                               fill=(50, 50, 50, 200), anchor="mm")
+                # White fill
+                draw2.text((cx, cy), glyph, font=pfont, fill=(255, 255, 255, 255), anchor="mm")
+            else:
+                # Outline for black pieces
+                for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                    draw2.text((cx + dx, cy + dy), glyph, font=pfont,
+                               fill=(200, 200, 200, 200), anchor="mm")
+                # Black fill
+                draw2.text((cx, cy), glyph, font=pfont, fill=(20, 20, 20, 255), anchor="mm")
+
+    # Rank & file labels with LARGER font and better positioning
     rank_labels = "87654321" if not flipped else "12345678"
     file_labels = "abcdefgh"  if not flipped else "hgfedcba"
+    
+    # Make the labels more prominent with a background circle
     for ri, label in enumerate(rank_labels):
-        y = _BORDER + ri * _SQ + _SQ // 2
-        draw2.text((_BORDER//2, y), label, font=lf, fill=_COL_LABEL, anchor="mm")
-        draw2.text((_BSIZE-_BORDER//2, y), label, font=lf, fill=_COL_LABEL, anchor="mm")
+        yc = _BORDER + ri * _SQ + _SQ // 2
+        # Draw background circle for better visibility
+        draw2.ellipse([(_BORDER // 2 - 15), (yc - 15), (_BORDER // 2 + 15), (yc + 15)], 
+                      fill=(40, 35, 30, 200))
+        draw2.text((_BORDER // 2, yc), label, font=lfont, fill=(220, 200, 150, 255), anchor="mm")
+        
+        draw2.ellipse([(_BSIZE - _BORDER // 2 - 15), (yc - 15), (_BSIZE - _BORDER // 2 + 15), (yc + 15)], 
+                      fill=(40, 35, 30, 200))
+        draw2.text((_BSIZE - _BORDER // 2, yc), label, font=lfont, fill=(220, 200, 150, 255), anchor="mm")
+    
     for fi, label in enumerate(file_labels):
-        x = _BORDER + fi * _SQ + _SQ // 2
-        draw2.text((x, _BORDER//2), label, font=lf, fill=_COL_LABEL, anchor="mm")
-        draw2.text((x, _BSIZE-_BORDER//2), label, font=lf, fill=_COL_LABEL, anchor="mm")
+        xc = _BORDER + fi * _SQ + _SQ // 2
+        # Draw background circle for better visibility
+        draw2.ellipse([(xc - 15), (_BORDER // 2 - 15), (xc + 15), (_BORDER // 2 + 15)], 
+                      fill=(40, 35, 30, 200))
+        draw2.text((xc, _BORDER // 2), label, font=lfont, fill=(220, 200, 150, 255), anchor="mm")
+        
+        draw2.ellipse([(xc - 15), (_BSIZE - _BORDER // 2 - 15), (xc + 15), (_BSIZE - _BORDER // 2 + 15)], 
+                      fill=(40, 35, 30, 200))
+        draw2.text((xc, _BSIZE - _BORDER // 2), label, font=lfont, fill=(220, 200, 150, 255), anchor="mm")
 
     buf = _io.BytesIO()
     img.save(buf, format="PNG")
@@ -391,7 +359,7 @@ def _chess_embed(game: dict, title: str = "♟️ Chess", msg: str = "") -> disc
     e.add_field(name="⬜ White", value=white.mention, inline=True)
     e.add_field(name="⬛ Black", value=black.mention, inline=True)
     e.add_field(name=f"{turn_emoji} Turn", value=f"**{turn_name}** to move", inline=True)
-    e.set_footer(text=f"Move {board.fullmove_number} • Use the dropdowns below • !resign • !draw • !hint")
+    e.set_footer(text=f"Move {board.fullmove_number} • Pick a move from the dropdown • !resign • !draw • !hint")
     return e
 
 
@@ -486,9 +454,13 @@ class ChessChallengeView(discord.ui.View):
         }
         active_chess[self.channel.id] = game
 
+        # embed = _chess_embed(game, title="♟️ Chess — Game Start",
+        #                      msg=f"{white.mention} ⬜ vs {black.mention} ⬛\n\n**{white.display_name}** goes first!\nUse the dropdown below — pick any move in algebraic notation (e.g. ♙ e4, ♘ Nf3).")
+        # view  = ChessMoveSelect(game, white)
         embed = _chess_embed(game, title="♟️ Chess — Game Start",
-                             msg=f"{white.mention} ⬜ vs {black.mention} ⬛\n\n**{white.display_name}** goes first!\nUse the dropdown below to pick a piece, then choose where to move.")
-        view  = ChessPieceSelect(game, white)
+                     msg=f"{white.mention} ⬜ vs {black.mention} ⬛\n\n**{white.display_name}** goes first!\nPick a piece from the buttons below to move.")
+        view = ChessMoveSelect(game, white)
+        
         await interaction.response.edit_message(
             content=f"✅ Challenge accepted! {white.mention} vs {black.mention} — {white.mention} it's your turn!",
             embed=embed,
@@ -516,144 +488,291 @@ class ChessChallengeView(discord.ui.View):
             pass
 
 
-# ── Chess piece / move select views ──────────────────────────────────────────
 
-class ChessPieceSelect(discord.ui.View):
+# ── Chess smart move selector ─────────────────────────────────────────────────
+# Generates algebraic-notation move labels so the player never needs to think
+# in raw coordinates.  One dropdown lists every legal move as e.g. "♙ e4",
+# "♘ Nf3", "O-O" — no two-step pick-piece-then-destination needed.
+
+def _san_with_emoji(board: "_chess.Board", move: "_chess.Move") -> str:
+    """Return a short, readable label for a move, e.g. '♙ e4', '♘ Nf3', 'O-O'."""
+    piece  = board.piece_at(move.from_square)
+    if not piece:
+        return board.san(move)
+    emoji  = _PIECE_EMOJI[piece.piece_type][0 if piece.color == _chess.WHITE else 1]
+    try:
+        san = board.san(move)
+    except Exception:
+        san = move.uci()
+    return f"{emoji} {san}"
+
+
+def _build_move_options(board: "_chess.Board") -> list:
+    """
+    Return up to 25 SelectOptions covering all legal moves for the current player,
+    sorted by piece type (King, Queen, Rook, Bishop, Knight, Pawn) then by SAN.
+    Each option value = move.uci().
+    Duplicate SAN labels are de-duped by appending the origin square.
+    """
+    order = [_chess.KING, _chess.QUEEN, _chess.ROOK,
+             _chess.BISHOP, _chess.KNIGHT, _chess.PAWN]
+    moves_by_type: dict = {pt: [] for pt in order}
+    for move in board.legal_moves:
+        piece = board.piece_at(move.from_square)
+        if piece:
+            moves_by_type.setdefault(piece.piece_type, []).append(move)
+
+    options  = []
+    seen_san = {}
+    for pt in order:
+        for move in sorted(moves_by_type.get(pt, []),
+                           key=lambda m: board.san(m) if board.is_legal(m) else m.uci()):
+            if len(options) >= 25:
+                break
+            label = _san_with_emoji(board, move)
+            # de-dup: if SAN label is ambiguous add origin square hint
+            base = label
+            if base in seen_san:
+                label = f"{base} ({_chess.square_name(move.from_square)})"
+            seen_san[base] = True
+            options.append(discord.SelectOption(label=label, value=move.uci()))
+        if len(options) >= 25:
+            break
+
+    return options
+
+
+class ChessMoveSelect(discord.ui.View):
+    """Piece-based chess move selector - pick a piece first, then destination."""
+    
     def __init__(self, game: dict, player: discord.Member):
-        super().__init__(timeout=120)
-        self.game   = game
+        super().__init__(timeout=180)
+        self.game = game
         self.player = player
-        self._build()
-
-    def _build(self):
-        board   = self.game["board"]
-        pieces  = _movable_pieces(board)
-        options = [discord.SelectOption(label=_piece_label(p, sq), value=str(sq))
-                   for sq, p, _ in pieces[:25]]
-        select = discord.ui.Select(placeholder="Select a piece to move…",
-                                   options=options, custom_id="piece_select")
-        select.callback = self._on_piece_select
-        self.add_item(select)
-
-    async def _on_piece_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.player.id:
-            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
-            return
-        from_sq = int(interaction.data["values"][0])
-        board   = self.game["board"]
-        piece   = board.piece_at(from_sq)
-        moves   = [m for m in board.legal_moves if m.from_square == from_sq]
-        view    = ChessDestSelect(self.game, self.player, from_sq, moves)
-        embed   = _chess_embed(self.game,
-                               msg=f"Selected: **{_piece_label(piece, from_sq)}**\nNow choose where to move it:")
-        await interaction.response.edit_message(embed=embed, view=view)
-
-    async def on_timeout(self):
-        pass
-
-
-class ChessDestSelect(discord.ui.View):
-    def __init__(self, game: dict, player: discord.Member, from_sq: int, moves: list):
-        super().__init__(timeout=120)
-        self.game         = game
-        self.player       = player
-        self.from_sq      = from_sq
-        self.moves        = moves
-        self.pending_move = None
-        self._build()
-
-    def _build(self):
-        board   = self.game["board"]
-        options = []
-        seen    = set()
-        for move in self.moves[:25]:
-            val = move.uci()
-            if val not in seen:
-                seen.add(val)
-                options.append(discord.SelectOption(label=_square_label(board, move), value=val))
-
-        select = discord.ui.Select(placeholder="Choose destination…",
-                                   options=options, custom_id="dest_select")
-        select.callback = self._on_dest_select
-        self.add_item(select)
-
-        confirm = discord.ui.Button(label="✅ Confirm Move", style=discord.ButtonStyle.success,
-                                    custom_id="confirm_move", disabled=True)
-        confirm.callback = self._on_confirm
-        self.add_item(confirm)
-
-        back = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary,
-                                 custom_id="back_move")
-        back.callback = self._on_back
-        self.add_item(back)
-
-    async def _on_dest_select(self, interaction: discord.Interaction):
-        if interaction.user.id != self.player.id:
-            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
-            return
-        self.pending_move = interaction.data["values"][0]
-        for item in self.children:
-            if getattr(item, "custom_id", None) == "confirm_move":
-                item.disabled = False
-        board    = self.game["board"]
-        move_obj = _chess.Move.from_uci(self.pending_move)
-        piece    = board.piece_at(self.from_sq)
-        embed    = _chess_embed(self.game, msg=(
-            f"**{_piece_label(piece, self.from_sq)}**\n"
-            f"Wants to move **{_square_label(board, move_obj)}**\n\n"
-            f"Press **✅ Confirm Move** to play, or pick a different square."
-        ))
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    async def _on_confirm(self, interaction: discord.Interaction):
-        if interaction.user.id != self.player.id:
-            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
-            return
-        if not self.pending_move:
-            await interaction.response.send_message("⚠️ Select a destination first.", ephemeral=True)
-            return
-
+        self.selected_piece = None
+        self._build_piece_buttons()
+    
+    def _build_piece_buttons(self):
+        """Create buttons for each piece that can move."""
         board = self.game["board"]
-        move  = _chess.Move.from_uci(self.pending_move)
-        board.push(move)
-        self.game["draw_offered_by"] = None
-
-        if board.is_checkmate():
-            winner = self.game["black"] if board.turn == _chess.WHITE else self.game["white"]
-            embed  = _chess_embed(self.game, title="♟️ Checkmate!")
-            del active_chess[interaction.channel_id]
-            await interaction.response.edit_message(
-                content=f"🏆 **{winner.display_name}** wins by checkmate!",
-                embed=embed, attachments=[_chess_file(self.game)], view=None)
-            return
-
-        if board.is_stalemate() or board.is_insufficient_material() or board.is_seventyfive_moves():
-            embed = _chess_embed(self.game, title="♟️ Draw!")
-            del active_chess[interaction.channel_id]
-            await interaction.response.edit_message(content="🤝 The game is a draw!",
-                                                    embed=embed, attachments=[_chess_file(self.game)], view=None)
-            return
-
-        next_player = self.game["white"] if board.turn == _chess.WHITE else self.game["black"]
-        status_msg  = "⚠️ Check! Your king is under attack." if board.is_check() else f"Move played. Your turn, {next_player.mention}!"
-        embed       = _chess_embed(self.game, msg=status_msg)
-        next_view   = ChessPieceSelect(self.game, next_player)
-        await interaction.response.edit_message(
-            content=f"{next_player.mention} — it's your turn!",
-            embed=embed, attachments=[_chess_file(self.game)], view=next_view)
-
-    async def _on_back(self, interaction: discord.Interaction):
+        movable_pieces = []
+        
+        for sq in _chess.SQUARES:
+            piece = board.piece_at(sq)
+            if piece and piece.color == board.turn:
+                moves = [m for m in board.legal_moves if m.from_square == sq]
+                if moves:
+                    movable_pieces.append((sq, piece, moves))
+        
+        # Clear existing items
+        self.clear_items()
+        
+        # Add piece buttons (max 20 pieces)
+        for sq, piece, moves in movable_pieces[:20]:
+            piece_name = _PIECE_NAMES[piece.piece_type]
+            emoji = _PIECE_EMOJI[piece.piece_type][0 if piece.color == _chess.WHITE else 1]
+            square_name = _chess.square_name(sq).upper()
+            
+            button = discord.ui.Button(
+                label=f"{emoji} {piece_name} on {square_name}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"piece_{sq}"
+            )
+            button.callback = self._make_piece_callback(sq, piece, moves)
+            self.add_item(button)
+        
+        # Add action buttons at the bottom
+        resign_btn = discord.ui.Button(label="🏳️ Resign", style=discord.ButtonStyle.danger)
+        draw_btn = discord.ui.Button(label="🤝 Offer Draw", style=discord.ButtonStyle.secondary)
+        
+        resign_btn.callback = self._resign_callback
+        draw_btn.callback = self._draw_callback
+        
+        self.add_item(resign_btn)
+        self.add_item(draw_btn)
+    
+    def _make_piece_callback(self, from_sq, piece, moves):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.player.id:
+                await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+                return
+            
+            self.selected_piece = from_sq
+            # Show destination selector as a new message
+            view = DestinationSelect(self.game, self.player, from_sq, moves)
+            board = self.game["board"]
+            embed = _chess_embed(self.game, msg=f"Selected {_PIECE_NAMES[piece.piece_type]}. Where to move?")
+            
+            await interaction.response.send_message(
+                content=f"♟️ **{self.player.display_name}** - Choose destination for {_PIECE_NAMES[piece.piece_type]}:",
+                embed=embed,
+                file=_chess_file(self.game),
+                view=view,
+                ephemeral=False
+            )
+        return callback
+    
+    async def _resign_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.player.id:
-            await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+            await interaction.response.send_message("❌ Only the player can resign!", ephemeral=True)
             return
-        view  = ChessPieceSelect(self.game, self.player)
-        embed = _chess_embed(self.game, msg="Choose a piece to move:")
-        await interaction.response.edit_message(embed=embed, view=view)
-
+        
+        winner = self.game["black"] if self.player.id == self.game["white"].id else self.game["white"]
+        channel_id = interaction.channel_id
+        
+        if channel_id in active_chess:
+            del active_chess[channel_id]
+        
+        await interaction.response.edit_message(
+            content=f"🏳️ **{self.player.display_name}** resigned. **{winner.display_name}** wins!",
+            embed=_chess_embed(self.game, title="♟️ Resignation"),
+            attachments=[_chess_file(self.game)],
+            view=None
+        )
+    
+    async def _draw_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player.id:
+            await interaction.response.send_message("❌ Only the player can offer a draw!", ephemeral=True)
+            return
+        
+        game = self.game
+        offered = game.get("draw_offered_by")
+        
+        if offered is None:
+            game["draw_offered_by"] = self.player.id
+            opponent = game["black"] if self.player.id == game["white"].id else game["white"]
+            await interaction.response.send_message(
+                f"🤝 **{self.player.display_name}** offers a draw. {opponent.mention} use the draw button to accept.",
+                ephemeral=False
+            )
+        elif offered == self.player.id:
+            await interaction.response.send_message("⏳ You already offered a draw.", ephemeral=True)
+        else:
+            # Opponent accepted - end the game
+            channel_id = interaction.channel_id
+            if channel_id in active_chess:
+                del active_chess[channel_id]
+            await interaction.response.edit_message(
+                content="🤝 Both players agreed to a draw!",
+                embed=_chess_embed(game, title="♟️ Draw Agreed"),
+                attachments=[_chess_file(game)],
+                view=None
+            )
+    
     async def on_timeout(self):
-        pass
+        for item in self.children:
+            item.disabled = True
 
+class DestinationSelect(discord.ui.View):
+    """Destination selector - shows where a selected piece can move."""
+    
+    def __init__(self, game: dict, player: discord.Member, from_sq: int, moves: list):
+        super().__init__(timeout=60)
+        self.game = game
+        self.player = player
+        self.from_sq = from_sq
+        
+        # Add destination buttons (max 23 due to Discord limit)
+        for move in moves[:23]:
+            to_sq = move.to_square
+            to_name = _chess.square_name(to_sq).upper()
+            piece = game["board"].piece_at(to_sq)
+            
+            if piece:
+                emoji = _PIECE_EMOJI[piece.piece_type][0 if piece.color == _chess.WHITE else 1]
+                label = f"Capture {emoji} on {to_name}"
+            else:
+                label = f"Move to {to_name}"
+            
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, custom_id=f"dest_{to_sq}")
+            button.callback = self._make_dest_callback(move)
+            self.add_item(button)
+        
+        # Add cancel button to go back to piece selection
+        cancel = discord.ui.Button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+        cancel.callback = self._cancel_callback
+        self.add_item(cancel)
+    
+    def _make_dest_callback(self, chess_move):  # Renamed parameter to avoid conflict
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.player.id:
+                await interaction.response.send_message("❌ It's not your turn!", ephemeral=True)
+                return
+            
+            board = self.game["board"]
+            move_to_make = chess_move  # Use the parameter from outer function
+            
+            # Handle pawn promotion - default to queen for simplicity
+            if move_to_make.promotion is None and board.piece_at(move_to_make.from_square):
+                piece = board.piece_at(move_to_make.from_square)
+                to_rank = _chess.square_rank(move_to_make.to_square)
+                if piece.piece_type == _chess.PAWN and to_rank in (0, 7):
+                    move_to_make = _chess.Move(move_to_make.from_square, move_to_make.to_square, _chess.QUEEN)
+            
+            board.push(move_to_make)
+            self.game["draw_offered_by"] = None
+            
+            # Check for checkmate
+            if board.is_checkmate():
+                winner = self.game["black"] if board.turn == _chess.WHITE else self.game["white"]
+                channel_id = interaction.channel_id
+                if channel_id in active_chess:
+                    del active_chess[channel_id]
+                await interaction.response.edit_message(
+                    content=f"🏆 **{winner.display_name}** wins by checkmate!",
+                    embed=_chess_embed(self.game, title="♟️ Checkmate!"),
+                    attachments=[_chess_file(self.game)],
+                    view=None
+                )
+                return
+            
+            # Check for draw
+            if board.is_stalemate() or board.is_insufficient_material() or board.is_seventyfive_moves():
+                channel_id = interaction.channel_id
+                if channel_id in active_chess:
+                    del active_chess[channel_id]
+                await interaction.response.edit_message(
+                    content="🤝 The game is a draw!",
+                    embed=_chess_embed(self.game, title="♟️ Draw!"),
+                    attachments=[_chess_file(self.game)],
+                    view=None
+                )
+                return
+            
+            # Next player's turn
+            next_player = self.game["white"] if board.turn == _chess.WHITE else self.game["black"]
+            status_msg = "⚠️ Check! Your king is under attack." if board.is_check() else f"Move played! Your turn, {next_player.mention}."
+            
+            next_view = ChessMoveSelect(self.game, next_player)
+            
+            await interaction.response.edit_message(
+                content=f"{next_player.mention} — your turn!",
+                embed=_chess_embed(self.game, msg=status_msg),
+                attachments=[_chess_file(self.game)],
+                view=next_view
+            )
+        return callback
+    
+    async def _cancel_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player.id:
+            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+            return
+        
+        # Go back to piece selection
+        view = ChessMoveSelect(self.game, self.player)
+        await interaction.response.edit_message(
+            content=f"{self.player.mention} — choose a piece to move:",
+            embed=_chess_embed(self.game),
+            attachments=[_chess_file(self.game)],
+            view=view
+        )
+    
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
+ChessPieceSelect = ChessMoveSelect
+    
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAFIA
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1065,6 +1184,7 @@ class Fun(commands.Cog):
             view=view,
         )
 
+    
     @commands.command(name="move")
     async def prefix_move(self, ctx: commands.Context, move: str = None):
         if not move:

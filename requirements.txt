@@ -10,4 +10,3 @@ yt-dlp
 wavelink
 Pillow
 chess
-akinator
