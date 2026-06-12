@@ -1,4 +1,4 @@
-"""
++"""
 Music cog — VC music player using wavelink + Lavalink (no yt-dlp, no cookies).
 
 Uses a public Lavalink node so you don't need to host your own Java server.
@@ -85,16 +85,15 @@ def _detect_source(query: str) -> str:
 async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
     """
     Search with automatic source detection and fallback chain:
-      1. Detected source (Spotify/Deezer/Apple/SC URL, or YouTube for plain text)
+      1. Detected source (Spotify/Apple/SC URL, or YouTube for plain text)
       2. SoundCloud (if YouTube fails)
-      3. Deezer search (final fallback)
     Returns (results, source_used_label).
     """
     q = query.strip()
     source = _detect_source(q)
 
     # Direct URL sources — pass straight through, no prefix needed
-    if source in ("spotify", "deezer", "applemusic", "soundcloud"):
+    if source in ("spotify", "applemusic", "soundcloud"):
         tracks = await wavelink.Playable.search(q)
         if tracks:
             return tracks, source
@@ -109,11 +108,6 @@ async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
     tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud)
     if tracks:
         return tracks, "soundcloud"
-
-    # SoundCloud failed → try Deezer text search
-    tracks = await wavelink.Playable.search(f"dzsearch:{q}")
-    if tracks:
-        return tracks, "deezer"
 
     return None, "none"
 
