@@ -108,24 +108,6 @@ async def init_db():
         if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
 
         print("✅ Turso state DB connected")
-        
-        # One-time migration: convert any integer IDs in 'seen' to strings in DB
-        try:
-            row = _conn.execute("SELECT value FROM state WHERE key = 'seen'").fetchone()
-            if row:
-                seen_list = json.loads(row[0])
-                if seen_list and isinstance(seen_list[0], int):
-                    fixed = json.dumps([str(uid) for uid in seen_list])
-                    _conn.execute("UPDATE state SET value = ? WHERE key = 'seen'", (fixed,))
-                    _conn.commit()
-                    print("✅ Migrated seen user IDs to string format")
-        except Exception as migration_err:
-            print(f"⚠️  seen migration skipped: {migration_err}")
-
-    except Exception as e:
-        print(
-            f"❌ Turso state DB connection failed: {e}\n"
-        )
 
     except Exception as e:
         print(

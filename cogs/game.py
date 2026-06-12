@@ -91,22 +91,48 @@ async def _count_init_db():
         _count_conn.execute("""
             CREATE TABLE IF NOT EXISTS counting (
                 guild_id     TEXT PRIMARY KEY,
-                channel_id   INTEGER,
+                channel_id   TEXT,
                 count        INTEGER NOT NULL DEFAULT 0,
                 high_score   INTEGER NOT NULL DEFAULT 0,
-                last_user_id INTEGER
+                last_user_id TEXT
             )
         """)
         _count_conn.commit()
+
+        # One-time migration: convert INTEGER channel_id/last_user_id columns to TEXT
+        try:
+            _count_conn.execute("""
+                ALTER TABLE counting RENAME TO counting_old
+            """)
+            _count_conn.execute("""
+                CREATE TABLE counting (
+                    guild_id     TEXT PRIMARY KEY,
+                    channel_id   TEXT,
+                    count        INTEGER NOT NULL DEFAULT 0,
+                    high_score   INTEGER NOT NULL DEFAULT 0,
+                    last_user_id TEXT
+                )
+            """)
+            _count_conn.execute("""
+                INSERT INTO counting
+                SELECT guild_id, CAST(channel_id AS TEXT), count, high_score, CAST(last_user_id AS TEXT)
+                FROM counting_old
+            """)
+            _count_conn.execute("DROP TABLE counting_old")
+            _count_conn.commit()
+            print("✅ Migrated counting table columns to TEXT")
+        except Exception:
+            pass  # Table already migrated or doesn't exist yet — safe to ignore
+
         rows = _count_conn.execute(
             "SELECT guild_id, channel_id, count, high_score, last_user_id FROM counting"
         ).fetchall()
         for guild_id, channel_id, count, high_score, last_user_id in rows:
             _count_data[guild_id] = {
-                "channel_id":   channel_id,
+                "channel_id":   int(channel_id) if channel_id is not None else None,
                 "count":        count,
                 "high_score":   high_score,
-                "last_user_id": last_user_id,
+                "last_user_id": int(last_user_id) if last_user_id is not None else None,
             }
         print("✅ Counting DB ready (Turso)")
     except Exception as e:
@@ -139,7 +165,13 @@ def _count_persist(guild_id: int):
                    count        = excluded.count,
                    high_score   = excluded.high_score,
                    last_user_id = excluded.last_user_id""",
-            (str(guild_id), g["channel_id"], g["count"], g["high_score"], g["last_user_id"])
+            (
+                str(guild_id),
+                str(g["channel_id"]) if g["channel_id"] is not None else None,
+                g["count"],
+                g["high_score"],
+                str(g["last_user_id"]) if g["last_user_id"] is not None else None,
+            )
         )
         _count_conn.commit()
 
@@ -157,10 +189,10 @@ def _count_persist(guild_id: int):
                 _count_conn.execute("""
                     CREATE TABLE IF NOT EXISTS counting (
                         guild_id     TEXT PRIMARY KEY,
-                        channel_id   INTEGER,
+                        channel_id   TEXT,
                         count        INTEGER NOT NULL DEFAULT 0,
                         high_score   INTEGER NOT NULL DEFAULT 0,
-                        last_user_id INTEGER
+                        last_user_id TEXT
                     )
                 """)
                 _count_conn.commit()
