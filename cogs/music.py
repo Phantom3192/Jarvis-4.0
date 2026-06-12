@@ -49,10 +49,11 @@ from cogs.state import (
 MUSIC_COLOR  = discord.Color.from_rgb(29, 185, 84)
 ERROR_COLOR  = discord.Color.red()
 
-# Your self-hosted Lavalink on Wispbyte
-# LAVALINK_NODES = [
-#     {"uri": "http://remarkable-joy:2333", "password": "jarvisbot"},
-# ]
+# Source prefixes for smart detection
+_SPOTIFY_PREFIXES    = ("https://open.spotify.com/", "spotify:")
+_DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
+_APPLE_PREFIXES      = ("https://music.apple.com/",)
+_SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
 LAVALINK_NODES = [
     {
@@ -60,6 +61,61 @@ LAVALINK_NODES = [
         "password": "jarvisbot"
     }
 ]
+
+
+def _detect_source(query: str) -> str:
+    """
+    Returns the best search prefix for a query.
+    - Direct URLs (Spotify, Deezer, Apple Music, SoundCloud) → passed as-is
+    - Plain text → tries YouTube first, falls back handled in _smart_search
+    """
+    q = query.strip()
+    if q.startswith(_SPOTIFY_PREFIXES):
+        return "spotify"
+    if q.startswith(_DEEZER_PREFIXES):
+        return "deezer"
+    if q.startswith(_APPLE_PREFIXES):
+        return "applemusic"
+    if q.startswith(_SOUNDCLOUD_PREFIXES):
+        return "soundcloud"
+    # Plain text or YouTube URL
+    return "ytsearch"
+
+
+async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
+    """
+    Search with automatic source detection and fallback chain:
+      1. Detected source (Spotify/Deezer/Apple/SC URL, or YouTube for plain text)
+      2. SoundCloud (if YouTube fails)
+      3. Deezer search (final fallback)
+    Returns (results, source_used_label).
+    """
+    q = query.strip()
+    source = _detect_source(q)
+
+    # Direct URL sources — pass straight through, no prefix needed
+    if source in ("spotify", "deezer", "applemusic", "soundcloud"):
+        tracks = await wavelink.Playable.search(q)
+        if tracks:
+            return tracks, source
+        return None, source
+
+    # Plain text — try YouTube first
+    tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube)
+    if tracks:
+        return tracks, "youtube"
+
+    # YouTube failed → try SoundCloud
+    tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud)
+    if tracks:
+        return tracks, "soundcloud"
+
+    # SoundCloud failed → try Deezer text search
+    tracks = await wavelink.Playable.search(f"dzsearch:{q}")
+    if tracks:
+        return tracks, "deezer"
+
+    return None, "none"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -103,9 +159,13 @@ def _track_info(track: wavelink.Playable) -> dict[str, object]:
 
 async def _resolve_saved_track(info: dict[str, object]) -> Optional[wavelink.Playable]:
     uri = info.get("uri")
-    if not uri:
+    title = info.get("title", "")
+    author = info.get("author", "")
+    if not uri and not title:
         return None
-    tracks: wavelink.Search = await wavelink.Playable.search(uri, source=wavelink.TrackSource.YouTube)
+    # Try by URI first, then fall back to title+author search
+    query = uri or f"{author} {title}".strip()
+    tracks, _ = await _smart_search(query)
     if not tracks:
         return None
     return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
@@ -123,7 +183,7 @@ async def _find_similar_track(history: list[dict[str, object]]) -> Optional[wave
         query = f"songs like {title}"
     else:
         return None
-    tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+    tracks, _ = await _smart_search(query)
     if not tracks:
         return None
     return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
@@ -221,8 +281,7 @@ class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
         query  = self.query.value.strip()
-        # Search for 5 results
-        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+        tracks, _ = await _smart_search(query)
         if not tracks:
             await interaction.followup.send(embed=_err(f"No results found for **{query}**"))
             return
@@ -465,13 +524,23 @@ class Music(commands.Cog):
         if not player:
             return
 
-        # Search SoundCloud (wavelink handles this cleanly, no bot detection)
-        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+        tracks, source_used = await _smart_search(query)
         if not tracks:
-            await send_fn(embed=_err(f"No results found for **{query}**"))
+            await send_fn(embed=_err(
+                f"No results found for **{query}**\n"
+                "Try a Spotify/Deezer/SoundCloud link, or a different search term."
+            ))
             return
 
         track: wavelink.Playable = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
+
+        # Source label for user feedback
+        source_labels = {
+            "youtube": "YouTube", "soundcloud": "SoundCloud",
+            "deezer": "Deezer", "spotify": "Spotify",
+            "applemusic": "Apple Music", "none": "Unknown"
+        }
+        source_label = source_labels.get(source_used, source_used.title())
 
         if player.playing or player.paused:
             player.queue.put(track)
@@ -481,6 +550,7 @@ class Music(commands.Cog):
                               f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
                 color       = MUSIC_COLOR,
             )
+            embed.set_footer(text=f"Source: {source_label}")
             if track.artwork:
                 embed.set_thumbnail(url=track.artwork)
             await send_fn(embed=embed)
@@ -488,7 +558,9 @@ class Music(commands.Cog):
             await player.play(track, volume=100)
             self._last_requester[player.guild.id] = author.id
             append_song_history(author.id, _track_info(track))
-            await send_fn(embed=_track_embed(track, requester=author))
+            embed = _track_embed(track, requester=author)
+            embed.set_footer(text=f"Source: {source_label}")
+            await send_fn(embed=embed)
 
     async def _do_skip(self, guild, send_fn) -> None:
         player: wavelink.Player | None = guild.voice_client
@@ -733,7 +805,7 @@ class Music(commands.Cog):
 
     @prefix_playlist.command(name="add")
     async def playlist_add(self, ctx: commands.Context, name: str, *, query: str) -> None:
-        tracks: wavelink.Search = await wavelink.Playable.search(query, source=wavelink.TrackSource.YouTube)
+        tracks, _ = await _smart_search(query)
         if not tracks:
             await ctx.reply(f"❌ No results found for **{query}**")
             return
