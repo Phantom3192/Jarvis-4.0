@@ -1,4 +1,4 @@
-+"""
+"""
 Music cog — VC music player using wavelink + Lavalink (no yt-dlp, no cookies).
 
 Uses a public Lavalink node so you don't need to host your own Java server.
