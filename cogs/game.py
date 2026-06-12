@@ -1258,6 +1258,18 @@ class Fun(commands.Cog):
         """Called by discord.py after the cog is fully loaded — safe to await here."""
         await _count_init_db()
 
+    async def cog_unload(self) -> None:
+        """Force-flush all pending counting saves before unload/shutdown."""
+        for key in list(_count_save_tasks):
+            task = _count_save_tasks.get(key)
+            if task and not task.done():
+                task.cancel()
+        for guild_id_str in list(_count_data):
+            try:
+                _count_persist(int(guild_id_str))
+            except Exception:
+                pass
+
     # ── Hangman ───────────────────────────────────────────────────────────────
 
     @app_commands.command(name="hangman", description="Start a game of hangman!")
@@ -1634,7 +1646,7 @@ class Fun(commands.Cog):
     async def slash_countsetup(self, interaction: discord.Interaction, channel: discord.TextChannel):
         g = _count_guild(interaction.guild_id)
         g["channel_id"] = channel.id
-        _count_schedule_save(interaction.guild_id)
+        _count_persist(interaction.guild_id)  # immediate save, not debounced
         await interaction.response.send_message(
             f"✅ Counting channel set to {channel.mention}!\n"
             f"Count up from **1** — no double-counting allowed."
@@ -1646,7 +1658,7 @@ class Fun(commands.Cog):
         channel = channel or ctx.channel
         g = _count_guild(ctx.guild.id)
         g["channel_id"] = channel.id
-        _count_schedule_save(ctx.guild.id)
+        _count_persist(ctx.guild.id)  # immediate save, not debounced
         await ctx.reply(f"✅ Counting channel set to {channel.mention}!\nCount up from **1** — no double-counting allowed.")
 
     @app_commands.command(name="countremove", description="Remove the counting channel setup")
@@ -2117,9 +2129,6 @@ class AkinatorView(discord.ui.View):
         except Exception:
             pass
 
-from cogs.state import _conn
-rows = _conn.execute("SELECT key, value FROM state").fetchall()
-print(rows)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Fun(bot))
