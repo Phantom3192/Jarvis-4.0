@@ -128,7 +128,8 @@ def _count_persist(guild_id: int):
     g = _count_data.get(str(guild_id))
     if not g:
         return
-    try:
+
+    def _do_save():
         _count_conn.execute(
             """INSERT INTO counting (guild_id, channel_id, count, high_score, last_user_id)
                VALUES (?, ?, ?, ?, ?)
@@ -140,8 +141,36 @@ def _count_persist(guild_id: int):
             (str(guild_id), g["channel_id"], g["count"], g["high_score"], g["last_user_id"])
         )
         _count_conn.commit()
+
+    try:
+        _do_save()
     except Exception as e:
-        print(f"❌ Counting DB save error: {e}")
+        msg = str(e).lower()
+        if "stream not found" in msg or ("404" in msg and "hrana" in msg):
+            print("[Counting] Stream error, attempting reconnect...")
+            global _count_conn
+            try:
+                import libsql_experimental as libsql
+                turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
+                turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
+                _count_conn = libsql.connect(database=turso_url, auth_token=turso_token)
+                _count_conn.execute("""
+                    CREATE TABLE IF NOT EXISTS counting (
+                        guild_id     TEXT PRIMARY KEY,
+                        channel_id   INTEGER,
+                        count        INTEGER NOT NULL DEFAULT 0,
+                        high_score   INTEGER NOT NULL DEFAULT 0,
+                        last_user_id INTEGER
+                    )
+                """)
+                _count_conn.commit()
+                _do_save()
+                print("[Counting] Reconnected and saved successfully.")
+            except Exception as e2:
+                print(f"❌ Counting DB reconnect failed: {e2}")
+                _count_conn = None
+        else:
+            print(f"❌ Counting DB save error: {e}")
 
 
 def _count_schedule_save(guild_id: int):
@@ -1224,7 +1253,10 @@ def _mafia_guide_embed() -> discord.Embed:
 class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        asyncio.create_task(_count_init_db())
+
+    async def cog_load(self) -> None:
+        """Called by discord.py after the cog is fully loaded — safe to await here."""
+        await _count_init_db()
 
     # ── Hangman ───────────────────────────────────────────────────────────────
 
