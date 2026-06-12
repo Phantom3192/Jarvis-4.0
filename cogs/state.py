@@ -45,7 +45,7 @@ _data: dict[str, Any] = {
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
 _SERIALISE: dict[str, Any] = {
     "bans":            lambda: _data["bans"],
-    "seen":            lambda: list(_data["seen"]),
+    "seen":            lambda: [str(uid) for uid in _data["seen"]],
     "stats":           lambda: _data["stats"],
     "prompts":         lambda: _data["prompts"],
     "rate_limits":     lambda: _data["rate_limits"],
@@ -96,7 +96,7 @@ async def init_db():
         db   = {row[0]: json.loads(row[1]) for row in rows}
 
         if "bans"           in db: _data["bans"]           = db["bans"]
-        if "seen"           in db: _data["seen"]           = set(db["seen"])
+        if "seen"           in db: _data["seen"]           = set(int(uid) for uid in db["seen"])
         if "stats"          in db: _data["stats"]          = db["stats"]
         if "prompts"        in db: _data["prompts"]        = db["prompts"]
         if "settings"       in db: _data["settings"]       = db["settings"]
@@ -108,6 +108,23 @@ async def init_db():
         if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
 
         print("✅ Turso state DB connected")
+        
+        # One-time migration: convert any integer IDs in 'seen' to strings in DB
+        try:
+            row = _conn.execute("SELECT value FROM state WHERE key = 'seen'").fetchone()
+            if row:
+                seen_list = json.loads(row[0])
+                if seen_list and isinstance(seen_list[0], int):
+                    fixed = json.dumps([str(uid) for uid in seen_list])
+                    _conn.execute("UPDATE state SET value = ? WHERE key = 'seen'", (fixed,))
+                    _conn.commit()
+                    print("✅ Migrated seen user IDs to string format")
+        except Exception as migration_err:
+            print(f"⚠️  seen migration skipped: {migration_err}")
+
+    except Exception as e:
+        print(
+            f"❌ Turso state DB connection failed: {e}\n"
 
     except Exception as e:
         print(
