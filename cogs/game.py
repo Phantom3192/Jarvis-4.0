@@ -123,6 +123,7 @@ def _count_guild(guild_id: int) -> dict:
 
 def _count_persist(guild_id: int):
     """Upsert guild counting row to Turso. No-op if not connected."""
+    global _count_conn
     if _count_conn is None:
         return
     g = _count_data.get(str(guild_id))
@@ -148,7 +149,6 @@ def _count_persist(guild_id: int):
         msg = str(e).lower()
         if "stream not found" in msg or ("404" in msg and "hrana" in msg):
             print("[Counting] Stream error, attempting reconnect...")
-            global _count_conn
             try:
                 import libsql_experimental as libsql
                 turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
