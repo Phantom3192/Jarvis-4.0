@@ -125,6 +125,7 @@ async def init_db():
     except Exception as e:
         print(
             f"❌ Turso state DB connection failed: {e}\n"
+        )
 
     except Exception as e:
         print(
