@@ -100,29 +100,6 @@ async def _count_init_db():
         _count_conn.commit()
 
         # One-time migration: convert INTEGER channel_id/last_user_id columns to TEXT
-        try:
-            _count_conn.execute("""
-                ALTER TABLE counting RENAME TO counting_old
-            """)
-            _count_conn.execute("""
-                CREATE TABLE counting (
-                    guild_id     TEXT PRIMARY KEY,
-                    channel_id   TEXT,
-                    count        INTEGER NOT NULL DEFAULT 0,
-                    high_score   INTEGER NOT NULL DEFAULT 0,
-                    last_user_id TEXT
-                )
-            """)
-            _count_conn.execute("""
-                INSERT INTO counting
-                SELECT guild_id, CAST(channel_id AS TEXT), count, high_score, CAST(last_user_id AS TEXT)
-                FROM counting_old
-            """)
-            _count_conn.execute("DROP TABLE counting_old")
-            _count_conn.commit()
-            print("✅ Migrated counting table columns to TEXT")
-        except Exception:
-            pass  # Table already migrated or doesn't exist yet — safe to ignore
 
         rows = _count_conn.execute(
             "SELECT guild_id, channel_id, count, high_score, last_user_id FROM counting"
