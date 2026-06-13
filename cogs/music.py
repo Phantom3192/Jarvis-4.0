@@ -76,6 +76,12 @@ LAVALINK_NODES = [
     }
 ]
 
+# Minimum gap (in seconds) between consecutive track-load requests sent to
+# Lavalink/YouTube, per guild. Helps avoid bursts of requests (e.g. spamming
+# !play, or loading a whole playlist at once) that can trigger YouTube's
+# "Sign in to confirm you're not a bot" bot-detection.
+MIN_TRACK_LOAD_GAP = 2.5
+
 
 def _detect_source(query: str) -> str:
     """
@@ -419,6 +425,8 @@ class Music(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._last_requester: dict[int, int] = {}
+        self._last_request_time: float = 0.0
+        self._request_lock = asyncio.Lock()
 
     # ── Feature toggle gate ───────────────────────────────────────────────────
     # When MUSIC_FEATURE_DOWN is True, every prefix command (cog_check) and
@@ -565,10 +573,29 @@ class Music(commands.Cog):
         embed.set_footer(text="Controls auto-update when you click buttons")
         return embed
 
+    # ── Request pacing ─────────────────────────────────────────────────────────
+
+    async def _pace_request(self, guild_id: int = 0) -> None:
+        """
+        Sleep just enough so consecutive track-load requests sent to Lavalink
+        are spaced at least MIN_TRACK_LOAD_GAP seconds apart — GLOBALLY,
+        across all guilds/users, since they all share the same Lavalink node.
+        Uses a lock so concurrent requests queue up and wait their turn
+        instead of all checking the timestamp simultaneously.
+        """
+        async with self._request_lock:
+            now = asyncio.get_event_loop().time()
+            wait = MIN_TRACK_LOAD_GAP - (now - self._last_request_time)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request_time = asyncio.get_event_loop().time()
+
     async def _do_play(self, guild, author, query: str, send_fn) -> None:
         player = await self._get_player(guild, author, send_fn)
         if not player:
             return
+
+        await self._pace_request(guild.id)
 
         tracks, source_used = await _smart_search(query)
         if not tracks:
@@ -829,6 +856,7 @@ class Music(commands.Cog):
 
         playable_tracks: list[wavelink.Playable] = []
         for info in tracks:
+            await self._pace_request(ctx.guild.id)
             resolved = await _resolve_saved_track(info)
             if resolved:
                 playable_tracks.append(resolved)
