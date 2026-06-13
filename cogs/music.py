@@ -49,6 +49,20 @@ from cogs.state import (
 MUSIC_COLOR  = discord.Color.from_rgb(29, 185, 84)
 ERROR_COLOR  = discord.Color.red()
 
+# ── Temporary feature toggle ────────────────────────────────────────────────
+# Set to True to make ALL music/VC commands respond with a "temporarily down"
+# message instead of running. Set back to False to restore normal behaviour.
+MUSIC_FEATURE_DOWN = True
+
+MUSIC_DOWN_EMBED = discord.Embed(
+    title="🚧 Music is temporarily down",
+    description=(
+        "Music/VC commands are currently disabled while we fix some issues "
+        "with the audio backend. Please check back later!"
+    ),
+    color=discord.Color.orange(),
+)
+
 # Source prefixes for smart detection
 _SPOTIFY_PREFIXES    = ("https://open.spotify.com/", "spotify:")
 _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
@@ -405,6 +419,26 @@ class Music(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._last_requester: dict[int, int] = {}
+
+    # ── Feature toggle gate ───────────────────────────────────────────────────
+    # When MUSIC_FEATURE_DOWN is True, every prefix command (cog_check) and
+    # every slash command (interaction_check) in this cog responds with the
+    # "temporarily down" message instead of running the actual command.
+
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        if MUSIC_FEATURE_DOWN:
+            await ctx.reply(embed=MUSIC_DOWN_EMBED)
+            return False
+        return True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if MUSIC_FEATURE_DOWN:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=MUSIC_DOWN_EMBED, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=MUSIC_DOWN_EMBED, ephemeral=True)
+            return False
+        return True
 
     # ── Lavalink node setup ───────────────────────────────────────────────────
 
