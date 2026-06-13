@@ -71,7 +71,7 @@ _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
 LAVALINK_NODES = [
     {
-        "uri": "http://happy-joy.railway.internal:2333",
+        "uri": "http://noble-serenity.railway.internal:2333",
         "password": "jarvisbot"
     }
 ]
@@ -587,7 +587,10 @@ class Music(commands.Cog):
             now = asyncio.get_event_loop().time()
             wait = MIN_TRACK_LOAD_GAP - (now - self._last_request_time)
             if wait > 0:
+                print(f"[Music] Pacing: delaying track-load request by {wait:.2f}s")
                 await asyncio.sleep(wait)
+            else:
+                print("[Music] Pacing: no delay needed (gap already sufficient)")
             self._last_request_time = asyncio.get_event_loop().time()
 
     async def _do_play(self, guild, author, query: str, send_fn) -> None:
