@@ -64,7 +64,6 @@ MUSIC_DOWN_EMBED = discord.Embed(
 )
 
 # Source prefixes for smart detection
-
 _SPOTIFY_PREFIXES    = ("https://open.spotify.com/", "spotify:")
 _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
@@ -72,7 +71,7 @@ _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
 LAVALINK_NODES = [
     {
-        "uri": "http://happy-joy.railway.internal:2333",
+        "uri": "http://noble-serenity.railway.internal:2333",
         "password": "jarvisbot"
     }
 ]
@@ -426,14 +425,32 @@ class Music(commands.Cog):
     # every slash command (interaction_check) in this cog responds with the
     # "temporarily down" message instead of running the actual command.
 
+    # ── Feature toggle gate ───────────────────────────────────────────────────
+    # When MUSIC_FEATURE_DOWN is True, every normal prefix command (cog_check)
+    # and every normal slash command (interaction_check) in this cog responds
+    # with the "temporarily down" message instead of running — for EVERYONE,
+    # including the bot owner. Only the dedicated `force*` commands below
+    # (forcejoin, forceplay, forcestop, ...) bypass this, so the owner can
+    # still test the VC/music backend in private.
+
+    _FORCE_COMMAND_NAMES = {
+        "forcejoin", "forceplay", "forcestop", "forcepause", "forceresume",
+        "forceskip", "forcequeue", "forcenp", "forcevolume", "forcecontrols",
+    }
+
     async def cog_check(self, ctx: commands.Context) -> bool:
-        if MUSIC_FEATURE_DOWN and not await self.bot.is_owner(ctx.author):
+        if ctx.command and ctx.command.qualified_name in self._FORCE_COMMAND_NAMES:
+            return True
+        if MUSIC_FEATURE_DOWN:
             await ctx.reply(embed=MUSIC_DOWN_EMBED)
             return False
         return True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if MUSIC_FEATURE_DOWN and not await self.bot.is_owner(interaction.user):
+        cmd_name = interaction.command.name if interaction.command else ""
+        if cmd_name in self._FORCE_COMMAND_NAMES:
+            return True
+        if MUSIC_FEATURE_DOWN:
             if interaction.response.is_done():
                 await interaction.followup.send(embed=MUSIC_DOWN_EMBED, ephemeral=True)
             else:
@@ -911,6 +928,83 @@ class Music(commands.Cog):
             return
         await interaction.response.defer(thinking=True)
         await self._do_play(interaction.guild, interaction.user, query.strip(), interaction.followup.send)
+
+    @commands.command(name="forcestop", aliases=["fstop"])
+    @commands.is_owner()
+    async def prefix_forcestop(self, ctx: commands.Context) -> None:
+        """Owner-only: force-stop and disconnect, bypassing feature-down."""
+        await self._do_stop(ctx.guild, ctx.reply)
+
+    @app_commands.command(name="forcestop", description="(Owner) Force stop and disconnect")
+    async def slash_forcestop(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await self._do_stop(interaction.guild, interaction.followup.send)
+
+    @commands.command(name="forcepause", aliases=["fpause"])
+    @commands.is_owner()
+    async def prefix_forcepause(self, ctx: commands.Context) -> None:
+        """Owner-only: force pause/resume toggle, bypassing feature-down."""
+        await self._do_pause(ctx.guild, ctx.reply)
+
+    @app_commands.command(name="forcepause", description="(Owner) Force pause/resume toggle")
+    async def slash_forcepause(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await self._do_pause(interaction.guild, interaction.followup.send)
+
+    @commands.command(name="forceresume", aliases=["fresume"])
+    @commands.is_owner()
+    async def prefix_forceresume(self, ctx: commands.Context) -> None:
+        """Owner-only: force resume playback, bypassing feature-down."""
+        player: wavelink.Player | None = ctx.guild.voice_client
+        if not player or not player.paused:
+            await ctx.reply(embed=_err("Nothing is paused."))
+            return
+        await player.pause(False)
+        await ctx.reply("▶️ Resumed (force).")
+
+    @commands.command(name="forceskip", aliases=["fskip"])
+    @commands.is_owner()
+    async def prefix_forceskip(self, ctx: commands.Context) -> None:
+        """Owner-only: force skip the current track, bypassing feature-down."""
+        await self._do_skip(ctx.guild, ctx.reply)
+
+    @app_commands.command(name="forceskip", description="(Owner) Force skip the current track")
+    async def slash_forceskip(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await self._do_skip(interaction.guild, interaction.followup.send)
+
+    @commands.command(name="forcequeue", aliases=["fqueue", "fq"])
+    @commands.is_owner()
+    async def prefix_forcequeue(self, ctx: commands.Context) -> None:
+        """Owner-only: force show the queue, bypassing feature-down."""
+        await self._do_queue(ctx.guild, ctx.reply)
+
+    @commands.command(name="forcenp", aliases=["fnp"])
+    @commands.is_owner()
+    async def prefix_forcenp(self, ctx: commands.Context) -> None:
+        """Owner-only: force show now-playing, bypassing feature-down."""
+        await self._do_np(ctx.guild, ctx.reply)
+
+    @commands.command(name="forcevolume", aliases=["fvol"])
+    @commands.is_owner()
+    async def prefix_forcevolume(self, ctx: commands.Context, level: int) -> None:
+        """Owner-only: force set volume, bypassing feature-down."""
+        await self._do_volume(ctx.guild, level, ctx.reply)
+
+    @commands.command(name="forcecontrols", aliases=["fctrl", "fcp"])
+    @commands.is_owner()
+    async def prefix_forcecontrols(self, ctx: commands.Context) -> None:
+        """Owner-only: force open the music control panel, bypassing feature-down."""
+        await self._send_controls(ctx.guild, ctx.reply)
 
     @commands.command(name="autoplay")
     async def prefix_autoplay(self, ctx: commands.Context, value: str = None) -> None:

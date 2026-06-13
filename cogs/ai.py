@@ -33,6 +33,7 @@ from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session, safe_reply, safe_send
 from cogs.history import add_message as _db_add_message, get_history as _db_get_history, clear_history as _db_clear_history
 from cogs.memory import extract_facts, save_facts, get_facts, build_memory_prompt, forget_facts, get_facts_count
+from cogs import music as _music_module
 
 # ── API keys & models ─────────────────────────────────────────────────────────
 
@@ -725,6 +726,9 @@ async def _try_intent_intercept(
     if _INTENT_PLAY.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             query = re.sub(
                 r"^\s*(play|put\s+on|start\s+playing|queue\s+up|add\s+to\s+queue)\s*",
                 "", user_text, flags=re.IGNORECASE
@@ -740,6 +744,9 @@ async def _try_intent_intercept(
     if _INTENT_SKIP.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_skip(message.guild, send_fn)
             return True
@@ -748,6 +755,9 @@ async def _try_intent_intercept(
     if _INTENT_STOP_MUSIC.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_stop(message.guild, send_fn)
             return True
@@ -756,6 +766,9 @@ async def _try_intent_intercept(
     if _INTENT_PAUSE_MUSIC.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_pause(message.guild, send_fn)
             return True
@@ -764,6 +777,9 @@ async def _try_intent_intercept(
     if _INTENT_QUEUE.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_queue(message.guild, send_fn)
             return True
@@ -772,6 +788,9 @@ async def _try_intent_intercept(
     if _INTENT_NOWPLAYING.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_np(message.guild, send_fn)
             return True
@@ -799,6 +818,9 @@ async def _try_intent_intercept(
     if _INTENT_CONTROLS.search(user_text) and message.guild:
         music_cog = bot.cogs.get("Music")
         if music_cog:
+            if _music_module.MUSIC_FEATURE_DOWN:
+                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._send_controls(message.guild, send_fn)
             return True
