@@ -71,7 +71,7 @@ _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
 LAVALINK_NODES = [
     {
-        "uri": "http://noble-serenity.railway.internal:2333",
+        "uri": "http://happy-joy.railway.internal:2333",
         "password": "jarvisbot"
     }
 ]
