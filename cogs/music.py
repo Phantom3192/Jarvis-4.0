@@ -64,6 +64,7 @@ MUSIC_DOWN_EMBED = discord.Embed(
 )
 
 # Source prefixes for smart detection
+
 _SPOTIFY_PREFIXES    = ("https://open.spotify.com/", "spotify:")
 _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
@@ -71,7 +72,7 @@ _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
 LAVALINK_NODES = [
     {
-        "uri": "http://noble-serenity.railway.internal:2333",
+        "uri": "http://happy-joy.railway.internal:2333",
         "password": "jarvisbot"
     }
 ]
@@ -426,13 +427,13 @@ class Music(commands.Cog):
     # "temporarily down" message instead of running the actual command.
 
     async def cog_check(self, ctx: commands.Context) -> bool:
-        if MUSIC_FEATURE_DOWN:
+        if MUSIC_FEATURE_DOWN and not await self.bot.is_owner(ctx.author):
             await ctx.reply(embed=MUSIC_DOWN_EMBED)
             return False
         return True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if MUSIC_FEATURE_DOWN:
+        if MUSIC_FEATURE_DOWN and not await self.bot.is_owner(interaction.user):
             if interaction.response.is_done():
                 await interaction.followup.send(embed=MUSIC_DOWN_EMBED, ephemeral=True)
             else:
@@ -866,6 +867,50 @@ class Music(commands.Cog):
             await ctx.reply(f"❌ Playlist `{name}` not found.")
             return
         await ctx.reply(f"✅ Deleted playlist `{name}`.")
+
+    # ── Owner-only testing commands ─────────────────────────────────────────
+    # These bypass MUSIC_FEATURE_DOWN entirely (cog_check already allows the
+    # bot owner through), so you can test the VC/music backend even while it
+    # shows "temporarily down" to everyone else.
+
+    @commands.command(name="forcejoin", aliases=["fjoin"])
+    @commands.is_owner()
+    async def prefix_forcejoin(self, ctx: commands.Context) -> None:
+        """Owner-only: force the bot to join your current voice channel."""
+        player = await self._get_player(ctx.guild, ctx.author, ctx.reply)
+        if not player:
+            return
+        await ctx.reply(f"✅ Joined **{player.channel.name}** (force).")
+
+    @commands.command(name="forceplay", aliases=["fplay"])
+    @commands.is_owner()
+    async def prefix_forceplay(self, ctx: commands.Context, *, query: str = "") -> None:
+        """Owner-only: force-play a track, bypassing the feature-down message."""
+        if not query:
+            await ctx.reply("**Usage:** `!forceplay <song name or YouTube URL>`")
+            return
+        async with ctx.typing():
+            await self._do_play(ctx.guild, ctx.author, query.strip(), ctx.reply)
+
+    @app_commands.command(name="forcejoin", description="(Owner) Force the bot to join your VC")
+    async def slash_forcejoin(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        player = await self._get_player(interaction.guild, interaction.user, interaction.followup.send)
+        if not player:
+            return
+        await interaction.followup.send(f"✅ Joined **{player.channel.name}** (force).")
+
+    @app_commands.command(name="forceplay", description="(Owner) Force-play a track, bypassing feature-down")
+    @app_commands.describe(query="Song name or YouTube URL")
+    async def slash_forceplay(self, interaction: discord.Interaction, query: str) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await self._do_play(interaction.guild, interaction.user, query.strip(), interaction.followup.send)
 
     @commands.command(name="autoplay")
     async def prefix_autoplay(self, ctx: commands.Context, value: str = None) -> None:
