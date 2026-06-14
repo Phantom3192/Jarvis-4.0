@@ -69,20 +69,13 @@ _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
 _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
-# LAVALINK_NODES = [
-#     {
-#         "host": "happy-joy.railway.internal",
-#         "port": 2333,
-#         "password": "jarvisbot"
-#     }
-# ]
-
 LAVALINK_NODES = [
-    {
-        "host": "sg2-nodelink.nyxbot.app",
-        "port": 3000,
-        "password": "nyxbot.app/support"
-    }
+        {
+  "host": "lavalink.jirayu.net",
+  "password": "youshallnotpass",
+  "secure": False ,
+  "port": 13592 ,
+  }
 ]
 
 # Minimum gap (in seconds) between consecutive track-load requests sent to
@@ -483,12 +476,11 @@ class Music(commands.Cog):
     async def _connect_lavalink(self) -> None:
         await self.bot.wait_until_ready()
         await asyncio.sleep(2)
-        # nodes = [
-        #     wavelink.Node(uri=n["uri"], password=n["password"])
-        #     for n in LAVALINK_NODES
-        # ]
         nodes = [
-            wavelink.Node(uri=f"http://{n['host']}:{n['port']}", password=n["password"])
+            wavelink.Node(
+                uri=f"{'https' if n.get('secure', False) else 'http'}://{n['host']}:{n['port']}",
+                password=n["password"]
+            )
             for n in LAVALINK_NODES
         ]
         await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
@@ -600,10 +592,7 @@ class Music(commands.Cog):
             now = asyncio.get_event_loop().time()
             wait = MIN_TRACK_LOAD_GAP - (now - self._last_request_time)
             if wait > 0:
-                print(f"[Music] Pacing: delaying track-load request by {wait:.2f}s")
                 await asyncio.sleep(wait)
-            else:
-                print("[Music] Pacing: no delay needed (gap already sufficient)")
             self._last_request_time = asyncio.get_event_loop().time()
 
     async def _do_play(self, guild, author, query: str, send_fn) -> None:
