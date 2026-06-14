@@ -78,10 +78,7 @@ LAVALINK_NODES = [
   }
 ]
 
-# Minimum gap (in seconds) between consecutive track-load requests sent to
-# Lavalink/YouTube, per guild. Helps avoid bursts of requests (e.g. spamming
-# !play, or loading a whole playlist at once) that can trigger YouTube's
-# "Sign in to confirm you're not a bot" bot-detection.
+# Minimum gap (in seconds) between consecutive track-load requests.
 MIN_TRACK_LOAD_GAP = 2.5
 
 
