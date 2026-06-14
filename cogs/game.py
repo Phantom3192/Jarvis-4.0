@@ -1124,6 +1124,44 @@ class MafiaJoinView(discord.ui.View):
             del active_mafia[self.channel_id]
 
 
+MAFIA_ROLE_COLOR = {
+    "mafia":     discord.Color.red(),
+    "detective": discord.Color.blue(),
+    "doctor":    discord.Color.green(),
+    "villager":  discord.Color.gold(),
+}
+
+MAFIA_ROLE_TIPS = {
+    "mafia":     "Blend in during the day. Vote with the village early so you don't seem suspicious.",
+    "detective": "Don't reveal yourself too soon — once the Mafia knows who you are, you're a target.",
+    "doctor":    "Consider protecting yourself or the Detective. You can also protect the same person twice.",
+    "villager":  "Pay close attention to who votes for whom. Patterns reveal the Mafia.",
+}
+
+
+def _mafia_role_dm_embed(role: str, guild_name: str) -> discord.Embed:
+    emoji = MAFIA_ROLES[role]
+    color = MAFIA_ROLE_COLOR[role]
+    tip   = MAFIA_ROLE_TIPS[role]
+
+    role_descriptions = {
+        "mafia":     "Each night, you and your team secretly eliminate one player. During the day, pretend to be a villager.",
+        "detective": "Each night, you investigate one player and learn whether they are Mafia or not. Use this info wisely.",
+        "doctor":    "Each night, you protect one player from being eliminated by the Mafia. You can protect yourself too.",
+        "villager":  "You have no special power. Your weapon is your instincts — find the Mafia through discussion and voting.",
+    }
+
+    e = discord.Embed(
+        title=f"{emoji}  You are the {role.capitalize()}",
+        description=role_descriptions[role],
+        color=color,
+    )
+    e.add_field(name="🏠 Server", value=guild_name, inline=True)
+    e.add_field(name="💡 Tip", value=tip, inline=False)
+    e.set_footer(text="Keep your role secret! Good luck 🎭")
+    return e
+
+
 async def _mafia_begin(interaction: discord.Interaction, game: dict):
     """Assign roles and send DMs, then begin Day 1."""
     player_list = [v["member"] for v in game["players"].values()]
@@ -1134,17 +1172,12 @@ async def _mafia_begin(interaction: discord.Interaction, game: dict):
     game["votes"]   = {}
     game["night_actions"] = {}
 
-    # DM roles
+    # DM roles with clean embeds
     dm_failures = []
     for uid, v in assigned.items():
         role = v["role"]
-        emoji = MAFIA_ROLES[role]
-        desc  = MAFIA_ROLE_DESC[role]
         try:
-            await v["member"].send(
-                f"🎭 **Mafia** — Your role in **{interaction.guild.name}**:\n\n"
-                f"{emoji} {desc}"
-            )
+            await v["member"].send(embed=_mafia_role_dm_embed(role, interaction.guild.name))
         except discord.Forbidden:
             dm_failures.append(v["member"].display_name)
 
@@ -1160,6 +1193,85 @@ async def _mafia_begin(interaction: discord.Interaction, game: dict):
     # Send a fresh message at the bottom so players don't have to scroll
     msg = await interaction.channel.send(embed=embed, view=view)
     game["last_msg"] = msg
+
+
+# ── Tracks which game each user is currently playing in (for DM buttons) ──────
+# user_id → {"channel_id": int, "guild_id": int}
+_mafia_user_game: dict[int, dict] = {}
+
+
+class MafiaNightActionView(discord.ui.View):
+    """Sent via DM to Mafia / Detective / Doctor so they pick a target privately."""
+
+    def __init__(self, game: dict, channel_id: int, actor_id: int, role: str, targets: list):
+        super().__init__(timeout=180)
+        self.game       = game
+        self.channel_id = channel_id
+        self.actor_id   = actor_id
+        self.role       = role
+
+        action_labels = {
+            "mafia":     "☠️ Eliminate",
+            "detective": "🔍 Investigate",
+            "doctor":    "💉 Protect",
+        }
+        action_label = action_labels.get(role, "Choose")
+
+        for member in targets:
+            btn = discord.ui.Button(
+                label=f"{action_label}  {member.display_name}",
+                style=discord.ButtonStyle.danger if role == "mafia" else discord.ButtonStyle.primary,
+                custom_id=f"mafnight_{member.id}",
+            )
+            btn.callback = self._make_callback(member)
+            self.add_item(btn)
+
+    def _make_callback(self, target):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.actor_id:
+                await interaction.response.send_message("❌ This isn't your action!", ephemeral=True)
+                return
+
+            game = active_mafia.get(self.channel_id)
+            if not game or game["phase"] != "night":
+                await interaction.response.edit_message(
+                    content="⚠️ The night phase has already ended.", view=None
+                )
+                return
+
+            if not game["players"].get(target.id, {}).get("alive"):
+                await interaction.response.edit_message(
+                    content=f"❌ **{target.display_name}** is no longer alive. Pick someone else.",
+                    view=self,
+                )
+                return
+
+            game["night_actions"][self.role] = target.id
+            self.stop()
+
+            # Disable all buttons so they can't change their mind
+            for item in self.children:
+                item.disabled = True
+
+            if self.role == "detective":
+                is_mafia = game["players"][target.id]["role"] == "mafia"
+                result = "🔫 **MAFIA**" if is_mafia else "✅ **NOT Mafia**"
+                await interaction.response.edit_message(
+                    content=f"🔍 **Investigation result:** {target.display_name} is {result}.",
+                    view=self,
+                )
+            else:
+                action_word = "targeted" if self.role == "mafia" else "protected"
+                await interaction.response.edit_message(
+                    content=f"✅ You have {action_word} **{target.display_name}** tonight.",
+                    view=self,
+                )
+
+        return callback
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
 
 
 class MafiaDayView(discord.ui.View):
@@ -1240,34 +1352,65 @@ class MafiaDayView(discord.ui.View):
         game["phase"]         = "night"
         game["night_actions"] = {}
         embed = _mafia_embed(game, title=f"🌙 Night {game['day']}",
-                             msg=f"{elim_msg}\n\n**Night falls...** Mafia, Detective, and Doctor: check your DMs and submit your action with `!mafaction @user`.")
+                             msg=f"{elim_msg}\n\n**Night falls...** 🌙 Mafia, Detective, and Doctor: **check your DMs** — you'll get buttons to pick your target privately.")
         self.stop()
         view = MafiaNightView(game, self.channel_id)
         # Disable the old message and send a fresh one at the bottom
         await interaction.response.edit_message(embed=_mafia_embed(game, title=f"🌙 Night {game['day']} — see below"), view=None)
         msg = await interaction.channel.send(embed=embed, view=view)
         game["last_msg"] = msg
-        # DM special roles
+        # DM special roles with private button views
         for uid2, v in game["players"].items():
             if not v["alive"]:
                 continue
-            if v["role"] == "mafia":
-                targets = [p["member"].display_name for p in _mafia_alive(game) if p["member"].id != uid2 and p["role"] != "mafia"]
+            role = v["role"]
+            if role == "mafia":
+                targets = [p["member"] for p in _mafia_alive(game)
+                           if p["member"].id != uid2 and p["role"] != "mafia"]
+                if not targets:
+                    continue
+                view = MafiaNightActionView(game, self.channel_id, uid2, "mafia", targets)
+                e = discord.Embed(
+                    title="🌙  Night falls — Mafia action",
+                    description=f"Choose someone to **eliminate** tonight.\nPick from the buttons below.",
+                    color=discord.Color.dark_red(),
+                )
+                e.add_field(name="🎯 Targets", value="\n".join(f"• {m.display_name}" for m in targets), inline=False)
+                e.set_footer(text=f"Night {game['day']} • Your choice is private")
                 try:
-                    await v["member"].send(
-                        f"🌙 **Night {game['day']}** — Choose your target:\n"
-                        f"Alive non-mafia players: {', '.join(targets)}\n"
-                        f"Use `!mafaction @target` in the game channel to eliminate."
-                    )
+                    await v["member"].send(embed=e, view=view)
                 except discord.Forbidden:
                     pass
-            elif v["role"] in ("detective", "doctor"):
-                action = "investigate" if v["role"] == "detective" else "protect"
+            elif role == "detective":
+                targets = [p["member"] for p in _mafia_alive(game) if p["member"].id != uid2]
+                if not targets:
+                    continue
+                view = MafiaNightActionView(game, self.channel_id, uid2, "detective", targets)
+                e = discord.Embed(
+                    title="🌙  Night falls — Detective action",
+                    description="Choose someone to **investigate**.\nYou'll instantly learn if they're Mafia.",
+                    color=discord.Color.blue(),
+                )
+                e.add_field(name="🔍 Suspects", value="\n".join(f"• {m.display_name}" for m in targets), inline=False)
+                e.set_footer(text=f"Night {game['day']} • Result shown only to you")
                 try:
-                    await v["member"].send(
-                        f"🌙 **Night {game['day']}** — Choose who to **{action}**:\n"
-                        f"Use `!mafaction @target` in the game channel."
-                    )
+                    await v["member"].send(embed=e, view=view)
+                except discord.Forbidden:
+                    pass
+            elif role == "doctor":
+                targets = [p["member"] for p in _mafia_alive(game)]
+                if not targets:
+                    continue
+                view = MafiaNightActionView(game, self.channel_id, uid2, "doctor", targets)
+                e = discord.Embed(
+                    title="🌙  Night falls — Doctor action",
+                    description="Choose someone to **protect** from the Mafia tonight.",
+                    color=discord.Color.green(),
+                )
+                e.add_field(name="💉 Players", value="\n".join(f"• {m.display_name}" for m in targets), inline=False)
+                e.set_footer(text=f"Night {game['day']} • Your choice is private")
+                try:
+                    await v["member"].send(embed=e, view=view)
                 except discord.Forbidden:
                     pass
 
@@ -1394,9 +1537,9 @@ def _mafia_guide_embed() -> discord.Embed:
         "• Click **🌙 End Day** when ready — most-voted player is eliminated and their role is revealed."
     ), inline=False)
     embed.add_field(name="🌙 Night Phase", value=(
-        "Special roles get a DM prompt. Submit actions with `!mafaction @user`:\n"
+        "Special roles get a **DM with buttons** — just click your target:\n"
         "• 🔫 **Mafia** → choose someone to eliminate\n"
-        "• 🔍 **Detective** → investigate someone (result in DM)\n"
+        "• 🔍 **Detective** → investigate someone (result shown instantly in DM)\n"
         "• 💉 **Doctor** → protect someone\n"
         "Then click **☀️ Resolve Night** to see what happened."
     ), inline=False)
@@ -1408,8 +1551,7 @@ def _mafia_guide_embed() -> discord.Embed:
     ), inline=False)
     embed.add_field(name="🛑 Other Commands", value=(
         "`!stopmafia` — Stop the current game\n"
-        "`!mafvote @user` — Vote to eliminate\n"
-        "`!mafaction @user` — Submit your night action"
+        "`!mafvote @user` — Vote to eliminate (day phase)"
     ), inline=False)
     embed.set_footer(text="Roles scale with player count • Min 4 players to start")
     return embed
@@ -1796,9 +1938,9 @@ class Fun(commands.Cog):
 
         dm_failures = []
         for uid, v in assigned.items():
-            role = v["role"]; emoji = MAFIA_ROLES[role]; desc = MAFIA_ROLE_DESC[role]
+            role = v["role"]
             try:
-                await v["member"].send(f"🎭 **Mafia** — Your role in **{ctx.guild.name}**:\n\n{emoji} {desc}")
+                await v["member"].send(embed=_mafia_role_dm_embed(role, ctx.guild.name))
             except discord.Forbidden:
                 dm_failures.append(v["member"].display_name)
 
@@ -1833,39 +1975,8 @@ class Fun(commands.Cog):
 
     @commands.command(name="mafaction")
     async def prefix_mafaction(self, ctx: commands.Context, target: discord.Member = None):
-        game = active_mafia.get(ctx.channel.id)
-        if not game or game["phase"] != "night":
-            await ctx.reply("❌ No active Mafia night phase here."); return
-        uid = ctx.author.id
-        if uid not in game["players"] or not game["players"][uid]["alive"]:
-            await ctx.reply("❌ You're not an alive player."); return
-        role = game["players"][uid]["role"]
-        if role not in ("mafia", "detective", "doctor"):
-            await ctx.reply("❌ Villagers have no night action.", delete_after=5); return
-        if not target:
-            await ctx.reply(f"Usage: `!mafaction @player`"); return
-        if target.id not in game["players"] or not game["players"][target.id]["alive"]:
-            await ctx.reply("❌ That player is not alive."); return
-        game["night_actions"][role] = target.id
-        if role == "detective":
-            is_mafia = game["players"][target.id]["role"] == "mafia"
-            try:
-                await ctx.author.send(
-                    f"🔍 **Investigation result:** {target.display_name} is "
-                    f"{'🔫 **MAFIA**' if is_mafia else '✅ **NOT Mafia**'}."
-                )
-            except discord.Forbidden:
-                pass
-            await ctx.message.delete()
-            await ctx.send(f"🌙 A detective has completed their investigation.", delete_after=5)
-        else:
-            action_word = "targeted" if role == "mafia" else "protected"
-            try:
-                await ctx.author.send(f"✅ You have {action_word} **{target.display_name}** tonight.")
-            except discord.Forbidden:
-                pass
-            await ctx.message.delete()
-            await ctx.send(f"🌙 A night action has been submitted.", delete_after=5)
+        await ctx.reply("❌ Night actions are now done via **DM buttons** — check your DMs!", delete_after=8)
+        await ctx.message.delete()
 
     @commands.command(name="stopmafia")
     async def prefix_stopmafia(self, ctx: commands.Context):
