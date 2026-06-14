@@ -211,6 +211,78 @@ def _count_delete_db(guild_id: int):
         print(f"❌ Counting DB delete error: {e}")
 
 
+async def _count_offer_save(message: discord.Message, old: int, reason_text: str) -> bool:
+    """
+    Show a Yes/No prompt offering to spend JC to keep the count at `old`
+    instead of resetting to 0. Always shown, even if the user can't afford
+    it — "Yes" will then explain they're short on JC and reset anyway.
+
+    Returns True (the caller should return without resetting — the view's
+    callbacks handle every outcome).
+    """
+    from cogs.economy import SpendCreditsView, COUNT_SAVE_COST, JC_EMOJI, JC_NAME
+    from cogs.state import get_credits
+
+    guild_id = message.guild.id
+    balance = get_credits(message.author.id)
+
+    def _reset():
+        g = _count_guild(guild_id)
+        g["count"] = 0
+        g["last_user_id"] = None
+        _count_schedule_save(guild_id)
+
+    def _reset_embed(extra: str = "") -> discord.Embed:
+        return discord.Embed(
+            description=(
+                (f"{extra}\n" if extra else "")
+                + f"{reason_text}\nCount resets to **0**. (was **{old}**)"
+            ),
+            color=discord.Color.red(),
+        )
+
+    async def on_confirm(interaction: discord.Interaction, view: SpendCreditsView):
+        embed = discord.Embed(
+            title="🛡️ Streak Saved!",
+            description=(
+                f"{JC_EMOJI} **{COUNT_SAVE_COST} {JC_NAME}** spent.\n"
+                f"The count stays at **{old}** — next number is **{old + 1}**."
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
+        _reset()
+        if reason == "insufficient":
+            extra = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{COUNT_SAVE_COST}**)."
+        else:
+            extra = ""
+        await interaction.response.edit_message(embed=_reset_embed(extra), view=view)
+
+    async def on_timeout_action(view: SpendCreditsView):
+        _reset()
+        if view.message:
+            try:
+                await view.message.edit(embed=_reset_embed(), view=view)
+            except discord.HTTPException:
+                pass
+
+    view = SpendCreditsView(message.author.id, COUNT_SAVE_COST, on_confirm, on_decline, on_timeout_action, timeout=20)
+    embed = discord.Embed(
+        description=(
+            f"{reason_text}\n"
+            f"Count would reset to **0** (was **{old}**).\n\n"
+            f"Use **{COUNT_SAVE_COST}** {JC_EMOJI} {JC_NAME} to save the streak at **{old}**? "
+            f"(you have **{balance}** {JC_EMOJI})"
+        ),
+        color=discord.Color.orange(),
+    )
+    msg = await message.reply(embed=embed, view=view)
+    view.message = msg
+    return True
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CHESS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -437,7 +509,7 @@ def _chess_embed(game: dict, title: str = "♟️ Chess", msg: str = "") -> disc
     e.add_field(name="⬜ White", value=white.mention, inline=True)
     e.add_field(name="⬛ Black", value=black.mention, inline=True)
     e.add_field(name=f"{turn_emoji} Turn", value=f"**{turn_name}** to move", inline=True)
-    e.set_footer(text=f"Move {board.fullmove_number} • Pick a move from the dropdown • !resign • !draw • !hint")
+    e.set_footer(text=f"Move {board.fullmove_number} • Pick a move from the dropdown • !resign • !draw • !hint • !undo")
     return e
 
 
@@ -499,10 +571,10 @@ class ChessChallengeView(discord.ui.View):
 
     def __init__(self, challenger: discord.Member, opponent: discord.Member,
                  channel: discord.TextChannel):
-        super().__init__(timeout=60)
-        self.challenger = challenger
+        super().__init__(timeout=20)
         self.opponent   = opponent
         self.channel    = channel
+        self.message: discord.Message | None = None
 
     @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -529,6 +601,9 @@ class ChessChallengeView(discord.ui.View):
             "black":           black,
             "flipped":         False,
             "draw_offered_by": None,
+            "move_history":    [],   # list of move.uci() strings, for undo
+            "hints_used":      {},   # str(user_id) -> hints used on the current move
+            "undo_offered_by": None,
         }
         active_chess[self.channel.id] = game
 
@@ -558,12 +633,90 @@ class ChessChallengeView(discord.ui.View):
         )
 
     async def on_timeout(self):
-        try:
-            # Disable buttons on timeout
-            for item in self.children:
-                item.disabled = True
-        except Exception:
-            pass
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(
+                    content=(
+                        f"⌛ **Chess challenge expired!**\n"
+                        f"{self.opponent.mention} didn't respond to {self.challenger.mention}'s "
+                        f"challenge in time."
+                    ),
+                    embed=None,
+                    view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+# ── Chess undo agreement view ──────────────────────────────────────────────────
+
+class ChessUndoView(discord.ui.View):
+    """Shown to the opponent: agree to undo the last move or decline."""
+
+    def __init__(self, game: dict, channel_id: int, requester: discord.Member, opponent: discord.Member):
+        super().__init__(timeout=60)
+        self.game = game
+        self.channel_id = channel_id
+        self.requester = requester
+        self.opponent = opponent
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("❌ This request isn't for you!", ephemeral=True)
+            return False
+        return True
+
+    def _disable(self):
+        for item in self.children:
+            item.disabled = True
+
+    @discord.ui.button(label="✅ Agree", style=discord.ButtonStyle.success)
+    async def agree(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable()
+        if self.channel_id not in active_chess or active_chess[self.channel_id] is not self.game:
+            await interaction.response.edit_message(content="⚠️ This game is no longer active.", view=self)
+            self.stop()
+            return
+
+        board = self.game["board"]
+        history = self.game.get("move_history", [])
+        if not history:
+            await interaction.response.edit_message(content="⚠️ Nothing to undo.", view=self)
+            self.stop()
+            return
+
+        board.pop()
+        history.pop()
+        self.game["draw_offered_by"] = None
+        self.game["undo_offered_by"] = None
+        self.game["hints_used"] = {}
+
+        next_player = self.game["white"] if board.turn == _chess.WHITE else self.game["black"]
+        await interaction.response.edit_message(
+            content=f"⏪ **{self.opponent.display_name}** agreed — last move undone! {next_player.mention}, your turn again.",
+            embed=_chess_embed(self.game, msg="Move undone."),
+            attachments=[_chess_file(self.game)],
+            view=ChessMoveSelect(self.game, next_player),
+        )
+        self.stop()
+
+    @discord.ui.button(label="❌ Decline", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable()
+        if self.channel_id in active_chess:
+            active_chess[self.channel_id]["undo_offered_by"] = None
+        await interaction.response.edit_message(
+            content=f"❌ **{self.opponent.display_name}** declined the undo request.",
+            view=self,
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        self._disable()
+        if self.channel_id in active_chess:
+            active_chess[self.channel_id]["undo_offered_by"] = None
 
 
 
@@ -789,6 +942,9 @@ class DestinationSelect(discord.ui.View):
             
             board.push(move_to_make)
             self.game["draw_offered_by"] = None
+            self.game["undo_offered_by"] = None
+            self.game.setdefault("move_history", []).append(move_to_make.uci())
+            self.game["hints_used"] = {}
             
             # Check for checkmate
             if board.is_checkmate():
@@ -1315,7 +1471,8 @@ class Fun(commands.Cog):
     @app_commands.describe(opponent="The user you want to play against")
     async def slash_chess(self, interaction: discord.Interaction, opponent: discord.Member):
         await self._send_chess_challenge(interaction.channel, interaction.user, opponent,
-                                         reply_fn=lambda **kw: interaction.response.send_message(**kw))
+                                         reply_fn=lambda **kw: interaction.response.send_message(**kw),
+                                         interaction=interaction)
 
     @commands.command(name="chess")
     async def prefix_chess(self, ctx: commands.Context, opponent: discord.Member = None):
@@ -1325,7 +1482,7 @@ class Fun(commands.Cog):
         await self._send_chess_challenge(ctx.channel, ctx.author, opponent,
                                          reply_fn=lambda **kw: ctx.reply(**kw))
 
-    async def _send_chess_challenge(self, channel, challenger, opponent, reply_fn):
+    async def _send_chess_challenge(self, channel, challenger, opponent, reply_fn, interaction=None):
         if channel.id in active_chess:
             await reply_fn(content="⚠️ A chess game is already running in this channel.", ephemeral=True)
             return
@@ -1336,11 +1493,18 @@ class Fun(commands.Cog):
             await reply_fn(content="❌ You can't play against yourself.", ephemeral=True)
             return
         view = ChessChallengeView(challenger, opponent, channel)
-        await reply_fn(
+        result = await reply_fn(
             content=f"♟️ {challenger.mention} challenges {opponent.mention} to a game of Chess!\n"
                     f"{opponent.mention} — do you accept?",
             view=view,
         )
+        if result is not None:
+            view.message = result
+        elif interaction is not None:
+            try:
+                view.message = await interaction.original_response()
+            except discord.HTTPException:
+                pass
 
     
     @commands.command(name="move")
@@ -1369,6 +1533,9 @@ class Fun(commands.Cog):
                 return
         board.push(chess_move)
         game["draw_offered_by"] = None
+        game["undo_offered_by"] = None
+        game.setdefault("move_history", []).append(chess_move.uci())
+        game["hints_used"] = {}
         if board.is_checkmate():
             winner = game["black"] if board.turn == _chess.WHITE else game["white"]
             del active_chess[ctx.channel.id]
@@ -1432,6 +1599,37 @@ class Fun(commands.Cog):
         await reply_fn(content="🤝 Both players agreed to a draw!",
                        embed=_chess_embed(game, title="♟️ Draw Agreed"), file=_chess_file(game))
 
+    @app_commands.command(name="undo", description="Request to undo the last chess move (needs opponent's agreement)")
+    async def slash_undo(self, interaction: discord.Interaction):
+        await self._handle_undo(interaction.channel, interaction.user,
+                                 reply_fn=lambda **kw: interaction.response.send_message(**kw))
+
+    @commands.command(name="undo")
+    async def prefix_undo(self, ctx: commands.Context):
+        await self._handle_undo(ctx.channel, ctx.author, reply_fn=lambda **kw: ctx.reply(**kw))
+
+    async def _handle_undo(self, channel, user, reply_fn):
+        game = active_chess.get(channel.id)
+        if not game:
+            await reply_fn(content="❌ No chess game running here.", ephemeral=True); return
+        if user.id not in (game["white"].id, game["black"].id):
+            await reply_fn(content="❌ You're not in this game.", ephemeral=True); return
+        if not game.get("move_history"):
+            await reply_fn(content="❌ No moves to undo yet.", ephemeral=True); return
+        if game.get("undo_offered_by"):
+            await reply_fn(content="⏳ An undo request is already pending.", ephemeral=True); return
+
+        opponent = game["black"] if user.id == game["white"].id else game["white"]
+        game["undo_offered_by"] = user.id
+        view = ChessUndoView(game, channel.id, user, opponent)
+        await reply_fn(
+            content=(
+                f"⏪ **{user.display_name}** wants to undo the last move "
+                f"(`{game['move_history'][-1]}`). {opponent.mention}, do you agree?"
+            ),
+            view=view,
+        )
+
     @app_commands.command(name="hint", description="Get an AI hint for your chess position")
     async def slash_hint(self, interaction: discord.Interaction):
         await self._handle_hint(interaction.channel, interaction.user,
@@ -1445,21 +1643,66 @@ class Fun(commands.Cog):
                                  defer_fn=ctx.typing)
 
     async def _handle_hint(self, channel, user, reply_fn, defer_fn):
+        from cogs.economy import SpendCreditsView, EXTRA_HINT_COST, JC_EMOJI, JC_NAME
+        from cogs.state import get_credits
+
         game = active_chess.get(channel.id)
         if not game:
             await reply_fn(content="❌ No chess game running here.", ephemeral=True); return
         whose_turn = game["white"] if game["board"].turn == _chess.WHITE else game["black"]
         if user.id != whose_turn.id:
             await reply_fn(content="❌ It's not your turn.", ephemeral=True); return
+
+        hints_used = game.setdefault("hints_used", {})
+        used = hints_used.get(str(user.id), 0)
+
+        if used >= 1:
+            # Free hint already used this turn — offer to spend JC for another.
+            balance = get_credits(user.id)
+
+            async def on_confirm(interaction: discord.Interaction, view: SpendCreditsView):
+                hint = await self._generate_chess_hint(game, channel, user)
+                hints_used[str(user.id)] = used + 1
+                embed = discord.Embed(
+                    title="💡 Chess Hint",
+                    description=f"{JC_EMOJI} **{EXTRA_HINT_COST} {JC_NAME}** spent.\n\n{hint}",
+                    color=discord.Color.blue(),
+                )
+                await interaction.response.edit_message(embed=embed, view=view)
+
+            async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
+                if reason == "insufficient":
+                    text = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{EXTRA_HINT_COST}**)."
+                else:
+                    text = "❌ No extra hint this turn."
+                await interaction.response.edit_message(content=text, embed=None, view=view)
+
+            view = SpendCreditsView(user.id, EXTRA_HINT_COST, on_confirm, on_decline, timeout=30)
+            embed = discord.Embed(
+                description=(
+                    f"You've already used your free hint for this turn.\n"
+                    f"Spend **{EXTRA_HINT_COST}** {JC_EMOJI} {JC_NAME} for another hint? "
+                    f"(you have **{balance}** {JC_EMOJI})"
+                ),
+                color=discord.Color.orange(),
+            )
+            msg = await reply_fn(embed=embed, view=view)
+            view.message = msg
+            return
+
         async with channel.typing():
-            board  = game["board"]
-            legal  = [m.uci() for m in list(board.legal_moves)[:20]]
-            colour = "White" if board.turn == _chess.WHITE else "Black"
-            prompt = (f"You are a chess coach. FEN: {board.fen()}\n"
-                      f"It is {colour}'s turn. Legal moves: {', '.join(legal)}.\n"
-                      f"Suggest the best move and explain why in 2-3 sentences.")
-            hint = await generate_ai_response(user.id, prompt, channel.guild.id if channel.guild else None)
+            hint = await self._generate_chess_hint(game, channel, user)
+        hints_used[str(user.id)] = used + 1
         await reply_fn(content=f"💡 **Chess Hint:**\n{hint}")
+
+    async def _generate_chess_hint(self, game: dict, channel, user) -> str:
+        board  = game["board"]
+        legal  = [m.uci() for m in list(board.legal_moves)[:20]]
+        colour = "White" if board.turn == _chess.WHITE else "Black"
+        prompt = (f"You are a chess coach. FEN: {board.fen()}\n"
+                  f"It is {colour}'s turn. Legal moves: {', '.join(legal)}.\n"
+                  f"Suggest the best move and explain why in 2-3 sentences.")
+        return await generate_ai_response(user.id, prompt, channel.guild.id if channel.guild else None)
 
     @app_commands.command(name="stopchess", description="Stop the current chess game")
     async def slash_stopchess(self, interaction: discord.Interaction):
@@ -1803,17 +2046,21 @@ class Fun(commands.Cog):
 
         if number != expected:
             old = g["count"]
+            await message.add_reaction("❌")
+            if await _count_offer_save(message, old, f"❌ **Wrong number!** Expected **{expected}**."):
+                return
             g["count"] = 0; g["last_user_id"] = None
             _count_schedule_save(message.guild.id)
-            await message.add_reaction("❌")
             await message.reply(f"❌ **Wrong number!** Expected **{expected}**. Count resets to **0**. (was {old})", delete_after=8)
             return
 
         if g["last_user_id"] == message.author.id:
             old = g["count"]
+            await message.add_reaction("❌")
+            if await _count_offer_save(message, old, f"❌ **{message.author.display_name}**, you can't count twice in a row!"):
+                return
             g["count"] = 0; g["last_user_id"] = None
             _count_schedule_save(message.guild.id)
-            await message.add_reaction("❌")
             await message.reply(f"❌ **{message.author.display_name}**, you can't count twice in a row! Count resets to **0**. (was {old})", delete_after=8)
             return
 

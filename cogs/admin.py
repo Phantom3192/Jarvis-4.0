@@ -506,7 +506,7 @@ class Admin(commands.Cog):
             return
 
         # Require manage_channels permission to modify settings
-        if not (is_admin(ctx.author) or ctx.author.guild_permissions.manage_channels):
+        if not ctx.author.guild_permissions.manage_channels:
             await ctx.reply("🚫 You need Manage Channels permission to modify channel settings.")
             return
 
@@ -545,6 +545,7 @@ class Admin(commands.Cog):
         else:
             await ctx.reply(f"✅ `restrict_mode` has been turned {'on' if new_value else 'off'} for this channel.")
     @app_commands.command(name="adminhelp", description="Browse admin and moderator commands")
+    @commands.is_owner()
     async def slash_adminhelp(self, interaction: discord.Interaction):
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -560,6 +561,7 @@ class Admin(commands.Cog):
         await interaction.response.send_message(embed=_build_admin_overview_embed(), view=view, ephemeral=True)
 
     @commands.command(name="adminhelp")
+    @commands.is_owner()
     async def prefix_adminhelp(self, ctx: commands.Context):
         if ctx.guild is None:
             await ctx.reply("Admin help is only available in servers.")

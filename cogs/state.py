@@ -40,6 +40,8 @@ _data: dict[str, Any] = {
     "playlists":      {},    # str(user_id) -> {playlist_name: [track_info, ...]}
     "song_history":   {},    # str(user_id) -> [track_info, ...]
     "guild_bans":     {},    # str(guild_id) → {"reason": str, "banned_at": float}
+    "credits":        {},    # str(user_id) → int balance of Jarvis Credits (JC)
+    "credit_meta":    {},    # str(user_id) → {"last_daily": "YYYY-MM-DD", "chat_day": "YYYY-MM-DD", "chat_count": int}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -55,6 +57,8 @@ _SERIALISE: dict[str, Any] = {
     "playlists":       lambda: _data["playlists"],
     "song_history":    lambda: _data["song_history"],
     "guild_bans":      lambda: _data["guild_bans"],
+    "credits":         lambda: _data["credits"],
+    "credit_meta":     lambda: _data["credit_meta"],
 }
 
 
@@ -106,6 +110,8 @@ async def init_db():
         if "song_history"   in db: _data["song_history"]   = db["song_history"]
         if "rate_limits"    in db: _data["rate_limits"]    = db["rate_limits"]
         if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
+        if "credits"        in db: _data["credits"]        = db["credits"]
+        if "credit_meta"    in db: _data["credit_meta"]    = db["credit_meta"]
 
         print("✅ Turso state DB connected")
 
@@ -646,3 +652,84 @@ def check_cooldown(user_id: int) -> bool:
         _last_command_time[user_id] = now
         return True
     return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JARVIS CREDITS (JC)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_all_credits() -> dict[str, int]:
+    """Return a copy of the str(user_id) → JC balance mapping."""
+    return dict(_data["credits"])
+
+
+def get_credits(user_id: int) -> int:
+    """Return the user's current JC balance."""
+    return int(_data["credits"].get(str(user_id), 0))
+
+
+def add_credits(user_id: int, amount: int) -> int:
+    """Add (or subtract, if amount is negative) JC. Balance never goes below 0.
+    Returns the new balance."""
+    uid = str(user_id)
+    bal = _data["credits"].get(uid, 0) + amount
+    if bal < 0:
+        bal = 0
+    _data["credits"][uid] = bal
+    _schedule_save("credits")
+    return bal
+
+
+def spend_credits(user_id: int, amount: int) -> bool:
+    """Attempt to deduct `amount` JC. Returns False (no-op) if the balance
+    is insufficient, True if the deduction succeeded."""
+    uid = str(user_id)
+    bal = _data["credits"].get(uid, 0)
+    if bal < amount:
+        return False
+    _data["credits"][uid] = bal - amount
+    _schedule_save("credits")
+    return True
+
+
+def _credit_meta(user_id: int) -> dict:
+    uid = str(user_id)
+    meta = _data["credit_meta"].get(uid)
+    if not meta:
+        meta = {"last_daily": "", "chat_day": "", "chat_count": 0}
+        _data["credit_meta"][uid] = meta
+    return meta
+
+
+def claim_daily_credits(user_id: int, amount: int) -> tuple[bool, int]:
+    """Grant the daily JC bonus if the user hasn't claimed it today.
+    Returns (claimed, new_balance). claimed=False if already claimed today."""
+    today = _today_utc()
+    meta = _credit_meta(user_id)
+    if meta.get("last_daily") == today:
+        return False, get_credits(user_id)
+    meta["last_daily"] = today
+    _schedule_save("credit_meta")
+    new_balance = add_credits(user_id, amount)
+    return True, new_balance
+
+
+def earn_chat_credits(user_id: int, amount: int, daily_cap: int) -> int:
+    """Award JC for an AI chat message, up to `daily_cap` JC per day from
+    this source. Returns the amount actually awarded (0 if cap reached)."""
+    today = _today_utc()
+    meta = _credit_meta(user_id)
+    if meta.get("chat_day") != today:
+        meta["chat_day"] = today
+        meta["chat_count"] = 0
+    if meta["chat_count"] >= daily_cap:
+        return 0
+    award = min(amount, daily_cap - meta["chat_count"])
+    meta["chat_count"] += award
+    _schedule_save("credit_meta")
+    add_credits(user_id, award)
+    return award
+
+
+def grant_onboarding_bonus(user_id: int, amount: int) -> int:
+    """One-time JC grant for a brand-new user. Returns new balance."""
+    return add_credits(user_id, amount)

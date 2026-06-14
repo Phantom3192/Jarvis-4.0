@@ -28,6 +28,12 @@ from cogs.state import (
     get_preferred_name, set_preferred_name, clear_preferred_name,
     get_reminders, add_reminder, delete_reminder, pop_due_reminders,
     set_dnd, is_dnd,
+    get_credits, reset_ai_usage, earn_chat_credits, claim_daily_credits,
+    grant_onboarding_bonus,
+)
+from cogs.economy import (
+    SpendCreditsView, AI_LIMIT_RESET_COST, JC_EMOJI, JC_NAME,
+    DAILY_CHECKIN_REWARD, ONBOARDING_BONUS, AI_CHAT_REWARD, AI_CHAT_REWARD_DAILY_CAP,
 )
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session, safe_reply, safe_send
@@ -882,6 +888,57 @@ async def _try_intent_intercept(
     return False
 
 
+async def _offer_ai_limit_reset(send_fn, user_id: int) -> bool:
+    """
+    Called once a user has hit their daily AI limit. If they have enough JC,
+    show a Yes/No prompt offering to reset their daily counter for the cost
+    of AI_LIMIT_RESET_COST JC. Otherwise just send the normal limit message.
+
+    `send_fn` is an async callable matching `message.reply` / `interaction.followup.send`
+    signatures — i.e. accepts content=/embed=/view= kwargs and returns the sent message.
+
+    Always returns True: the current request isn't fulfilled this turn either way
+    (the user must resend their message after a reset).
+    """
+    limit = get_ai_limit()
+
+    if get_credits(user_id) < AI_LIMIT_RESET_COST:
+        await send_fn(content=DAILY_LIMIT_MSG.format(limit=limit))
+        return True
+
+    async def on_confirm(interaction: discord.Interaction, view: SpendCreditsView):
+        reset_ai_usage(user_id)
+        embed = discord.Embed(
+            title="✅ Daily Limit Reset!",
+            description=(
+                f"{JC_EMOJI} **{AI_LIMIT_RESET_COST} {JC_NAME}** spent.\n"
+                f"Your daily AI usage has been reset to **0/{limit}** — send your message again!"
+            ),
+            color=discord.Color.green(),
+        )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+    async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
+        text = DAILY_LIMIT_MSG.format(limit=limit)
+        if reason == "insufficient":
+            text = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (need **{AI_LIMIT_RESET_COST}**).\n\n" + text
+        await interaction.response.edit_message(content=text, embed=None, view=view)
+
+    view = SpendCreditsView(user_id, AI_LIMIT_RESET_COST, on_confirm, on_decline, timeout=30)
+    embed = discord.Embed(
+        title="📊 Daily AI Limit Reached",
+        description=(
+            f"You've used all **{limit}** of your free AI messages for today.\n\n"
+            f"Spend **{AI_LIMIT_RESET_COST}** {JC_EMOJI} {JC_NAME} to reset your daily counter "
+            f"and keep chatting?"
+        ),
+        color=discord.Color.orange(),
+    )
+    msg = await send_fn(embed=embed, view=view)
+    view.message = msg
+    return True
+
+
 # ── Core response ─────────────────────────────────────────────────────────────
 
 async def generate_ai_response(
@@ -1155,6 +1212,7 @@ async def generate_ai_response(
     asyncio.create_task(asyncio.to_thread(_background_record, user_id, user_message, reply))
 
     new_count = increment_ai_usage(user_id)
+    earn_chat_credits(user_id, AI_CHAT_REWARD, AI_CHAT_REWARD_DAILY_CAP)
     if new_count == WARN_AT:
         limit = get_ai_limit()
         remaining = limit - new_count
@@ -1357,6 +1415,11 @@ class AI(commands.Cog):
         if is_new_user(interaction.user.id):
             mark_seen(interaction.user.id)
             await _log_new_user(interaction.user)
+            grant_onboarding_bonus(interaction.user.id, ONBOARDING_BONUS)
+
+        if is_ai_rate_limited(interaction.user.id):
+            await _offer_ai_limit_reset(interaction.followup.send, interaction.user.id)
+            return
 
         image_b64, media_type = None, None
         if image:
@@ -1439,6 +1502,21 @@ class AI(commands.Cog):
             if not check_cooldown(message.author.id):
                 await message.add_reaction("⏳")
                 return
+
+        if is_new_user(message.author.id):
+            grant_onboarding_bonus(message.author.id, ONBOARDING_BONUS)
+
+        claimed, _ = claim_daily_credits(message.author.id, DAILY_CHECKIN_REWARD)
+        if claimed:
+            await message.channel.send(
+                f"{JC_EMOJI} **{message.author.display_name}** claimed their daily check-in bonus: "
+                f"**+{DAILY_CHECKIN_REWARD} {JC_NAME}**!",
+                delete_after=10,
+            )
+
+        if is_ai_rate_limited(message.author.id):
+            await _offer_ai_limit_reset(message.reply, message.author.id)
+            return
 
         # ── Group start ────────────────────────────────────────────────────
         if re.search(r"\b(group|public)\s+conversation\b", lower):

@@ -53,7 +53,8 @@ CATEGORIES = {
             ("!chess @user / /chess", "Challenge someone to a game of chess"),
             ("!resign / /resign", "Resign your current chess game"),
             ("!draw / /draw", "Offer or accept a draw"),
-            ("!hint / /hint", "Get an AI hint for your chess position"),
+            ("!hint / /hint", "Get an AI hint (1 free per turn, then costs JC)"),
+            ("!undo / /undo", "Request to undo the last move (needs opponent's agreement)"),
             ("!stopchess / /stopchess", "Stop the current chess game"),
             ("", ""),
             ("🪢 **HANGMAN**", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
@@ -110,6 +111,18 @@ CATEGORIES = {
             ("!youtube / !yt <query>  /youtube", "Search YouTube and pick from results"),
             ("!yttrend / !trending    /yttrend",  "Browse trending YouTube videos by category"),
             ("!ytinfo / !ytvideo <url>  /ytinfo", "Get detailed info about a YouTube video"),
+        ],
+    },
+    "🪙 Jarvis Credits": {
+        "description": "Earn and spend Jarvis Credits (JC).",
+        "color": 0xF1C40F,
+        "commands": [
+            ("!balance / !jc / !credits  /balance", "Check your (or someone else's) JC balance"),
+            ("!leaderboard / !jcleaderboard / !jctop  /leaderboard", "View the top JC holders"),
+            ("Daily check-in",        "Send your first message of the day to earn JC automatically"),
+            ("Chat with Jarvis",      "Earn a small amount of JC for chatting with the AI (daily cap)"),
+            ("Save a counting streak", "Spend JC to save the count when someone messes up"),
+            ("Reset AI limit",        "Spend JC to reset your daily AI message limit"),
         ],
     },
     "📊 Stats": {
@@ -172,8 +185,6 @@ def _build_overview_embed() -> discord.Embed:
     embed.set_footer(text="Jarvis — Use /chat or @mention to get started")
     return embed
 
-
-
 ADMIN_CATEGORIES = {
     "🔒 User Bans": {
         "description": "Ban and unban individual users from using Jarvis.",
@@ -200,6 +211,13 @@ ADMIN_CATEGORIES = {
             ("!resetlimit @user",                   "Reset a user's daily AI message limit"),
             ("!set-cooldown <seconds>",             "Set cooldown between AI requests (bot owner)"),
             ("!set-burst <limit> <window> <timeout>", "Configure burst rate limiting (bot owner)"),
+        ],
+    },
+    "🪙 Jarvis Credits": {
+        "description": "Manage the Jarvis Credit (JC) economy.",
+        "color": 0xF1C40F,
+        "commands": [
+            ("!givecredits @user <amount>",         "Grant (or remove, if negative) JC for a user (bot owner)"),
         ],
     },
 }
