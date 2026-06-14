@@ -326,27 +326,6 @@ class System(commands.Cog):
         embed.set_footer(text="Jarvis")
         await interaction.response.send_message(embed=embed)
 
-    # ── !usage ────────────────────────────────────────────────────────────────
-
-    @commands.command(name="usage")
-    async def prefix_usage(self, ctx: commands.Context):
-        """Show host CPU, RAM, disk, and bot process stats. Admin only."""
-        if not is_admin(ctx.author):
-            await ctx.reply("🚫 You don't have permission to use this command.")
-            return
-        await ctx.reply(embed=_build_usage_embed(self.bot))
-
-    @app_commands.command(name="usage", description="Show CPU, RAM, disk and bot stats (admin only)")
-    async def slash_usage(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 You don't have permission to use this command.", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            embed=_build_usage_embed(self.bot), ephemeral=True
-        )
-
     # ── !reload ───────────────────────────────────────────────────────────────
 
     @commands.command(name="reload")
@@ -417,29 +396,6 @@ class System(commands.Cog):
 
         await interaction.response.send_message(embed=_build_guild_embed(guild))
 
-    # ── !servers ──────────────────────────────────────────────────────────────
-
-    @commands.command(name="servers")
-    async def prefix_servers(self, ctx: commands.Context):
-        """List all servers Jarvis is in. Admin only."""
-        if not is_admin(ctx.author):
-            await ctx.reply("🚫 You don't have permission to use this command.")
-            return
-        for embed in _build_server_list_embeds(self.bot):
-            await ctx.reply(embed=embed)
-
-    @app_commands.command(name="servers", description="List all servers Jarvis is in (admin only)")
-    async def slash_servers(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 You don't have permission to use this command.", ephemeral=True
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        embeds = _build_server_list_embeds(self.bot)
-        await interaction.followup.send(embed=embeds[0])
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

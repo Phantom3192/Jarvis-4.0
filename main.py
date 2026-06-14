@@ -48,6 +48,7 @@ COGS = [
     "cogs.youtube",
     "cogs.music",
     "cogs.economy",
+    "cogs.status",
 ]
 
 # Track users we've already DM'd about their ban this session — avoid spamming.

@@ -69,10 +69,19 @@ _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
 _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
+# LAVALINK_NODES = [
+#     {
+#         "host": "happy-joy.railway.internal",
+#         "port": 2333,
+#         "password": "jarvisbot"
+#     }
+# ]
+
 LAVALINK_NODES = [
     {
-        "uri": "http://happy-joy.railway.internal:2333",
-        "password": "jarvisbot"
+        "host": "sg2-nodelink.nyxbot.app",
+        "port": 3000,
+        "password": "nyxbot.app/support"
     }
 ]
 
@@ -474,8 +483,12 @@ class Music(commands.Cog):
     async def _connect_lavalink(self) -> None:
         await self.bot.wait_until_ready()
         await asyncio.sleep(2)
+        # nodes = [
+        #     wavelink.Node(uri=n["uri"], password=n["password"])
+        #     for n in LAVALINK_NODES
+        # ]
         nodes = [
-            wavelink.Node(uri=n["uri"], password=n["password"])
+            wavelink.Node(uri=f"http://{n['host']}:{n['port']}", password=n["password"])
             for n in LAVALINK_NODES
         ]
         await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
