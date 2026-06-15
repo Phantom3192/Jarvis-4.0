@@ -601,6 +601,7 @@ class ChessChallengeView(discord.ui.View):
     def __init__(self, challenger: discord.Member, opponent: discord.Member,
                  channel: discord.TextChannel):
         super().__init__(timeout=20)
+        self.challenger = challenger
         self.opponent   = opponent
         self.channel    = channel
         self.message: discord.Message | None = None
