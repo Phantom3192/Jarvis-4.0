@@ -270,6 +270,9 @@ def clear_history(user_id: int, channel_id: int | None = None) -> None:
 
 _MAX_REPLY_ROOT_CACHE = 10_000
 
+# Users currently being processed — prevents double-processing while bot is responding
+_processing_users: set[int] = set()
+
 def register_reply_root(message_id: int, root_id: int) -> None:
     """Map a message ID to the root of its reply chain for merge history lookup."""
     if len(_reply_thread_root) >= _MAX_REPLY_ROOT_CACHE:
@@ -1503,6 +1506,14 @@ class AI(commands.Cog):
                 await message.add_reaction("⏳")
                 return
 
+            # Processing lock — if bot is still responding to this user's previous message
+            if message.author.id in _processing_users:
+                await message.reply(
+                    "⏳ Still working on your previous message — hang tight, I'll be right with you!",
+                    delete_after=5,
+                )
+                return
+
         if is_new_user(message.author.id):
             grant_onboarding_bonus(message.author.id, ONBOARDING_BONUS)
 
@@ -1691,24 +1702,28 @@ class AI(commands.Cog):
                         _trim(merge_history[root_id])
 
         guild_id = message.guild.id if message.guild else None
+        _processing_users.add(message.author.id)
         try:
-            async with message.channel.typing():
+            try:
+                async with message.channel.typing():
+                    reply = await generate_ai_response(
+                        message.author.id, user_text, message.channel.id,
+                        guild_id, image_b64, media_type, user=message.author,
+                        reply_context=reply_context,
+                        thread_root_id=thread_root_id,
+                    )
+            except Exception as e:
+                # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
+                print(f"[Warning] Failed to show typing indicator: {type(e).__name__}: {e}")
                 reply = await generate_ai_response(
                     message.author.id, user_text, message.channel.id,
                     guild_id, image_b64, media_type, user=message.author,
                     reply_context=reply_context,
                     thread_root_id=thread_root_id,
                 )
-        except Exception as e:
-            # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
-            print(f"[Warning] Failed to show typing indicator: {type(e).__name__}: {e}")
-            reply = await generate_ai_response(
-                message.author.id, user_text, message.channel.id,
-                guild_id, image_b64, media_type, user=message.author,
-                reply_context=reply_context,
-                thread_root_id=thread_root_id,
-            )
-        bot_reply_msgs = await send_long_message(message, reply, ephemeral=False)
+            bot_reply_msgs = await send_long_message(message, reply, ephemeral=False)
+        finally:
+            _processing_users.discard(message.author.id)
         # Register both the human message and Jarvis's reply → root so that
         # whoever replies next immediately resolves to the correct merge history.
         # For a fresh (non-reply) message, the message itself is the root.

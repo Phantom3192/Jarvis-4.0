@@ -243,6 +243,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
         )
 
     async def on_confirm(interaction: discord.Interaction, view: SpendCreditsView):
+        # ✅ YES — Streak saved: delete wrong msg + this msg, show saved embed
         embed = discord.Embed(
             title="🛡️ Streak Saved!",
             description=(
@@ -252,7 +253,6 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
             color=discord.Color.green(),
         )
         await interaction.response.edit_message(embed=embed, view=view)
-        # Yes → delete both wrong message AND Jarvis streak msg after short delay
         await asyncio.sleep(4)
         try:
             await message.delete()
@@ -264,37 +264,38 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
             pass
 
     async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
+        # ❌ NO — Streak lost: keep wrong msg, delete this msg, drop streak lost msg
         _reset()
         if reason == "insufficient":
-            extra = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{COUNT_SAVE_COST}**)."
+            extra = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{COUNT_SAVE_COST}**).\n"
         else:
             extra = ""
-        await interaction.response.edit_message(embed=_reset_embed(extra), view=view)
-        # No → only delete Jarvis streak msg, keep wrong message visible
-        await asyncio.sleep(5)
+        await interaction.response.defer()
         try:
             await interaction.message.delete()
         except discord.HTTPException:
             pass
+        await message.channel.send(
+            embed=discord.Embed(
+                description=f"{extra}{reason_text}\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                color=discord.Color.red(),
+            )
+        )
 
     async def on_timeout_action(view: SpendCreditsView):
+        # ⏱️ TIMEOUT — No response: keep wrong msg, delete this msg, drop streak lost msg
         _reset()
-        if view.message:
-            try:
-                await view.message.edit(embed=_reset_embed(), view=view)
-            except discord.HTTPException:
-                pass
-        # Timeout → delete wrong message AND Jarvis streak msg
-        await asyncio.sleep(5)
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
         if view.message:
             try:
                 await view.message.delete()
             except discord.HTTPException:
                 pass
+        await message.channel.send(
+            embed=discord.Embed(
+                description=f"{reason_text}\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                color=discord.Color.red(),
+            )
+        )
 
     view = SpendCreditsView(message.author.id, COUNT_SAVE_COST, on_confirm, on_decline, on_timeout_action, timeout=20)
     embed = discord.Embed(
@@ -2194,12 +2195,12 @@ class Fun(commands.Cog):
                 return
             g["count"] = 0; g["last_user_id"] = None
             _count_schedule_save(message.guild.id)
-            reply = await message.reply(f"❌ **Wrong number!** Expected **{expected}**. Count resets to **0**. (was {old})")
-            await asyncio.sleep(5)
-            try:
-                await reply.delete()
-            except discord.HTTPException:
-                pass
+            await message.channel.send(
+                embed=discord.Embed(
+                    description=f"❌ **Wrong number!** Expected **{expected}**.\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                    color=discord.Color.red(),
+                )
+            )
             return
 
         if g["last_user_id"] == message.author.id:
@@ -2209,12 +2210,12 @@ class Fun(commands.Cog):
                 return
             g["count"] = 0; g["last_user_id"] = None
             _count_schedule_save(message.guild.id)
-            reply = await message.reply(f"❌ **{message.author.display_name}**, you can't count twice in a row! Count resets to **0**. (was {old})")
-            await asyncio.sleep(5)
-            try:
-                await reply.delete()
-            except discord.HTTPException:
-                pass
+            await message.channel.send(
+                embed=discord.Embed(
+                    description=f"❌ **{message.author.display_name}**, you can't count twice in a row!\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                    color=discord.Color.red(),
+                )
+            )
             return
 
         g["count"] = number; g["last_user_id"] = message.author.id
