@@ -7,6 +7,7 @@ import json
 import os
 from cogs.ai import generate_ai_response
 from cogs.http_session import get_session
+from cogs.state import check_cooldown
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HANGMAN
@@ -251,7 +252,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
             color=discord.Color.green(),
         )
         await interaction.response.edit_message(embed=embed, view=view)
-        # Delete wrong message + streak saved msg after a short delay
+        # Yes → delete both wrong message AND Jarvis streak msg after short delay
         await asyncio.sleep(4)
         try:
             await message.delete()
@@ -269,12 +270,8 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
         else:
             extra = ""
         await interaction.response.edit_message(embed=_reset_embed(extra), view=view)
-        # Delete wrong message + reset msg after a short delay
+        # No → only delete Jarvis streak msg, keep wrong message visible
         await asyncio.sleep(5)
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
         try:
             await interaction.message.delete()
         except discord.HTTPException:
@@ -287,6 +284,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
                 await view.message.edit(embed=_reset_embed(), view=view)
             except discord.HTTPException:
                 pass
+        # Timeout → delete wrong message AND Jarvis streak msg
         await asyncio.sleep(5)
         try:
             await message.delete()
@@ -2177,6 +2175,10 @@ class Fun(commands.Cog):
         g = _count_guild(message.guild.id)
         if not g["channel_id"] or cid != g["channel_id"]:
             return
+
+        # Cooldown: silently ignore if spamming
+        if not check_cooldown(message.author.id):
+            return
         content = message.content.strip()
         try:
             number = int(content)
@@ -2195,10 +2197,6 @@ class Fun(commands.Cog):
             reply = await message.reply(f"❌ **Wrong number!** Expected **{expected}**. Count resets to **0**. (was {old})")
             await asyncio.sleep(5)
             try:
-                await message.delete()
-            except discord.HTTPException:
-                pass
-            try:
                 await reply.delete()
             except discord.HTTPException:
                 pass
@@ -2213,10 +2211,6 @@ class Fun(commands.Cog):
             _count_schedule_save(message.guild.id)
             reply = await message.reply(f"❌ **{message.author.display_name}**, you can't count twice in a row! Count resets to **0**. (was {old})")
             await asyncio.sleep(5)
-            try:
-                await message.delete()
-            except discord.HTTPException:
-                pass
             try:
                 await reply.delete()
             except discord.HTTPException:
