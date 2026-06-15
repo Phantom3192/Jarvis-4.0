@@ -251,6 +251,16 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
             color=discord.Color.green(),
         )
         await interaction.response.edit_message(embed=embed, view=view)
+        # Delete wrong message + streak saved msg after a short delay
+        await asyncio.sleep(4)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
 
     async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
         _reset()
@@ -259,12 +269,32 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
         else:
             extra = ""
         await interaction.response.edit_message(embed=_reset_embed(extra), view=view)
+        # Delete wrong message + reset msg after a short delay
+        await asyncio.sleep(5)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        try:
+            await interaction.message.delete()
+        except discord.HTTPException:
+            pass
 
     async def on_timeout_action(view: SpendCreditsView):
         _reset()
         if view.message:
             try:
                 await view.message.edit(embed=_reset_embed(), view=view)
+            except discord.HTTPException:
+                pass
+        await asyncio.sleep(5)
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+        if view.message:
+            try:
+                await view.message.delete()
             except discord.HTTPException:
                 pass
 
@@ -2162,7 +2192,16 @@ class Fun(commands.Cog):
                 return
             g["count"] = 0; g["last_user_id"] = None
             _count_schedule_save(message.guild.id)
-            await message.reply(f"❌ **Wrong number!** Expected **{expected}**. Count resets to **0**. (was {old})", delete_after=8)
+            reply = await message.reply(f"❌ **Wrong number!** Expected **{expected}**. Count resets to **0**. (was {old})")
+            await asyncio.sleep(5)
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            try:
+                await reply.delete()
+            except discord.HTTPException:
+                pass
             return
 
         if g["last_user_id"] == message.author.id:
@@ -2172,7 +2211,16 @@ class Fun(commands.Cog):
                 return
             g["count"] = 0; g["last_user_id"] = None
             _count_schedule_save(message.guild.id)
-            await message.reply(f"❌ **{message.author.display_name}**, you can't count twice in a row! Count resets to **0**. (was {old})", delete_after=8)
+            reply = await message.reply(f"❌ **{message.author.display_name}**, you can't count twice in a row! Count resets to **0**. (was {old})")
+            await asyncio.sleep(5)
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            try:
+                await reply.delete()
+            except discord.HTTPException:
+                pass
             return
 
         g["count"] = number; g["last_user_id"] = message.author.id
