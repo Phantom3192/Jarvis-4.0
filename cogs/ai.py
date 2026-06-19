@@ -1519,11 +1519,12 @@ class AI(commands.Cog):
 
         claimed, _ = claim_daily_credits(message.author.id, DAILY_CHECKIN_REWARD)
         if claimed:
-            await message.channel.send(
+            # Fire-and-forget — don't block the AI reply pipeline on this send.
+            asyncio.create_task(message.channel.send(
                 f"{JC_EMOJI} **{message.author.display_name}** claimed their daily check-in bonus: "
                 f"**+{DAILY_CHECKIN_REWARD} {JC_NAME}**!",
                 delete_after=10,
-            )
+            ))
 
         if is_ai_rate_limited(message.author.id):
             await _offer_ai_limit_reset(message.reply, message.author.id)
