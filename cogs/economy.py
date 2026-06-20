@@ -196,18 +196,31 @@ class Economy(commands.Cog):
 
     @commands.command(name="givecredits", aliases=["givejc", "addcredits"])
     @commands.is_owner()
-    async def prefix_givecredits(self, ctx: commands.Context, user: discord.User, amount: int):
-        """!givecredits @user <amount> — owner-only. Grants (or removes, if negative) JC."""
+    async def prefix_givecredits(
+        self,
+        ctx: commands.Context,
+        users: commands.Greedy[discord.User],
+        amount: int,
+    ):
+        """!givecredits @user1 @user2 ... <amount> — owner-only. Grants (or removes, if negative) JC to one or more users."""
+        if not users:
+            await ctx.reply("**Usage:** `!givecredits @user1 [@user2 ...] <amount>`\n**Example:** `!givecredits @Phantom @Someone 100`")
+            return
         if amount == 0:
             await ctx.reply("⚠️ Amount must be non-zero.")
             return
-        new_balance = add_credits(user.id, amount)
+
         verb = "Granted" if amount > 0 else "Removed"
+        lines = []
+        for user in users:
+            new_balance = add_credits(user.id, amount)
+            lines.append(f"**{user.display_name}** → new balance: **{new_balance}** {JC_NAME}s")
+
         embed = discord.Embed(
             description=(
                 f"{JC_EMOJI} **{verb} {abs(amount)} {JC_NAME}** "
-                f"{'to' if amount > 0 else 'from'} **{user.display_name}**.\n"
-                f"New balance: **{new_balance}** {JC_NAME}s."
+                f"{'to' if amount > 0 else 'from'} **{len(users)}** user(s):\n\n"
+                + "\n".join(lines)
             ),
             color=discord.Color.gold(),
         )
@@ -218,7 +231,7 @@ class Economy(commands.Cog):
         if isinstance(error, commands.NotOwner):
             await ctx.reply("🚫 Only the bot owner can use this command.")
         elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
-            await ctx.reply("**Usage:** `!givecredits @user <amount>`\n**Example:** `!givecredits @Phantom 100`")
+            await ctx.reply("**Usage:** `!givecredits @user1 [@user2 ...] <amount>`\n**Example:** `!givecredits @Phantom @Someone 100`")
 
     @app_commands.command(name="givecredits", description="(Owner only) Grant or remove JC from a user")
     @app_commands.describe(user="User to give/remove JC", amount="Amount of JC (negative to remove)")
