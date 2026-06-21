@@ -95,6 +95,54 @@ def install_stdout_error_forwarding():
         sys.stdout = _StdoutErrorTee(sys.stdout)
 
 
+def _is_expired_interaction(error: Exception) -> bool:
+    """True if `error` is Discord telling us an interaction is too old to
+    respond to (error code 10062, "Unknown interaction") — the user
+    clicked a button after the ~3s response window passed, or after a
+    bot restart invalidated the view. There's nothing the bot can do
+    once this happens, so it's not a bug to surface as an error."""
+    return isinstance(error, discord.NotFound) and getattr(error, "code", None) == 10062
+
+
+def install_view_error_suppression():
+    """Patch discord.ui.View.on_error globally so EVERY view's button/select
+    callbacks across the whole bot silently ignore expired-interaction
+    errors, instead of each view needing to opt in individually. This
+    covers all current and future View subclasses without having to
+    change their base class one by one.
+
+    Any error that ISN'T an expired interaction still surfaces exactly as
+    before (forwarded to the webhook via the asyncio exception handler /
+    logging), so real bugs in button callbacks are never hidden.
+
+    Also quiets discord.py's own internal "View interaction referencing
+    unknown view ... Discarding" warning, which fires at dispatch time
+    (before any callback even runs) when an interaction comes in for a
+    view the library no longer has tracked — e.g. after a bot restart.
+    That's the same class of harmless, unfixable timing issue, just
+    logged from a different code path than on_error covers."""
+    import logging
+
+    original_on_error = discord.ui.View.on_error
+
+    async def _patched_on_error(self, interaction: discord.Interaction, error: Exception, item) -> None:
+        if _is_expired_interaction(error):
+            return  # stale click — nothing useful to do, stay quiet
+        await original_on_error(self, interaction, error, item)
+
+    discord.ui.View.on_error = _patched_on_error
+
+    class _IgnoreStaleViewWarning(logging.Filter):
+        """Only suppresses the specific 'unknown view ... Discarding'
+        message — any other discord.ui.view log (current or future
+        versions of the library) still comes through normally."""
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            return "referencing unknown view" not in msg
+
+    logging.getLogger("discord.ui.view").addFilter(_IgnoreStaleViewWarning())
+
+
 class ErrorHandler(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot

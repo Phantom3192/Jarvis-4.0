@@ -5,14 +5,15 @@ import asyncio
 import logging
 import time
 from dotenv import load_dotenv
-from cogs.errorhandler import install_stdout_error_forwarding
+from cogs.errorhandler import install_stdout_error_forwarding, install_view_error_suppression
 from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
 
 load_dotenv()
-install_stdout_error_forwarding()
+install_stdout_error_forwarding()   # forward ❌/error-looking print() lines to the webhook too
+install_view_error_suppression()    # silence harmless expired-interaction noise from button clicks
 
 logging.basicConfig(level=logging.WARNING)
 

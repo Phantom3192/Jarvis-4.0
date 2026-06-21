@@ -5,6 +5,12 @@ WHY THIS FILE EXISTS:
 Both announce.py and dm.py defined identical ConfirmView and _build_embed()
 functions.  Any bug fix or style change had to be made in two places.
 This module is the single source of truth for both.
+
+NOTE: expired/stale-interaction errors (Discord error code 10062) from
+ANY View's button/select callbacks across the whole bot — including
+ConfirmView below — are handled globally via
+cogs.errorhandler.install_view_error_suppression(), called once at
+startup in main.py. No per-View changes are needed here for that.
 """
 import discord
 
