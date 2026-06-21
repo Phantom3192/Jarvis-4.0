@@ -17,11 +17,11 @@ JC_NAME  = "Jarvis Credit"
 JC_EMOJI = "🪙"
 
 # ── Earning amounts ────────────────────────────────────────────────────────
-DAILY_CHECKIN_REWARD   = 20   # granted once per UTC day, on a user's first message
+DAILY_CHECKIN_REWARD   = 50   # granted once per UTC day, on a user's first message
 ONBOARDING_BONUS       = 50   # one-time, granted to brand-new users
-AI_CHAT_REWARD         = 1    # JC per AI reply
-AI_CHAT_REWARD_DAILY_CAP = 10 # max JC/day earnable just from chatting
-CONTRIBUTION_REWARD    = 30   # granted when a suggestion/bug report is accepted
+AI_CHAT_REWARD         = 5    # JC per AI reply
+AI_CHAT_REWARD_DAILY_CAP = 100 # max JC/day earnable just from chatting
+CONTRIBUTION_REWARD    = 50   # granted when a suggestion/bug report is accepted
 
 # ── Spending costs ─────────────────────────────────────────────────────────
 COUNT_SAVE_COST      = 25   # flat cost to save a counting-game streak
