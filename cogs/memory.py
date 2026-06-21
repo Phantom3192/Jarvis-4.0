@@ -20,15 +20,49 @@ MEMORY_DAYS      = 90
 CLEANUP_INTERVAL = 86400
 
 _conn = None
+_turso_url   = ""
+_turso_token = ""
+
+
+def _is_stream_error(e: Exception) -> bool:
+    """Detect Turso/Hrana stream-not-found errors (dropped idle connection)."""
+    msg = str(e).lower()
+    return "stream not found" in msg or ("404" in msg and "hrana" in msg)
+
+
+def _reconnect() -> bool:
+    """Re-establish the libsql connection after a dropped stream."""
+    global _conn
+    if not _turso_url or not _turso_token:
+        return False
+    try:
+        import libsql_experimental as libsql
+        _conn = libsql.connect(database=_turso_url, auth_token=_turso_token)
+        _conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_memory (
+                user_id     TEXT PRIMARY KEY,
+                facts       TEXT NOT NULL DEFAULT '[]',
+                last_active REAL NOT NULL DEFAULT 0
+            )
+        """)
+        _conn.commit()
+        print("[Memory] Reconnected to Turso after stream error.")
+        return True
+    except Exception as e:
+        print(f"[Memory] Reconnect failed: {e}")
+        _conn = None
+        return False
 
 
 async def init_memory():
-    global _conn
+    global _conn, _turso_url, _turso_token
     turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
     if not turso_url or not turso_token:
         print("⚠️  Memory: TURSO_URL/TOKEN not set — long-term memory disabled.")
         return
+    _turso_url   = turso_url
+    _turso_token = turso_token
     try:
         import libsql_experimental as libsql
         _conn = libsql.connect(database=turso_url, auth_token=turso_token)
@@ -82,9 +116,24 @@ async def init_memory():
             pass  # already new schema or empty
         print("✅ Memory DB connected (compact mode: 1 row/user)")
         asyncio.create_task(_cleanup_loop())
+        asyncio.create_task(_keepalive_loop())
     except Exception as e:
         print(f"❌ Memory DB init failed: {e}")
         _conn = None
+
+
+async def _keepalive_loop(interval: float = 8.0) -> None:
+    """Ping Turso periodically so the Hrana stream never sits idle long
+    enough to hit the server's ~10s idle-stream timeout."""
+    while True:
+        await asyncio.sleep(interval)
+        if _conn is None:
+            continue
+        try:
+            await asyncio.to_thread(_conn.execute, "SELECT 1")
+        except Exception as e:
+            if _is_stream_error(e):
+                await asyncio.to_thread(_reconnect)
 
 
 # ── Extraction patterns ───────────────────────────────────────────────────────
@@ -270,6 +319,15 @@ async def save_facts(user_id: int, facts: list[tuple[str, str]]) -> None:
     try:
         await asyncio.to_thread(_sync_save_facts, uid, facts)
     except Exception as e:
+        if _is_stream_error(e):
+            print("[Memory] Stream error on save, attempting reconnect...")
+            if _reconnect():
+                try:
+                    await asyncio.to_thread(_sync_save_facts, uid, facts)
+                    return
+                except Exception as e2:
+                    print(f"[Memory] save error for {uid} after reconnect: {e2}")
+                    return
         print(f"[Memory] save error for {uid}: {e}")
 
 
@@ -291,6 +349,14 @@ async def get_facts(user_id: int) -> list[str]:
     try:
         return await asyncio.to_thread(_sync_get_facts, uid)
     except Exception as e:
+        if _is_stream_error(e):
+            print("[Memory] Stream error on get, attempting reconnect...")
+            if _reconnect():
+                try:
+                    return await asyncio.to_thread(_sync_get_facts, uid)
+                except Exception as e2:
+                    print(f"[Memory] get error for {uid} after reconnect: {e2}")
+                    return []
         print(f"[Memory] get error for {uid}: {e}")
         return []
 
@@ -312,6 +378,14 @@ async def forget_facts(user_id: int) -> int:
     try:
         return await asyncio.to_thread(_sync_forget_facts, uid)
     except Exception as e:
+        if _is_stream_error(e):
+            print("[Memory] Stream error on forget, attempting reconnect...")
+            if _reconnect():
+                try:
+                    return await asyncio.to_thread(_sync_forget_facts, uid)
+                except Exception as e2:
+                    print(f"[Memory] forget error for {uid} after reconnect: {e2}")
+                    return 0
         print(f"[Memory] forget error for {uid}: {e}")
         return 0
 
@@ -329,7 +403,14 @@ async def get_facts_count(user_id: int) -> int:
     uid = str(user_id)
     try:
         return await asyncio.to_thread(_sync_get_facts_count, uid)
-    except Exception:
+    except Exception as e:
+        if _is_stream_error(e):
+            print("[Memory] Stream error on get_count, attempting reconnect...")
+            if _reconnect():
+                try:
+                    return await asyncio.to_thread(_sync_get_facts_count, uid)
+                except Exception:
+                    return 0
         return 0
 
 
@@ -364,4 +445,14 @@ async def _cleanup_old_facts():
         await asyncio.to_thread(_sync_cleanup_old_facts, cutoff)
         print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
     except Exception as e:
+        if _is_stream_error(e):
+            print("[Memory] Stream error on cleanup, attempting reconnect...")
+            if _reconnect():
+                try:
+                    await asyncio.to_thread(_sync_cleanup_old_facts, cutoff)
+                    print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
+                    return
+                except Exception as e2:
+                    print(f"[Memory] cleanup error after reconnect: {e2}")
+                    return
         print(f"[Memory] cleanup error: {e}")

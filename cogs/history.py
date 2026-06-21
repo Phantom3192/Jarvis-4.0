@@ -97,9 +97,24 @@ async def init_history():
 
         print("✅ History DB connected (compact mode: 1 row/user)")
         asyncio.create_task(_cleanup_loop())
+        asyncio.create_task(_keepalive_loop())
     except Exception as e:
         print(f"❌ History DB init failed: {e}")
         _conn = None
+
+
+async def _keepalive_loop(interval: float = 8.0) -> None:
+    """Ping Turso periodically so the Hrana stream never sits idle long
+    enough to hit the server's ~10s idle-stream timeout."""
+    while True:
+        await asyncio.sleep(interval)
+        if _conn is None:
+            continue
+        try:
+            await asyncio.to_thread(_conn.execute, "SELECT 1")
+        except Exception as e:
+            if _is_stream_error(e):
+                await asyncio.to_thread(_reconnect)
 
 
 # ── add_message ───────────────────────────────────────────────────────────────

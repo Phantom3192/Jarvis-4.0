@@ -114,6 +114,7 @@ async def init_db():
         if "credit_meta"    in db: _data["credit_meta"]    = db["credit_meta"]
 
         print("✅ Turso state DB connected")
+        asyncio.create_task(_keepalive_loop())
 
     except Exception as e:
         print(
@@ -121,6 +122,23 @@ async def init_db():
             "   Jarvis will run in memory-only mode."
         )
         _conn = None
+
+
+async def _keepalive_loop(interval: float = 8.0) -> None:
+    """Ping Turso periodically so the Hrana stream never sits idle long
+    enough to hit the server's ~10s idle-stream timeout. This is the
+    actual fix for repeated 'stream not found' disconnects — reconnect
+    logic only recovers after the fact, this prevents it from happening."""
+    while True:
+        await asyncio.sleep(interval)
+        if _conn is None:
+            continue
+        try:
+            await asyncio.to_thread(_conn.execute, "SELECT 1")
+        except Exception as e:
+            if _is_stream_error(e):
+                await asyncio.to_thread(_reconnect)
+            # Any other error: stay quiet, the next real save/reconnect cycle will surface it.
 
 
 # ── Save helpers ──────────────────────────────────────────────────────────────
@@ -154,11 +172,13 @@ def _reconnect() -> bool:
         _conn = None
         return False
 
-def _save_key(key: str, value: Any) -> None:
-    """Upsert a single key into the state table with auto-reconnect."""
+async def _save_key(key: str, value: Any) -> None:
+    """Upsert a single key into the state table with auto-reconnect.
+    Runs the blocking libsql calls off the event loop so a slow/blocked
+    Turso round-trip never stalls Discord gateway heartbeats."""
     if _conn is None:
         return
-    
+
     def _do_save():
         _conn.execute(
             "INSERT INTO state (key, value) VALUES (?, ?) "
@@ -166,32 +186,22 @@ def _save_key(key: str, value: Any) -> None:
             (key, json.dumps(value))
         )
         _conn.commit()
-    
+
     try:
-        _do_save()
+        await asyncio.to_thread(_do_save)
     except Exception as e:
         if _is_stream_error(e):
             print(f"[State] Stream error on save, attempting reconnect...")
-            if _reconnect():
-                _do_save()
+            reconnected = await asyncio.to_thread(_reconnect)
+            if reconnected:
+                try:
+                    await asyncio.to_thread(_do_save)
+                except Exception as e2:
+                    print(f"❌ Turso save error ({key}) after reconnect: {e2}")
             else:
-                print(f"❌ Turso save error ({key}) after reconnect failed: {e}")
+                print(f"❌ Turso save error ({key}) — reconnect failed: {e}")
         else:
             print(f"❌ Turso save error ({key}): {e}")
-
-# def _save_key(key: str, value: Any) -> None:
-#     """Upsert a single key into the state table."""
-#     if _conn is None:
-#         return
-#     try:
-#         _conn.execute(
-#             "INSERT INTO state (key, value) VALUES (?, ?) "
-#             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-#             (key, json.dumps(value))
-#         )
-#         _conn.commit()
-#     except Exception as e:
-#         print(f"❌ Turso save error ({key}): {e}")
 
 
 # ── Debounced save ────────────────────────────────────────────────────────────
@@ -213,7 +223,12 @@ async def _debounced_save(key: str, delay: float = 2.0) -> None:
     await asyncio.sleep(delay)
     serialiser = _SERIALISE.get(key)
     if serialiser:
-        _save_key(key, serialiser())
+        try:
+            await _save_key(key, serialiser())
+        except Exception as e:
+            # Last-resort guard: a debounced save must never crash its Task
+            # silently and must never raise into the event loop's task runner.
+            print(f"❌ Unexpected error in debounced save ({key}): {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
