@@ -75,6 +75,7 @@ class TursoConnection:
         self.conn = None
         self._lock = asyncio.Lock()  # serialize reconnects across concurrent callers
         self._last_activity = 0.0
+        self._last_connect = 0.0  # separate from _last_activity — only set on (re)connect
 
     def connect_sync(self) -> bool:
         """Blocking connect — call via asyncio.to_thread from async code."""
@@ -83,6 +84,7 @@ class TursoConnection:
             if self.init_fn:
                 self.init_fn()
             self._last_activity = time.monotonic()
+            self._last_connect = time.monotonic()
             return True
         except Exception as e:
             print(f"[{self.label}] Connect failed: {e}")
@@ -121,8 +123,12 @@ class TursoConnection:
                               f"(attempt {attempt + 1}/{max_retries})...")
                         async with self._lock:
                             # Another concurrent caller may have already
-                            # reconnected while we waited for the lock.
-                            if time.monotonic() - self._last_activity > 0.5:
+                            # reconnected while we waited for the lock —
+                            # check against the last *reconnect* time, not
+                            # the last successful query, since unrelated
+                            # queries succeeding doesn't mean this stream
+                            # was actually fixed.
+                            if time.monotonic() - self._last_connect > 0.5:
                                 await asyncio.to_thread(self.connect_sync)
                         if self.conn is None:
                             print(f"[{self.label}] Reconnect failed, giving up.")
@@ -139,16 +145,23 @@ class TursoConnection:
         print(f"[{self.label}] Unexpected retry exhaustion: {last_err}")
         return default
 
-    async def keepalive_loop(self, interval: float = 8.0) -> None:
+    async def keepalive_loop(self, interval: float = 4.0) -> None:
         """Ping every `interval` seconds so the stream stays warm and
-        (ideally) never idles out in the first place. Even if it does,
-        `run()` on the next real call will transparently recover."""
+        never idles out in the first place. Turso's idle-stream cutoff is
+        ~10s, so pinging every 4s leaves a wide safety margin even if the
+        event loop is briefly busy with something else (a slow save, a
+        blocking call elsewhere, Railway CPU throttling, etc.) and this
+        loop doesn't get to run exactly on schedule.
+
+        Always pings on every wake-up — no longer skips based on recent
+        activity. The previous version skipped the ping if a real query
+        had happened "recently" (within 80% of the interval), which
+        sounds efficient but left almost no margin against the 10s cutoff
+        whenever the event loop lagged even slightly. Pinging every 4s
+        unconditionally is cheap (a single SELECT 1) and removes that
+        failure mode entirely."""
         while True:
             await asyncio.sleep(interval)
             if self.conn is None:
-                continue
-            # Skip the ping if a real query already happened recently —
-            # no need to double up on traffic.
-            if time.monotonic() - self._last_activity < interval * 0.8:
                 continue
             await self.run(lambda: self.conn.execute("SELECT 1"), default=None)
