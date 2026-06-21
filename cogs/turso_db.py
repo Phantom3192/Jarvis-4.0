@@ -119,16 +119,20 @@ class TursoConnection:
                 last_err = e
                 if is_stream_error(e):
                     if attempt < max_retries:
-                        print(f"[{self.label}] Stream error, reconnecting "
-                              f"(attempt {attempt + 1}/{max_retries})...")
                         async with self._lock:
                             # Another concurrent caller may have already
                             # reconnected while we waited for the lock —
                             # check against the last *reconnect* time, not
                             # the last successful query, since unrelated
                             # queries succeeding doesn't mean this stream
-                            # was actually fixed.
+                            # was actually fixed. Only the caller that
+                            # actually performs the reconnect logs it —
+                            # otherwise every concurrent caller hitting the
+                            # same dropped stream prints its own line,
+                            # which just spams the same message repeatedly
+                            # for what is really a single underlying event.
                             if time.monotonic() - self._last_connect > 0.5:
+                                print(f"[{self.label}] Stream error, reconnecting...")
                                 await asyncio.to_thread(self.connect_sync)
                         if self.conn is None:
                             print(f"[{self.label}] Reconnect failed, giving up.")
