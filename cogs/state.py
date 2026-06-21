@@ -22,9 +22,9 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
-_conn = None  # libsql connection
-_turso_url   = ""
-_turso_token = ""
+from cogs.turso_db import TursoConnection
+
+_db: TursoConnection | None = None  # set in init_db()
 
 # ── In-memory mirrors ─────────────────────────────────────────────────────────
 
@@ -68,13 +68,10 @@ _SERIALISE: dict[str, Any] = {
 
 async def init_db():
     """Call once at startup. Connects to Turso and loads all state into memory."""
-    global _conn , _turso_url, _turso_token
+    global _db
 
     turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
-
-    _turso_url = turso_url
-    _turso_token = turso_token
 
     if not turso_url or not turso_token:
         print(
@@ -84,124 +81,64 @@ async def init_db():
         )
         return
 
-    try:
-        import libsql_experimental as libsql
-        _conn = libsql.connect(database=turso_url, auth_token=turso_token)
-
-        _conn.execute("""
+    def _ensure_table():
+        _db.conn.execute("""
             CREATE TABLE IF NOT EXISTS state (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )
         """)
-        _conn.commit()
+        _db.conn.commit()
 
-        rows = _conn.execute("SELECT key, value FROM state").fetchall()
-        db   = {row[0]: json.loads(row[1]) for row in rows}
+    _db = TursoConnection("State", turso_url, turso_token, init_fn=_ensure_table)
+    connected = await _db.connect_async()
+    if not connected:
+        print("❌ Turso state DB connection failed — Jarvis will run in memory-only mode.")
+        _db = None
+        return
 
-        if "bans"           in db: _data["bans"]           = db["bans"]
-        if "seen"           in db: _data["seen"]           = set(int(uid) for uid in db["seen"])
-        if "stats"          in db: _data["stats"]          = db["stats"]
-        if "prompts"        in db: _data["prompts"]        = db["prompts"]
-        if "settings"       in db: _data["settings"]       = db["settings"]
-        if "preferred_names" in db: _data["preferred_names"] = db["preferred_names"]
-        if "reminders"      in db: _data["reminders"]      = db["reminders"]
-        if "playlists"      in db: _data["playlists"]      = db["playlists"]
-        if "song_history"   in db: _data["song_history"]   = db["song_history"]
-        if "rate_limits"    in db: _data["rate_limits"]    = db["rate_limits"]
-        if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
-        if "credits"        in db: _data["credits"]        = db["credits"]
-        if "credit_meta"    in db: _data["credit_meta"]    = db["credit_meta"]
+    rows = await _db.run(
+        lambda: _db.conn.execute("SELECT key, value FROM state").fetchall(),
+        default=[],
+    )
+    db = {row[0]: json.loads(row[1]) for row in rows}
 
-        print("✅ Turso state DB connected")
-        asyncio.create_task(_keepalive_loop())
+    if "bans"           in db: _data["bans"]           = db["bans"]
+    if "seen"           in db: _data["seen"]           = set(int(uid) for uid in db["seen"])
+    if "stats"          in db: _data["stats"]          = db["stats"]
+    if "prompts"        in db: _data["prompts"]        = db["prompts"]
+    if "settings"       in db: _data["settings"]       = db["settings"]
+    if "preferred_names" in db: _data["preferred_names"] = db["preferred_names"]
+    if "reminders"      in db: _data["reminders"]      = db["reminders"]
+    if "playlists"      in db: _data["playlists"]      = db["playlists"]
+    if "song_history"   in db: _data["song_history"]   = db["song_history"]
+    if "rate_limits"    in db: _data["rate_limits"]    = db["rate_limits"]
+    if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
+    if "credits"        in db: _data["credits"]        = db["credits"]
+    if "credit_meta"    in db: _data["credit_meta"]    = db["credit_meta"]
 
-    except Exception as e:
-        print(
-            f"❌ Turso state DB connection failed: {e}\n"
-            "   Jarvis will run in memory-only mode."
-        )
-        _conn = None
-
-
-async def _keepalive_loop(interval: float = 8.0) -> None:
-    """Ping Turso periodically so the Hrana stream never sits idle long
-    enough to hit the server's ~10s idle-stream timeout. This is the
-    actual fix for repeated 'stream not found' disconnects — reconnect
-    logic only recovers after the fact, this prevents it from happening."""
-    while True:
-        await asyncio.sleep(interval)
-        if _conn is None:
-            continue
-        try:
-            await asyncio.to_thread(_conn.execute, "SELECT 1")
-        except Exception as e:
-            if _is_stream_error(e):
-                await asyncio.to_thread(_reconnect)
-            # Any other error: stay quiet, the next real save/reconnect cycle will surface it.
+    print("✅ Turso state DB connected")
+    asyncio.create_task(_db.keepalive_loop())
 
 
 # ── Save helpers ──────────────────────────────────────────────────────────────
 
-def _is_stream_error(e: Exception) -> bool:
-    """Detect Turso/Hrana stream-not-found errors."""
-    msg = str(e).lower()
-    return "stream not found" in msg or ("404" in msg and "hrana" in msg)
-
-
-def _reconnect() -> bool:
-    """Re-establish the libsql connection after a dropped stream."""
-    global _conn
-    if not _turso_url or not _turso_token:
-        return False
-    try:
-        import libsql_experimental as libsql
-        _conn = libsql.connect(database=_turso_url, auth_token=_turso_token)
-        # Re-create the state table to ensure the connection is ready
-        _conn.execute("""
-            CREATE TABLE IF NOT EXISTS state (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        """)
-        _conn.commit()
-        print("[State] Reconnected to Turso after stream error.")
-        return True
-    except Exception as e:
-        print(f"[State] Reconnect failed: {e}")
-        _conn = None
-        return False
-
 async def _save_key(key: str, value: Any) -> None:
-    """Upsert a single key into the state table with auto-reconnect.
-    Runs the blocking libsql calls off the event loop so a slow/blocked
-    Turso round-trip never stalls Discord gateway heartbeats."""
-    if _conn is None:
+    """Upsert a single key into the state table. Auto-reconnect, retry,
+    and off-event-loop execution are all handled by TursoConnection.run() —
+    this can never raise or stall the event loop."""
+    if _db is None:
         return
 
     def _do_save():
-        _conn.execute(
+        _db.conn.execute(
             "INSERT INTO state (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, json.dumps(value))
         )
-        _conn.commit()
+        _db.conn.commit()
 
-    try:
-        await asyncio.to_thread(_do_save)
-    except Exception as e:
-        if _is_stream_error(e):
-            print(f"[State] Stream error on save, attempting reconnect...")
-            reconnected = await asyncio.to_thread(_reconnect)
-            if reconnected:
-                try:
-                    await asyncio.to_thread(_do_save)
-                except Exception as e2:
-                    print(f"❌ Turso save error ({key}) after reconnect: {e2}")
-            else:
-                print(f"❌ Turso save error ({key}) — reconnect failed: {e}")
-        else:
-            print(f"❌ Turso save error ({key}): {e}")
+    await _db.run(_do_save)
 
 
 # ── Debounced save ────────────────────────────────────────────────────────────

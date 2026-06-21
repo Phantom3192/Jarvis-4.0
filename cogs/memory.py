@@ -15,125 +15,77 @@ import time
 import asyncio
 from typing import Any
 
+from cogs.turso_db import TursoConnection
+
 MAX_FACTS        = 20
 MEMORY_DAYS      = 90
 CLEANUP_INTERVAL = 86400
 
-_conn = None
-_turso_url   = ""
-_turso_token = ""
-
-
-def _is_stream_error(e: Exception) -> bool:
-    """Detect Turso/Hrana stream-not-found errors (dropped idle connection)."""
-    msg = str(e).lower()
-    return "stream not found" in msg or ("404" in msg and "hrana" in msg)
-
-
-def _reconnect() -> bool:
-    """Re-establish the libsql connection after a dropped stream."""
-    global _conn
-    if not _turso_url or not _turso_token:
-        return False
-    try:
-        import libsql_experimental as libsql
-        _conn = libsql.connect(database=_turso_url, auth_token=_turso_token)
-        _conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_memory (
-                user_id     TEXT PRIMARY KEY,
-                facts       TEXT NOT NULL DEFAULT '[]',
-                last_active REAL NOT NULL DEFAULT 0
-            )
-        """)
-        _conn.commit()
-        print("[Memory] Reconnected to Turso after stream error.")
-        return True
-    except Exception as e:
-        print(f"[Memory] Reconnect failed: {e}")
-        _conn = None
-        return False
+_db: TursoConnection | None = None
 
 
 async def init_memory():
-    global _conn, _turso_url, _turso_token
+    global _db
     turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
     if not turso_url or not turso_token:
         print("⚠️  Memory: TURSO_URL/TOKEN not set — long-term memory disabled.")
         return
-    _turso_url   = turso_url
-    _turso_token = turso_token
-    try:
-        import libsql_experimental as libsql
-        _conn = libsql.connect(database=turso_url, auth_token=turso_token)
-        # One row per user — facts stored as JSON array of {fact, category, ts}
-        _conn.execute("""
+
+    def _ensure_table():
+        _db.conn.execute("""
             CREATE TABLE IF NOT EXISTS user_memory (
                 user_id     TEXT PRIMARY KEY,
                 facts       TEXT NOT NULL DEFAULT '[]',
                 last_active REAL NOT NULL DEFAULT 0
             )
         """)
-        _conn.commit()
+        _db.conn.commit()
 
-        # Migrate from old multi-row user_memory table if it exists
-        try:
-            old_rows = _conn.execute(
-                "SELECT user_id, fact, category, timestamp FROM user_memory_old ORDER BY timestamp ASC"
-            ).fetchall()
-        except Exception:
-            old_rows = []
+    _db = TursoConnection("Memory", turso_url, turso_token, init_fn=_ensure_table)
+    connected = await _db.connect_async()
+    if not connected:
+        print("❌ Memory DB init failed — long-term memory disabled.")
+        _db = None
+        return
 
-        # Check if old table had id column (multi-row schema)
+    def _migrate():
+        # Detect old multi-row schema (had an `id` column) and migrate it.
         try:
-            old_rows = _conn.execute(
+            old_rows = _db.conn.execute(
                 "SELECT user_id, fact, category, timestamp FROM user_memory WHERE user_id != '' ORDER BY timestamp ASC"
             ).fetchall()
-            # If rows have string facts (old schema had TEXT fact column at top level)
-            # Detect old schema: try fetching 'id' column
-            _conn.execute("SELECT id FROM user_memory LIMIT 1").fetchone()
-            # If we get here, old schema exists — migrate
-            by_user: dict[str, list] = {}
-            now = time.time()
-            for uid, fact, category, ts in old_rows:
-                by_user.setdefault(uid, []).append({"fact": fact, "category": category, "ts": ts})
-            _conn.execute("DROP TABLE user_memory")
-            _conn.execute("""
-                CREATE TABLE user_memory (
-                    user_id     TEXT PRIMARY KEY,
-                    facts       TEXT NOT NULL DEFAULT '[]',
-                    last_active REAL NOT NULL DEFAULT 0
-                )
-            """)
-            for uid, entries in by_user.items():
-                entries = entries[-MAX_FACTS:]
-                _conn.execute("""
-                    INSERT INTO user_memory (user_id, facts, last_active) VALUES (?, ?, ?)
-                """, (uid, json.dumps(entries), now))
-            _conn.commit()
-            print(f"✅ Migrated memory for {len(by_user)} user(s) from old schema")
+            _db.conn.execute("SELECT id FROM user_memory LIMIT 1").fetchone()
         except Exception:
-            pass  # already new schema or empty
-        print("✅ Memory DB connected (compact mode: 1 row/user)")
-        asyncio.create_task(_cleanup_loop())
-        asyncio.create_task(_keepalive_loop())
-    except Exception as e:
-        print(f"❌ Memory DB init failed: {e}")
-        _conn = None
+            return 0  # already new schema or empty — nothing to migrate
 
+        by_user: dict[str, list] = {}
+        now = time.time()
+        for uid, fact, category, ts in old_rows:
+            by_user.setdefault(uid, []).append({"fact": fact, "category": category, "ts": ts})
+        _db.conn.execute("DROP TABLE user_memory")
+        _db.conn.execute("""
+            CREATE TABLE user_memory (
+                user_id     TEXT PRIMARY KEY,
+                facts       TEXT NOT NULL DEFAULT '[]',
+                last_active REAL NOT NULL DEFAULT 0
+            )
+        """)
+        for uid, entries in by_user.items():
+            entries = entries[-MAX_FACTS:]
+            _db.conn.execute("""
+                INSERT INTO user_memory (user_id, facts, last_active) VALUES (?, ?, ?)
+            """, (uid, json.dumps(entries), now))
+        _db.conn.commit()
+        return len(by_user)
 
-async def _keepalive_loop(interval: float = 8.0) -> None:
-    """Ping Turso periodically so the Hrana stream never sits idle long
-    enough to hit the server's ~10s idle-stream timeout."""
-    while True:
-        await asyncio.sleep(interval)
-        if _conn is None:
-            continue
-        try:
-            await asyncio.to_thread(_conn.execute, "SELECT 1")
-        except Exception as e:
-            if _is_stream_error(e):
-                await asyncio.to_thread(_reconnect)
+    migrated = await _db.run(_migrate, default=0)
+    if migrated:
+        print(f"✅ Migrated memory for {migrated} user(s) from old schema")
+
+    print("✅ Memory DB connected (compact mode: 1 row/user)")
+    asyncio.create_task(_cleanup_loop())
+    asyncio.create_task(_db.keepalive_loop())
 
 
 # ── Extraction patterns ───────────────────────────────────────────────────────
@@ -294,124 +246,78 @@ def _merge_facts(existing: list[dict], new_facts: list[tuple[str, str]]) -> list
 
 # ── DB operations ─────────────────────────────────────────────────────────────
 
-def _sync_save_facts(uid: str, facts: list[tuple[str, str]]) -> None:
-    """Blocking DB write — always call via asyncio.to_thread."""
-    now = time.time()
-    row = _conn.execute(
-        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-    ).fetchone()
-    existing = json.loads(row[0]) if row else []
-    merged   = _merge_facts(existing, facts)
-    blob     = json.dumps(merged)
-    _conn.execute("""
-        INSERT INTO user_memory (user_id, facts, last_active)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            facts       = excluded.facts,
-            last_active = excluded.last_active
-    """, (uid, blob, now))
-    _conn.commit()
-
 async def save_facts(user_id: int, facts: list[tuple[str, str]]) -> None:
-    if _conn is None or not facts:
+    if _db is None or not facts:
         return
     uid = str(user_id)
-    try:
-        await asyncio.to_thread(_sync_save_facts, uid, facts)
-    except Exception as e:
-        if _is_stream_error(e):
-            print("[Memory] Stream error on save, attempting reconnect...")
-            if _reconnect():
-                try:
-                    await asyncio.to_thread(_sync_save_facts, uid, facts)
-                    return
-                except Exception as e2:
-                    print(f"[Memory] save error for {uid} after reconnect: {e2}")
-                    return
-        print(f"[Memory] save error for {uid}: {e}")
 
+    def _do():
+        now = time.time()
+        row = _db.conn.execute(
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+        ).fetchone()
+        existing = json.loads(row[0]) if row else []
+        merged   = _merge_facts(existing, facts)
+        blob     = json.dumps(merged)
+        _db.conn.execute("""
+            INSERT INTO user_memory (user_id, facts, last_active)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                facts       = excluded.facts,
+                last_active = excluded.last_active
+        """, (uid, blob, now))
+        _db.conn.commit()
 
-def _sync_get_facts(uid: str) -> list[str]:
-    """Blocking DB read — always call via asyncio.to_thread."""
-    row = _conn.execute(
-        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-    ).fetchone()
-    if not row:
-        return []
-    entries = json.loads(row[0])
-    entries.sort(key=lambda x: x.get("ts", 0), reverse=True)
-    return [e["fact"] for e in entries]
+    await _db.run(_do)
+
 
 async def get_facts(user_id: int) -> list[str]:
-    if _conn is None:
+    if _db is None:
         return []
     uid = str(user_id)
-    try:
-        return await asyncio.to_thread(_sync_get_facts, uid)
-    except Exception as e:
-        if _is_stream_error(e):
-            print("[Memory] Stream error on get, attempting reconnect...")
-            if _reconnect():
-                try:
-                    return await asyncio.to_thread(_sync_get_facts, uid)
-                except Exception as e2:
-                    print(f"[Memory] get error for {uid} after reconnect: {e2}")
-                    return []
-        print(f"[Memory] get error for {uid}: {e}")
-        return []
 
+    def _do():
+        row = _db.conn.execute(
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+        ).fetchone()
+        if not row:
+            return []
+        entries = json.loads(row[0])
+        entries.sort(key=lambda x: x.get("ts", 0), reverse=True)
+        return [e["fact"] for e in entries]
 
-def _sync_forget_facts(uid: str) -> int:
-    """Blocking DB write — always call via asyncio.to_thread."""
-    row = _conn.execute(
-        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-    ).fetchone()
-    count = len(json.loads(row[0])) if row else 0
-    _conn.execute("UPDATE user_memory SET facts = '[]' WHERE user_id = ?", (uid,))
-    _conn.commit()
-    return count
+    return await _db.run(_do, default=[])
+
 
 async def forget_facts(user_id: int) -> int:
-    if _conn is None:
+    if _db is None:
         return 0
     uid = str(user_id)
-    try:
-        return await asyncio.to_thread(_sync_forget_facts, uid)
-    except Exception as e:
-        if _is_stream_error(e):
-            print("[Memory] Stream error on forget, attempting reconnect...")
-            if _reconnect():
-                try:
-                    return await asyncio.to_thread(_sync_forget_facts, uid)
-                except Exception as e2:
-                    print(f"[Memory] forget error for {uid} after reconnect: {e2}")
-                    return 0
-        print(f"[Memory] forget error for {uid}: {e}")
-        return 0
 
+    def _do():
+        row = _db.conn.execute(
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+        ).fetchone()
+        count = len(json.loads(row[0])) if row else 0
+        _db.conn.execute("UPDATE user_memory SET facts = '[]' WHERE user_id = ?", (uid,))
+        _db.conn.commit()
+        return count
 
-def _sync_get_facts_count(uid: str) -> int:
-    """Blocking DB read — always call via asyncio.to_thread."""
-    row = _conn.execute(
-        "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
-    ).fetchone()
-    return len(json.loads(row[0])) if row else 0
+    return await _db.run(_do, default=0)
+
 
 async def get_facts_count(user_id: int) -> int:
-    if _conn is None:
+    if _db is None:
         return 0
     uid = str(user_id)
-    try:
-        return await asyncio.to_thread(_sync_get_facts_count, uid)
-    except Exception as e:
-        if _is_stream_error(e):
-            print("[Memory] Stream error on get_count, attempting reconnect...")
-            if _reconnect():
-                try:
-                    return await asyncio.to_thread(_sync_get_facts_count, uid)
-                except Exception:
-                    return 0
-        return 0
+
+    def _do():
+        row = _db.conn.execute(
+            "SELECT facts FROM user_memory WHERE user_id = ?", (uid,)
+        ).fetchone()
+        return len(json.loads(row[0])) if row else 0
+
+    return await _db.run(_do, default=0)
 
 
 def build_memory_prompt(facts: list[str]) -> str:
@@ -431,28 +337,16 @@ async def _cleanup_loop():
         await _cleanup_old_facts()
 
 
-def _sync_cleanup_old_facts(cutoff: float) -> None:
-    _conn.execute(
-        "DELETE FROM user_memory WHERE last_active < ? AND last_active > 0", (cutoff,)
-    )
-    _conn.commit()
-
 async def _cleanup_old_facts():
-    if _conn is None:
+    if _db is None:
         return
     cutoff = time.time() - (MEMORY_DAYS * 86400)
-    try:
-        await asyncio.to_thread(_sync_cleanup_old_facts, cutoff)
-        print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
-    except Exception as e:
-        if _is_stream_error(e):
-            print("[Memory] Stream error on cleanup, attempting reconnect...")
-            if _reconnect():
-                try:
-                    await asyncio.to_thread(_sync_cleanup_old_facts, cutoff)
-                    print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
-                    return
-                except Exception as e2:
-                    print(f"[Memory] cleanup error after reconnect: {e2}")
-                    return
-        print(f"[Memory] cleanup error: {e}")
+
+    def _do():
+        _db.conn.execute(
+            "DELETE FROM user_memory WHERE last_active < ? AND last_active > 0", (cutoff,)
+        )
+        _db.conn.commit()
+
+    await _db.run(_do)
+    print(f"🧹 Cleaned up memory for users inactive {MEMORY_DAYS}+ days")
