@@ -69,14 +69,33 @@ _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
 _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
+# ── Node identifiers ─────────────────────────────────────────────────────────
+# NODE_PUBLIC  : community node, used for YouTube (primary)
+# NODE_SC      : your self-hosted node, used as SoundCloud fallback when
+#                YouTube throws a login/access error
+NODE_PUBLIC = "public-yt"
+NODE_SC     = "self-sc"
+
 LAVALINK_NODES = [
-        {
-  "host": "lavalink.jirayu.net",
-  "password": "youshallnotpass",
-  "secure": False ,
-  "port": 13592 ,
-  }
+    # Primary public node — handles YouTube
+    {
+        "identifier": NODE_PUBLIC,
+        "host":       "lavalink.jirayu.net",
+        "password":   "youshallnotpass",
+        "secure":     False,
+        "port":       13592,
+    },
+    # YOUR self-hosted node — SoundCloud fallback only
+    # Replace host/port/password with your actual values
+    {
+        "identifier": NODE_SC,
+        "host":       "happy-joy-production-906e.up.railway.app",  # ← change this
+        "password":   "jarvisbot",            # ← change this
+        "secure":     True,
+        "port":       443,                       # default Lavalink port
+    },
 ]
+
 
 # Minimum gap (in seconds) between consecutive track-load requests.
 MIN_TRACK_LOAD_GAP = 2.5
@@ -475,8 +494,9 @@ class Music(commands.Cog):
         await asyncio.sleep(2)
         nodes = [
             wavelink.Node(
+                identifier=n["identifier"],
                 uri=f"{'https' if n.get('secure', False) else 'http'}://{n['host']}:{n['port']}",
-                password=n["password"]
+                password=n["password"],
             )
             for n in LAVALINK_NODES
         ]
@@ -509,6 +529,54 @@ class Music(commands.Cog):
     @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload) -> None:
         print(f"✅ Lavalink node ready: {payload.node.uri}  (resumed={payload.resumed})")
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_exception(
+        self, payload: wavelink.TrackExceptionEventPayload
+    ) -> None:
+        """
+        Fires when Lavalink throws a TrackException during playback.
+        If the error is a YouTube login/access block, we silently retry
+        the same song on the self-hosted SoundCloud node instead.
+        """
+        player: wavelink.Player = payload.player
+        track  = payload.track
+
+        # Only handle YouTube login / access errors
+        msg = str(getattr(payload.exception, "message", payload.exception)).lower()
+        is_yt_block = any(k in msg for k in ("login", "not available", "sign in", "403", "blocked"))
+        if not is_yt_block:
+            return  # some other error — let it bubble up normally
+
+        print(
+            f"⚠️  YouTube blocked '{track.title}' "
+            f"(node={payload.node.identifier}) — retrying on SoundCloud node..."
+        )
+
+        # Grab your self-hosted SC node specifically
+        sc_node: wavelink.Node | None = wavelink.Pool.get_node(identifier=NODE_SC)
+        if sc_node is None:
+            print("❌  SC fallback node not connected, cannot retry.")
+            return
+
+        # Search SoundCloud on the SC node
+        query   = f"{track.author} {track.title}".strip() if track.author else track.title
+        results = await wavelink.Playable.search(
+            query, source=wavelink.TrackSource.SoundCloud, node=sc_node
+        )
+        if not results:
+            print(f"❌  No SoundCloud result found for '{query}'")
+            return
+
+        fallback: wavelink.Playable = (
+            results[0] if isinstance(results, list) else results.tracks[0]
+        )
+        fallback.extras = track.extras  # preserve requester metadata if any
+
+        # Assign the player to use the SC node for this track
+        player.node = sc_node
+        await player.play(fallback, volume=player.volume)
+        print(f"✅  Now playing SoundCloud fallback: {fallback.title}")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
