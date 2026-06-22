@@ -109,6 +109,17 @@ class TursoConnection:
         if self.conn is None:
             return default
 
+        # Python 3.12 raises RuntimeError when submitting work to the thread
+        # pool executor after the event loop has started shutting down.
+        # Guard here so debounced saves that fire during shutdown are silently
+        # dropped rather than crashing with a confusing traceback.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return default
+        if loop.is_closed() or not loop.is_running():
+            return default
+
         last_err: Exception | None = None
         for attempt in range(max_retries + 1):
             try:

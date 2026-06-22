@@ -164,6 +164,9 @@ async def _debounced_save(key: str, delay: float = 2.0) -> None:
     serialiser = _SERIALISE.get(key)
     if serialiser:
         try:
+            loop = asyncio.get_running_loop()
+            if loop.is_closed() or not loop.is_running():
+                return
             await _save_key(key, serialiser())
         except Exception as e:
             # Last-resort guard: a debounced save must never crash its Task
