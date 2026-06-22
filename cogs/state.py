@@ -42,6 +42,7 @@ _data: dict[str, Any] = {
     "guild_bans":     {},    # str(guild_id) → {"reason": str, "banned_at": float}
     "credits":        {},    # str(user_id) → int balance of Jarvis Credits (JC)
     "credit_meta":    {},    # str(user_id) → {"last_daily": "YYYY-MM-DD", "chat_day": "YYYY-MM-DD", "chat_count": int}
+    "guild_logs":     {},    # str(guild_id) → {"name": str, "joined_at": float, "member_count": int, "owner_id": int}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -59,6 +60,7 @@ _SERIALISE: dict[str, Any] = {
     "guild_bans":      lambda: _data["guild_bans"],
     "credits":         lambda: _data["credits"],
     "credit_meta":     lambda: _data["credit_meta"],
+    "guild_logs":      lambda: _data["guild_logs"],
 }
 
 
@@ -116,6 +118,7 @@ async def init_db():
     if "guild_bans"     in db: _data["guild_bans"]     = db["guild_bans"]
     if "credits"        in db: _data["credits"]        = db["credits"]
     if "credit_meta"    in db: _data["credit_meta"]    = db["credit_meta"]
+    if "guild_logs"     in db: _data["guild_logs"]     = db["guild_logs"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -685,3 +688,36 @@ def earn_chat_credits(user_id: int, amount: int, daily_cap: int) -> int:
 def grant_onboarding_bonus(user_id: int, amount: int) -> int:
     """One-time JC grant for a brand-new user. Returns new balance."""
     return add_credits(user_id, amount)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GUILD LOGS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def log_guild_join(guild_id: int, name: str, member_count: int, owner_id: int, joined_at: float | None = None) -> bool:
+    """Record that the bot joined a guild.
+
+    Returns True if this is a *new* entry (first time seeing this guild),
+    False if the guild was already in the log (e.g. re-invite or on_ready scan).
+    """
+    gid = str(guild_id)
+    if gid in _data["guild_logs"]:
+        return False
+    _data["guild_logs"][gid] = {
+        "name":         name,
+        "joined_at":    joined_at if joined_at is not None else time.time(),
+        "member_count": member_count,
+        "owner_id":     owner_id,
+    }
+    _schedule_save("guild_logs")
+    return True
+
+
+def get_guild_log(guild_id: int) -> dict | None:
+    """Return the stored log entry for a guild, or None if not found."""
+    return _data["guild_logs"].get(str(guild_id))
+
+
+def get_all_guild_logs() -> dict[str, dict]:
+    """Return a copy of all guild log entries, keyed by str(guild_id)."""
+    return dict(_data["guild_logs"])

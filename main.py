@@ -7,6 +7,7 @@ import time
 from dotenv import load_dotenv
 from cogs.errorhandler import install_stdout_error_forwarding, install_view_error_suppression
 from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown
+from cogs.state import log_guild_join, get_all_guild_logs
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
@@ -18,6 +19,61 @@ install_view_error_suppression()    # silence harmless expired-interaction noise
 logging.basicConfig(level=logging.WARNING)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+
+# ── Server Log Webhook ────────────────────────────────────────────────────────
+
+def _server_log_webhook_url() -> str:
+    return os.getenv("SERVER_LOG_WEBHOOK", "").strip()
+
+
+async def _send_server_log(guild: discord.Guild, *, is_new: bool = True) -> None:
+    """Send a server log embed to the SERVER_LOG_WEBHOOK.
+
+    is_new=True  → bot just joined (green embed, real-time)
+    is_new=False → historical entry being replayed on startup (grey embed)
+    """
+    url = _server_log_webhook_url()
+    if not url:
+        return
+    try:
+        import cogs.http_session as _http
+        session = _http.get_session()
+        webhook = discord.Webhook.from_url(url, session=session)
+
+        joined_ts = (
+            guild.me.joined_at.timestamp()
+            if guild.me and guild.me.joined_at
+            else time.time()
+        )
+
+        color = discord.Color.green() if is_new else discord.Color.greyple()
+        label = "🆕 New Server Added" if is_new else "📋 Existing Server (startup log)"
+
+        embed = discord.Embed(
+            title=label,
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+
+        embed.add_field(name="🏷️ Server Name",   value=guild.name,              inline=True)
+        embed.add_field(name="🆔 Server ID",      value=f"`{guild.id}`",         inline=True)
+        embed.add_field(name="👥 Members",         value=f"`{guild.member_count}`", inline=True)
+
+        owner = guild.owner
+        owner_str = str(owner) if owner else f"ID `{guild.owner_id}`"
+        embed.add_field(name="👑 Owner",           value=owner_str,              inline=True)
+        embed.add_field(name="📅 Bot Joined",      value=f"<t:{int(joined_ts)}:F>", inline=True)
+        embed.add_field(name="🌍 Total Servers",   value=f"`{len(bot.guilds)}`", inline=True)
+
+        if guild.description:
+            embed.add_field(name="📝 Description", value=guild.description[:512], inline=False)
+
+        embed.set_footer(text="Jarvis Server Log")
+        await webhook.send(embed=embed, username="Jarvis Server Log")
+    except Exception as e:
+        print(f"❌ Server log webhook failed for guild {guild.id}: {e}")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -162,6 +218,49 @@ async def on_ready():
         )
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
+
+    # ── Server log: send historical entries for every guild bot is in ─────────
+    # log_guild_join() returns True only the first time a guild_id is seen,
+    # so this block runs once per guild across all restarts (not on every boot).
+    if _server_log_webhook_url():
+        new_entries = 0
+        for guild in bot.guilds:
+            joined_at = (
+                guild.me.joined_at.timestamp()
+                if guild.me and guild.me.joined_at
+                else None
+            )
+            is_new_entry = log_guild_join(
+                guild_id=guild.id,
+                name=guild.name,
+                member_count=guild.member_count,
+                owner_id=guild.owner_id or 0,
+                joined_at=joined_at,
+            )
+            if is_new_entry:
+                await _send_server_log(guild, is_new=False)
+                new_entries += 1
+                await asyncio.sleep(0.5)   # rate-limit friendly
+        if new_entries:
+            print(f"✅ Server log: sent {new_entries} historical guild entr{'y' if new_entries == 1 else 'ies'} to webhook")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Fires when Jarvis is added to a new server."""
+    joined_at = (
+        guild.me.joined_at.timestamp()
+        if guild.me and guild.me.joined_at
+        else None
+    )
+    log_guild_join(
+        guild_id=guild.id,
+        name=guild.name,
+        member_count=guild.member_count,
+        owner_id=guild.owner_id or 0,
+        joined_at=joined_at,
+    )
+    await _send_server_log(guild, is_new=True)
 
 
 async def main():
