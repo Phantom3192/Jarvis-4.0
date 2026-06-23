@@ -233,6 +233,44 @@ class Economy(commands.Cog):
         elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
             await ctx.reply("**Usage:** `!givecredits @user1 [@user2 ...] <amount>`\n**Example:** `!givecredits @Phantom @Someone 100`")
 
+    @commands.command(name="removejc", aliases=["removecredits", "deductjc"])
+    @commands.is_owner()
+    async def prefix_removejc(
+        self,
+        ctx: commands.Context,
+        users: commands.Greedy[discord.User],
+        amount: int,
+    ):
+        """!removejc @user <amount> — owner-only. Deducts JC from one or more users. Balance won't go below 0."""
+        if not users:
+            await ctx.reply("**Usage:** `!removejc @user1 [@user2 ...] <amount>`\n**Example:** `!removejc @Phantom 100`")
+            return
+        if amount <= 0:
+            await ctx.reply("⚠️ Amount must be a positive number.")
+            return
+
+        lines = []
+        for user in users:
+            new_balance = add_credits(user.id, -amount)
+            lines.append(f"**{user.display_name}** → new balance: **{new_balance}** {JC_NAME}s")
+
+        embed = discord.Embed(
+            description=(
+                f"{JC_EMOJI} **Removed {amount} {JC_NAME}** "
+                f"from **{len(users)}** user(s):\n\n"
+                + "\n".join(lines)
+            ),
+            color=discord.Color.red(),
+        )
+        await ctx.reply(embed=embed)
+
+    @prefix_removejc.error
+    async def removejc_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.NotOwner):
+            await ctx.reply("🚫 Only the bot owner can use this command.")
+        elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+            await ctx.reply("**Usage:** `!removejc @user1 [@user2 ...] <amount>`\n**Example:** `!removejc @Phantom 100`")
+
     @app_commands.command(name="givecredits", description="(Owner only) Grant or remove JC from a user")
     @app_commands.describe(user="User to give/remove JC", amount="Amount of JC (negative to remove)")
     async def slash_givecredits(self, interaction: discord.Interaction, user: discord.User, amount: int):
