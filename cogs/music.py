@@ -76,23 +76,21 @@ _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 NODE_PUBLIC = "public-yt"
 NODE_SC     = "self-sc"
 
-LAVALINK_NODES = [
-    # Primary public node — handles YouTube
-    {
-        "identifier": NODE_PUBLIC,
-        "host":       "lavalink.jirayu.net",
-        "password":   "youshallnotpass",
-        "secure":     False,
-        "port":       13592,
-    },
-    # YOUR self-hosted node — SoundCloud fallback only
-    # Replace host/port/password with your actual values
+# Public YT nodes tried in order — first working one is used, rest are fallback
+PUBLIC_YT_NODES = [
+    {"identifier": "public-yt-1", "host": "lavalink.jirayu.net",        "password": "youshallnotpass",               "secure": False, "port": 13592},
+    {"identifier": "public-yt-2", "host": "lavalinkv4.serenetia.com",   "password": "https://seretia.link/discord",  "secure": False, "port": 80},
+    {"identifier": "public-yt-3", "host": "lavalink.triniumhost.com",   "password": "kirito",                        "secure": False, "port": 2333},
+    {"identifier": "public-yt-4", "host": "lava2.kasawa.pro",           "password": "youshallnotpass",               "secure": False, "port": 2334},
+]
+LAVALINK_NODES = PUBLIC_YT_NODES + [
+    # Self-hosted node — SoundCloud fallback only
     {
         "identifier": NODE_SC,
-        "host":       "happy-joy-production-906e.up.railway.app",  # ← change this
-        "password":   "jarvisbot",            # ← change this
+        "host":       "happy-joy-production-906e.up.railway.app",
+        "password":   "jarvisbot",
         "secure":     True,
-        "port":       443,                       # default Lavalink port
+        "port":       443,
     },
 ]
 
@@ -134,20 +132,27 @@ async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
     if source in ("spotify", "applemusic", "soundcloud"):
         tracks = await wavelink.Playable.search(q)
         if tracks:
-            return tracks, source
-        return None, source
+            return tracks, source, None
+        return None, source, None
 
-    # Plain text — try YouTube first
-    tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube)
-    if tracks:
-        return tracks, "youtube"
+    # Plain text — try each public YT node in order
+    for n in PUBLIC_YT_NODES:
+        node = wavelink.Pool.get_node(n["identifier"])
+        if node is None:
+            print(f"[YT] Node {n['identifier']} not connected, skipping")
+            continue
+        try:
+            tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube, node=node)
+            if tracks:
+                print(f"[YT] Node {n['identifier']} succeeded")
+                return tracks, "youtube", node
+            else:
+                print(f"[YT] Node {n['identifier']} returned no results")
+        except Exception as e:
+            print(f"[YT] Node {n['identifier']} error: {e}")
 
-    # YouTube failed → try SoundCloud
-    tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud)
-    if tracks:
-        return tracks, "soundcloud"
-
-    return None, "none"
+    print("[YT] All public nodes failed, giving up")
+    return None, "none", None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
@@ -197,7 +202,7 @@ async def _resolve_saved_track(info: dict[str, object]) -> Optional[wavelink.Pla
         return None
     # Try by URI first, then fall back to title+author search
     query = uri or f"{author} {title}".strip()
-    tracks, _ = await _smart_search(query)
+    tracks, _, _ = await _smart_search(query)
     if not tracks:
         return None
     return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
@@ -215,7 +220,7 @@ async def _find_similar_track(history: list[dict[str, object]]) -> Optional[wave
         query = f"songs like {title}"
     else:
         return None
-    tracks, _ = await _smart_search(query)
+    tracks, _, _ = await _smart_search(query)
     if not tracks:
         return None
     return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
@@ -313,7 +318,7 @@ class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
         query  = self.query.value.strip()
-        tracks, _ = await _smart_search(query)
+        tracks, _, _ = await _smart_search(query)
         if not tracks:
             await interaction.followup.send(embed=_err(f"No results found for **{query}**"))
             return
@@ -554,7 +559,7 @@ class Music(commands.Cog):
         )
 
         # Grab your self-hosted SC node specifically
-        sc_node: wavelink.Node | None = wavelink.Pool.get_node(identifier=NODE_SC)
+        sc_node: wavelink.Node | None = wavelink.Pool.get_node(NODE_SC)
         if sc_node is None:
             print("❌  SC fallback node not connected, cannot retry.")
             return
@@ -667,7 +672,7 @@ class Music(commands.Cog):
 
         await self._pace_request(guild.id)
 
-        tracks, source_used = await _smart_search(query)
+        tracks, source_used, yt_node = await _smart_search(query)
         if not tracks:
             await send_fn(embed=_err(
                 f"No results found for **{query}**\n"
@@ -698,7 +703,21 @@ class Music(commands.Cog):
                 embed.set_thumbnail(url=track.artwork)
             await send_fn(embed=embed)
         else:
-            await player.play(track, volume=100)
+            if yt_node is not None and yt_node.identifier != player.node.identifier:
+                try:
+                    await player.switch_node(yt_node)
+                    print(f"[Play] Switched player to node: {yt_node.identifier}")
+                except Exception as e:
+                    print(f"[Play] Could not switch node: {e}")
+            try:
+                print(f"[Play] Attempting playback on node: {player.node.identifier}")
+                await player.play(track, volume=100)
+                print(f"[Play] Success on node: {player.node.identifier}")
+            except Exception as e:
+                print(f"[Play] Playback error on node {player.node.identifier}: {e}")
+                await send_fn(embed=_err(f"Playback failed: `{e}`"))
+                return
+
             self._last_requester[player.guild.id] = author.id
             append_song_history(author.id, _track_info(track))
             embed = _track_embed(track, requester=author)
@@ -949,7 +968,7 @@ class Music(commands.Cog):
 
     @prefix_playlist.command(name="add")
     async def playlist_add(self, ctx: commands.Context, name: str, *, query: str) -> None:
-        tracks, _ = await _smart_search(query)
+        tracks, _, _ = await _smart_search(query)
         if not tracks:
             await ctx.reply(f"❌ No results found for **{query}**")
             return
