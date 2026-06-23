@@ -328,7 +328,7 @@ async def _log_new_user(user: discord.User | discord.Member) -> None:
 
 
 async def _log_guild(guild: discord.Guild, *, joined: bool, backfill: bool = False, index: int = 0, total: int = 0) -> None:
-    """Send a guild join/leave/backfill embed to SERVER_LOG_WEBHOOK_URL."""
+    """Send a guild join/leave embed to SERVER_LOG_WEBHOOK_URL."""
     webhook_url = os.getenv("SERVER_LOG_WEBHOOK_URL", "")
     if not webhook_url:
         return
@@ -363,8 +363,8 @@ async def _log_guild(guild: discord.Guild, *, joined: bool, backfill: bool = Fal
 
 
 async def _log_member(member: discord.Member, *, joined: bool) -> None:
-    """Send a member join/leave embed to LOG_WEBHOOK_URL."""
-    webhook_url = os.getenv("LOG_WEBHOOK_URL", "")
+    """Send a member join/leave embed to SERVER_LOG_WEBHOOK_URL."""
+    webhook_url = os.getenv("SERVER_LOG_WEBHOOK_URL", "")
     if not webhook_url:
         return
     try:
@@ -2047,18 +2047,6 @@ class AI(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
         await _log_guild(guild, joined=True)
-
-    @commands.Cog.listener()
-    async def on_guild_remove(self, guild: discord.Guild) -> None:
-        await _log_guild(guild, joined=False)
-
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member) -> None:
-        await _log_member(member, joined=True)
-
-    @commands.Cog.listener()
-    async def on_member_remove(self, member: discord.Member) -> None:
-        await _log_member(member, joined=False)
 
     # ── Backfill command (owner-only) ─────────────────────────────────────────
 
