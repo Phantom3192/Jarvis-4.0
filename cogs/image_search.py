@@ -27,6 +27,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from cogs.http_session import get_session
+from cogs.economy import SpendCreditsView, JC_EMOJI, JC_NAME, get_credits
 
 load_dotenv()
 
@@ -85,6 +86,7 @@ SERPER_TIMEOUT = aiohttp.ClientTimeout(total=10)
 MAX_RESULTS    = 10   # Serper returns up to 10 image results by default
 
 IMAGE_SEARCH_COOLDOWN = 10 * 60  # 10 minutes in seconds
+IMAGE_BYPASS_COST     = 50       # JC cost to skip the cooldown
 
 # ── Per-user rate limit ───────────────────────────────────────────────────────
 
@@ -105,11 +107,20 @@ def _fmt_time(seconds: float) -> str:
     return f"{m}m {s}s" if m else f"{s}s"
 
 def _cooldown_embed(remaining: float, user: discord.User | discord.Member) -> discord.Embed:
+    balance = get_credits(user.id)
+    can_bypass = balance >= IMAGE_BYPASS_COST
+    bypass_hint = (
+        f"\n\n{JC_EMOJI} **Bypass for {IMAGE_BYPASS_COST} {JC_NAME}s?**\n"
+        f"Your balance: **{balance}** {JC_NAME}s — press **Yes** below!"
+        if can_bypass else
+        f"\n\n{JC_EMOJI} Need **{IMAGE_BYPASS_COST} {JC_NAME}s** to bypass. You have **{balance}**."
+    )
     embed = discord.Embed(
         title="⏳ Cooldown Active",
         description=(
             f"You can only search images **once every 10 minutes**.\n\n"
             f"**Time remaining:** `{_fmt_time(remaining)}`"
+            + bypass_hint
         ),
         color=discord.Color.orange(),
     )
@@ -237,7 +248,51 @@ class ImageSearch(commands.Cog):
 
         remaining = _check_cooldown(user.id)
         if remaining > 0:
-            await error_fn(embed=_cooldown_embed(remaining, user))
+            # Only offer bypass button if user can afford it
+            if get_credits(user.id) >= IMAGE_BYPASS_COST:
+                bypass_msg: discord.Message | None = None
+
+                async def on_confirm(interaction: discord.Interaction, view: SpendCreditsView):
+                    # JC already deducted by SpendCreditsView — run the search now
+                    await interaction.response.edit_message(
+                        content="🔍 Searching…", embed=None, view=None
+                    )
+                    results = await _search_images(query)
+                    if not results:
+                        await interaction.edit_original_response(
+                            content=None,
+                            embed=_no_results_embed(query, user),
+                        )
+                        return
+                    idx    = max(1, min(index, len(results)))
+                    embed  = _build_embed(query, results[idx - 1], idx, len(results), user)
+                    _mark_searched(user.id)
+                    await interaction.edit_original_response(content=None, embed=embed)
+
+                async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
+                    msg = "❌ Bypass cancelled." if reason == "declined" else f"❌ Not enough {JC_NAME}s."
+                    await interaction.response.edit_message(content=msg, embed=None, view=None)
+
+                async def on_timeout(view: SpendCreditsView):
+                    if bypass_msg:
+                        try:
+                            await bypass_msg.edit(content="⏰ Bypass prompt expired.", embed=None, view=None)
+                        except discord.HTTPException:
+                            pass
+
+                view = SpendCreditsView(
+                    user_id=user.id,
+                    cost=IMAGE_BYPASS_COST,
+                    on_confirm=on_confirm,
+                    on_decline=on_decline,
+                    on_timeout_action=on_timeout,
+                    timeout=30,
+                )
+                bypass_msg = await error_fn(embed=_cooldown_embed(remaining, user), view=view)
+                if bypass_msg:
+                    view.message = bypass_msg
+            else:
+                await error_fn(embed=_cooldown_embed(remaining, user))
             return
 
         results = await _search_images(query)

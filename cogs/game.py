@@ -277,7 +277,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
             pass
         await message.channel.send(
             embed=discord.Embed(
-                description=f"{extra}{reason_text}\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                description=f"{extra}{reason_text}\n💀 {message.author.mention} ruined it! Streak of **{old}** lost! Count resets to **0**.",
                 color=discord.Color.red(),
             )
         )
@@ -292,7 +292,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
                 pass
         await message.channel.send(
             embed=discord.Embed(
-                description=f"{reason_text}\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                description=f"{reason_text}\n💀 {message.author.mention} ruined it! Streak of **{old}** lost! Count resets to **0**.",
                 color=discord.Color.red(),
             )
         )
@@ -2198,7 +2198,7 @@ class Fun(commands.Cog):
             _count_schedule_save(message.guild.id)
             await message.channel.send(
                 embed=discord.Embed(
-                    description=f"❌ **Wrong number!** Expected **{expected}**.\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                    description=f"❌ **Wrong number!** Expected **{expected}**.\n💀 {message.author.mention} ruined it! Streak of **{old}** lost! Count resets to **0**.",
                     color=discord.Color.red(),
                 )
             )
@@ -2213,7 +2213,7 @@ class Fun(commands.Cog):
             _count_schedule_save(message.guild.id)
             await message.channel.send(
                 embed=discord.Embed(
-                    description=f"❌ **{message.author.display_name}**, you can't count twice in a row!\n💀 Streak of **{old}** lost! Count resets to **0**.",
+                    description=f"❌ **{message.author.display_name}**, you can't count twice in a row!\n💀 {message.author.mention} ruined it! Streak of **{old}** lost! Count resets to **0**.",
                     color=discord.Color.red(),
                 )
             )
