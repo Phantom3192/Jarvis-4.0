@@ -327,6 +327,70 @@ async def _log_new_user(user: discord.User | discord.Member) -> None:
         print(f"❌ Webhook error _log_new_user: {e}")
 
 
+async def _log_guild(guild: discord.Guild, *, joined: bool, backfill: bool = False, index: int = 0, total: int = 0) -> None:
+    """Send a guild join/leave/backfill embed to SERVER_LOG_WEBHOOK_URL."""
+    webhook_url = os.getenv("SERVER_LOG_WEBHOOK_URL", "")
+    if not webhook_url:
+        return
+    try:
+        if backfill:
+            title = "📋 Existing Server (backfill)"
+            color = discord.Color.blurple()
+        elif joined:
+            title = "➕ Bot Added to Server"
+            color = discord.Color.green()
+        else:
+            title = "➖ Bot Removed from Server"
+            color = discord.Color.red()
+
+        embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
+        embed.add_field(name="Server Name",    value=guild.name,              inline=True)
+        embed.add_field(name="Server ID",      value=f"`{guild.id}`",         inline=True)
+        embed.add_field(name="Member Count",   value=str(guild.member_count), inline=True)
+        embed.add_field(name="Owner",          value=f"<@{guild.owner_id}>" if guild.owner_id else "Unknown", inline=True)
+        created_ts = int(guild.created_at.timestamp())
+        embed.add_field(name="Server Created", value=f"<t:{created_ts}:R>",   inline=True)
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        footer = f"Backfill {index}/{total}" if backfill else ("Bot now in servers" if joined else "Bot removed")
+        embed.set_footer(text=footer)
+
+        session = get_session()
+        webhook = discord.Webhook.from_url(webhook_url, session=session)
+        await webhook.send(embed=embed, username="Jarvis Server Logs")
+    except Exception as e:
+        print(f"❌ Webhook error _log_guild: {e}")
+
+
+async def _log_member(member: discord.Member, *, joined: bool) -> None:
+    """Send a member join/leave embed to LOG_WEBHOOK_URL."""
+    webhook_url = os.getenv("LOG_WEBHOOK_URL", "")
+    if not webhook_url:
+        return
+    try:
+        title = "📥 New Member Joined" if joined else "📤 Member Left"
+        color = discord.Color.green() if joined else discord.Color.red()
+
+        embed = discord.Embed(title=title, color=color, timestamp=discord.utils.utcnow())
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="User",           value=f"{member} (`{member.id}`)", inline=False)
+        embed.add_field(name="Server",         value=member.guild.name,           inline=True)
+        embed.add_field(name="Server ID",      value=f"`{member.guild.id}`",      inline=True)
+        embed.add_field(name="Members Now",    value=str(member.guild.member_count), inline=True)
+        created_ts = int(member.created_at.timestamp())
+        embed.add_field(name="Account Age",    value=f"<t:{created_ts}:R>",       inline=True)
+        if joined and member.joined_at:
+            joined_ts = int(member.joined_at.timestamp())
+            embed.add_field(name="Joined At",  value=f"<t:{joined_ts}:R>",        inline=True)
+        embed.set_footer(text=f"Server: {member.guild.name}")
+
+        session = get_session()
+        webhook = discord.Webhook.from_url(webhook_url, session=session)
+        await webhook.send(embed=embed, username="Jarvis Server Logs")
+    except Exception as e:
+        print(f"❌ Webhook error _log_member: {e}")
+
+
 # ── Image fetch ───────────────────────────────────────────────────────────────
 
 async def _fetch_image(attachment: discord.Attachment) -> tuple[str, str] | None:
@@ -1977,6 +2041,41 @@ class AI(commands.Cog):
             await safe_reply(ctx.message, f"✅ Reminder **{reminder_id}** cancelled.")
         else:
             await safe_reply(ctx.message, f"❌ I couldn't find reminder **{reminder_id}**.")
+
+    # ── Server / member event listeners ──────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await _log_guild(guild, joined=True)
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        await _log_guild(guild, joined=False)
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        await _log_member(member, joined=True)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        await _log_member(member, joined=False)
+
+    # ── Backfill command (owner-only) ─────────────────────────────────────────
+
+    @commands.command(name="backfill_servers")
+    @commands.is_owner()
+    async def backfill_servers(self, ctx: commands.Context) -> None:
+        """Send one log embed for every server the bot is already in."""
+        if not os.getenv("SERVER_LOG_WEBHOOK_URL", ""):
+            await ctx.reply("❌ `SERVER_LOG_WEBHOOK_URL` is not set in your `.env`.")
+            return
+        guilds = list(self.bot.guilds)
+        total  = len(guilds)
+        status = await ctx.reply(f"📋 Backfilling **{total}** server(s)…")
+        for i, guild in enumerate(guilds, 1):
+            await _log_guild(guild, joined=True, index=i, total=total)
+            await asyncio.sleep(2.0)   # stay under webhook rate limit
+        await status.edit(content=f"✅ Done — sent **{total}** server log(s) to the webhook.")
 
 
 def _build_memory_embed(user: discord.User | discord.Member, facts: list[str]) -> discord.Embed:
