@@ -25,6 +25,7 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Optional, cast
 
 import discord
@@ -97,6 +98,43 @@ LAVALINK_NODES = PUBLIC_YT_NODES + [
 
 # Minimum gap (in seconds) between consecutive track-load requests.
 MIN_TRACK_LOAD_GAP = 2.5
+
+
+# Common noise in YouTube video titles that hurts cross-platform search
+# matching (e.g. "David Kushner - Daylight (Official Music Video)" finds
+# worse SoundCloud matches than "David Kushner Daylight"). Matched
+# case-insensitively, with or without surrounding brackets/parens.
+_TITLE_NOISE_RE = re.compile(
+    r"""[\(\[]?\s*(?:official\s+)?(?:music\s+)?(?:video|audio|lyric[s]?|
+        visualizer|m/?v)\s*[\)\]]?""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _clean_search_query(author: str | None, title: str) -> str:
+    """
+    Build a cross-platform search query from a YouTube track's author
+    and title, stripping common noise like "(Official Music Video)" and
+    avoiding a duplicated artist name when the title already starts with
+    "Artist - Song" (the most common YouTube upload format).
+    """
+    cleaned_title = _TITLE_NOISE_RE.sub("", title).strip(" -–—")
+    cleaned_author = re.sub(r"\s*-\s*Topic$", "", author, flags=re.IGNORECASE).strip() if author else author
+    if cleaned_author and cleaned_title.lower().startswith(cleaned_author.lower()):
+        return cleaned_title
+    return f"{cleaned_author} {cleaned_title}".strip() if cleaned_author else cleaned_title
+
+
+
+# Title keywords signaling a remix/edit that's a genuinely different
+# audio file from the original — sped up, slowed, reverb, nightcore,
+# 8D, etc. We exclude these from fallback candidates rather than risk
+# picking a clearly-altered version of the requested song.
+_REMIX_NOISE_RE = re.compile(
+    r"\b(sped\s*up|slowed(?:\s*\+?\s*reverb)?|nightcore|8d\s*audio|"
+    r"reverb|tiktok\s*remix|bass\s*boosted|extended\s*mix|loop)\b",
+    re.IGNORECASE,
+)
 
 
 def _detect_source(query: str) -> str:
@@ -450,6 +488,18 @@ class Music(commands.Cog):
         self._last_requester: dict[int, int] = {}
         self._last_request_time: float = 0.0
         self._request_lock = asyncio.Lock()
+        # Tracks in-progress SoundCloud-fallback retries per guild, as
+        # {guild_id: {"query": str, "tried_urls": set[str]}}. This can't
+        # be carried on the track's `extras`/userData field instead,
+        # because Lavalink's TrackExceptionEvent payload only echoes back
+        # `encoded`/`info`/`pluginInfo` for the track — userData is NOT
+        # guaranteed to round-trip into event payloads (only into REST
+        # loadtracks responses and the outgoing player PATCH). So extras
+        # set before play() silently doesn't come back on the next
+        # exception for that track, and tagging state that way never
+        # actually told us "this is our own retry failing again." Plain
+        # per-guild state on the cog avoids relying on that round-trip.
+        self._sc_retry_state: dict[int, dict] = {}
 
     # ── Feature toggle gate ───────────────────────────────────────────────────
     # When MUSIC_FEATURE_DOWN is True, every prefix command (cog_check) and
@@ -513,7 +563,34 @@ class Music(commands.Cog):
 
     @commands.Cog.listener()
     async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
-        player: wavelink.Player = payload.player
+        # payload.player is typed Player | None by wavelink — it can be
+        # None, e.g. when this event fires as a side effect of tearing
+        # down a player during switch_node() (our SoundCloud fallback
+        # path triggers this: the old node's track-end event for the
+        # just-stopped track can arrive after the player's already been
+        # detached). Nothing to do if there's no player to act on.
+        player: wavelink.Player | None = payload.player
+        if player is None:
+            return
+
+        if player.guild is not None:
+            guild_id = player.guild.id
+            retry_state = self._sc_retry_state.get(guild_id)
+            # If the track that just ended cleanly (finished, replaced,
+            # or stopped — i.e. NOT an exception) is one of our own
+            # SoundCloud fallback attempts, that attempt is done and
+            # didn't need a further retry, so clear the state. We rely
+            # on track_end here rather than track_start, because
+            # track_start can fire essentially back-to-back with
+            # track_exception for a stream that opens but then
+            # immediately errors (e.g. the SoundCloud 404 case), which
+            # would otherwise wipe the retry state right before the
+            # exception handler needs to read it.
+            if retry_state is not None:
+                ended_uri = getattr(payload.track, "uri", None)
+                if ended_uri in retry_state.get("tried_urls", set()) and payload.reason != "loadFailed":
+                    self._sc_retry_state.pop(guild_id, None)
+
         if not player.queue.is_empty:
             await player.play(player.queue.get(), volume=100)
             return
@@ -532,6 +609,35 @@ class Music(commands.Cog):
             await player.play(similar, volume=100)
 
     @commands.Cog.listener()
+    async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload) -> None:
+        player = payload.player
+        if player is None or player.guild is None:
+            return
+
+        guild_id = player.guild.id
+        retry_state = self._sc_retry_state.get(guild_id)
+        if retry_state is None:
+            return
+
+        # IMPORTANT: for a track whose stream opens but then errors
+        # immediately (e.g. the SoundCloud 404 case — Lavaplayer fires
+        # TrackStartEvent once the stream opens, then TrackExceptionEvent
+        # when the read itself fails a moment later), TrackStartEvent can
+        # arrive for the very fallback track we're mid-retry on, racing
+        # with the TrackExceptionEvent that's about to follow for it.
+        # If we clear retry state here unconditionally, the exception
+        # handler loses its "this is our own retry" signal right before
+        # it needs it, and silently gives up instead of trying the next
+        # candidate. So only clear when the track starting is NOT one of
+        # the URLs we ourselves just tried — i.e. it's a genuinely new,
+        # unrelated song (skip, new queue item, new /play command).
+        started_uri = getattr(payload.track, "uri", None)
+        if started_uri in retry_state.get("tried_urls", set()):
+            return  # this is our own in-flight retry attempt — leave state alone
+
+        self._sc_retry_state.pop(guild_id, None)
+
+    @commands.Cog.listener()
     async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload) -> None:
         print(f"✅ Lavalink node ready: {payload.node.uri}  (resumed={payload.resumed})")
 
@@ -541,45 +647,169 @@ class Music(commands.Cog):
     ) -> None:
         """
         Fires when Lavalink throws a TrackException during playback.
-        If the error is a YouTube login/access block, we silently retry
-        the same song on the self-hosted SoundCloud node instead.
+        If the error is a YouTube login/access block, we retry the same
+        song on the self-hosted SoundCloud node instead. If a SoundCloud
+        fallback track itself fails (stale/expired stream URL, 404, etc
+        — common on free public/community Lavalink nodes), we try the
+        next candidate from the original search instead of going silent.
         """
-        player: wavelink.Player = payload.player
-        track  = payload.track
+        player: wavelink.Player | None = payload.player
+        if player is None or player.guild is None:
+            return  # player already disconnected/cleaned up, nothing to retry
 
-        # Only handle YouTube login / access errors
-        msg = str(getattr(payload.exception, "message", payload.exception)).lower()
-        is_yt_block = any(k in msg for k in ("login", "not available", "sign in", "403", "blocked"))
-        if not is_yt_block:
-            return  # some other error — let it bubble up normally
+        track = payload.track
+        guild_id = player.guild.id
 
-        print(
-            f"⚠️  YouTube blocked '{track.title}' "
-            f"(node={payload.node.identifier}) — retrying on SoundCloud node..."
-        )
+        # payload.exception is a TypedDict (plain dict), not an object —
+        # use dict access / .get(), not getattr().
+        exception_data = payload.exception or {}
+        msg = str(exception_data.get("message") or exception_data).lower()
 
-        # Grab your self-hosted SC node specifically
-        sc_node: wavelink.Node | None = wavelink.Pool.get_node(NODE_SC)
-        if sc_node is None:
+        # Is this exception firing on a track we ourselves are already
+        # retrying (i.e. a previous SoundCloud fallback that also
+        # failed)? We track this via self._sc_retry_state, keyed by
+        # guild — NOT via track.extras/userData. Lavalink's
+        # TrackExceptionEvent payload only echoes back encoded/info/
+        # pluginInfo for the track; userData is not guaranteed to round
+        # -trip into event payloads (only into REST loadtracks responses
+        # and the outgoing player PATCH), so anything stashed in extras
+        # before play() does not reliably come back to us here.
+        retry_state = self._sc_retry_state.get(guild_id)
+        is_sc_retry = retry_state is not None
+
+        if not is_sc_retry:
+            is_yt_block = any(
+                k in msg for k in ("login", "not available", "sign in", "403", "blocked")
+            )
+            if not is_yt_block:
+                return  # some other error on the original track — let it bubble up
+
+            current_node_id = getattr(player.node, "identifier", "unknown")
+            print(
+                f"⚠️  YouTube blocked '{track.title}' "
+                f"(node={current_node_id}) — retrying on SoundCloud node..."
+            )
+        else:
+            print(
+                f"⚠️  SoundCloud fallback '{track.title}' failed to play "
+                f"({msg or 'unknown error'}) — trying next candidate..."
+            )
+
+        # Pool.get_node() raises InvalidNodeException if the node isn't
+        # found/connected — it does NOT return None. Catch that instead
+        # of checking for None.
+        try:
+            sc_node: wavelink.Node = wavelink.Pool.get_node(NODE_SC)
+        except Exception:
             print("❌  SC fallback node not connected, cannot retry.")
+            self._sc_retry_state.pop(guild_id, None)
             return
 
-        # Search SoundCloud on the SC node
-        query   = f"{track.author} {track.title}".strip() if track.author else track.title
-        results = await wavelink.Playable.search(
-            query, source=wavelink.TrackSource.SoundCloud, node=sc_node
-        )
-        if not results:
-            print(f"❌  No SoundCloud result found for '{query}'")
-            return
+        # Figure out which candidates we've already tried for this song,
+        # so a failed fallback retry moves on to the next result instead
+        # of re-trying (and re-failing on) the same broken stream, or
+        # re-running an identical search from scratch. Also carry the
+        # ORIGINAL track's duration through retries (not the failed SC
+        # fallback's duration) so we can keep filtering candidates by
+        # how close they are to the real song length, even on a second
+        # or third retry attempt.
+        if is_sc_retry:
+            query = retry_state["query"]
+            tried_urls: set[str] = set(retry_state["tried_urls"])
+            original_length_ms: int | None = retry_state.get("original_length_ms")
+        else:
+            query = _clean_search_query(track.author, track.title)
+            tried_urls = set()
+            original_length_ms = getattr(track, "length", None)
+        if getattr(track, "uri", None):
+            tried_urls.add(track.uri)
 
-        fallback: wavelink.Playable = (
-            results[0] if isinstance(results, list) else results.tracks[0]
-        )
-        fallback.extras = track.extras  # preserve requester metadata if any
+        async def _search_soundcloud() -> list[wavelink.Playable]:
+            try:
+                results = await wavelink.Playable.search(
+                    query, source=wavelink.TrackSource.SoundCloud, node=sc_node
+                )
+            except Exception as e:
+                print(f"❌  SoundCloud search failed for '{query}': {e}")
+                return []
+            if not results:
+                print(f"❌  No SoundCloud result found for '{query}'")
+                return []
+            candidates = results if isinstance(results, list) else results.tracks
 
-        # Assign the player to use the SC node for this track
-        player.node = sc_node
+            # Skip candidates we've already tried and failed on.
+            candidates = [c for c in candidates if getattr(c, "uri", None) not in tried_urls]
+
+            # Skip obvious remixes/edits — these are a different audio
+            # file from the original, not just a different upload of
+            # the same one (e.g. "(sped up + reverb)", "(nightcore)").
+            # We filter on title text rather than only relying on
+            # duration, since some edits (loops, extended versions)
+            # don't shift duration enough to be caught by that alone.
+            candidates = [c for c in candidates if not _REMIX_NOISE_RE.search(c.title)]
+
+            # If we know the original track's length, prefer candidates
+            # within a reasonable tolerance of it — sped-up versions run
+            # short, slowed/reverb versions run long, and either is a
+            # clear sign it's not the same recording.
+            if original_length_ms:
+                tolerance_ms = max(15_000, int(original_length_ms * 0.15))
+                close_matches = [
+                    c for c in candidates
+                    if abs(getattr(c, "length", original_length_ms) - original_length_ms) <= tolerance_ms
+                ]
+                if close_matches:
+                    candidates = close_matches
+                # If nothing is close, fall through to the unfiltered
+                # list rather than returning empty — a slightly-off
+                # duration is still better than no fallback at all.
+
+            return candidates
+
+        async def _switch_node() -> bool:
+            if player.node.identifier == sc_node.identifier:
+                return True
+            # `player.node` is a read-only property — it has no setter.
+            # The correct way to move a connected player to a different
+            # node is Player.switch_node(), added in wavelink 3.5.0.
+            #
+            # switch_node() checks self._current and, if set, immediately
+            # re-plays that track on the new node before returning. Since
+            # self._current is still the failing track at this point,
+            # clearing it first makes switch_node() skip straight to the
+            # cheap filters/volume/pause branch instead of wasting a
+            # play() call on a track we're about to replace anyway.
+            player._current = None
+            try:
+                await player.switch_node(sc_node)
+            except Exception as e:
+                print(f"❌  Failed to switch player to SC node: {e}")
+                return False
+            return True
+
+        candidates, switch_ok = await asyncio.gather(
+            _search_soundcloud(), _switch_node()
+        )
+
+        if not candidates or not switch_ok:
+            if not candidates:
+                print(f"❌  No more untried SoundCloud candidates for '{query}' — giving up.")
+            self._sc_retry_state.pop(guild_id, None)
+            return  # specific reason already logged
+
+        fallback = candidates[0]
+        tried_urls.add(fallback.uri)
+        # Record this attempt so that if THIS fallback also throws an
+        # exception, the handler recognizes it as our own retry (see
+        # the is_sc_retry check near the top) and moves on to the next
+        # untried candidate instead of either looping on the same dead
+        # stream or mistaking the error for a fresh YouTube block.
+        self._sc_retry_state[guild_id] = {
+            "query": query,
+            "tried_urls": tried_urls,
+            "original_length_ms": original_length_ms,
+        }
+
         await player.play(fallback, volume=player.volume)
         print(f"✅  Now playing SoundCloud fallback: {fallback.title}")
 
