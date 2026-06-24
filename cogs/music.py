@@ -74,7 +74,38 @@ MUSIC_DOWN_EMBED = discord.Embed(
 # Path to the ffmpeg binary. Falls back to "ffmpeg" (PATH lookup) if not found
 # via shutil.which — set the FFMPEG_PATH env var if it lives somewhere custom.
 import os as _os
+import base64 as _base64
+import tempfile as _tempfile
 FFMPEG_EXECUTABLE = _os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg") or "ffmpeg"
+
+# Optional path to a YouTube cookies.txt file (Netscape format). Needed when
+# running from a datacenter IP (Railway, Heroku, AWS, etc) — YouTube
+# aggressively bot-checks those ranges and a logged-in session via cookies
+# is the most reliable way around the "Sign in to confirm you're not a bot"
+# error. Export with a browser extension (e.g. "Get cookies.txt LOCALLY")
+# while logged into a YouTube account.
+#
+# Two ways to provide it (checked in this order):
+#   1. YTDLP_COOKIES_B64 — the cookies.txt file, base64-encoded, pasted
+#      directly as an env var value. No volume/file upload needed — this
+#      is decoded to a temp file at startup. Simplest option for Railway.
+#   2. YTDLP_COOKIES_FILE — a path to an already-existing cookies.txt file
+#      on disk (e.g. on a mounted volume), used as-is.
+YTDLP_COOKIES_B64 = _os.environ.get("YTDLP_COOKIES_B64", "").strip()
+YTDLP_COOKIES_FILE = _os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+
+if YTDLP_COOKIES_B64:
+    try:
+        decoded = _base64.b64decode(YTDLP_COOKIES_B64)
+        _tmp = _tempfile.NamedTemporaryFile(
+            mode="wb", suffix="_cookies.txt", delete=False
+        )
+        _tmp.write(decoded)
+        _tmp.close()
+        YTDLP_COOKIES_FILE = _tmp.name
+        print(f"✅ Music: decoded YTDLP_COOKIES_B64 to temp file {YTDLP_COOKIES_FILE}")
+    except Exception as e:
+        print(f"⚠️  Music: failed to decode YTDLP_COOKIES_B64: {e}")
 
 YTDLP_FORMAT_OPTIONS = {
     "format": "bestaudio/best",
@@ -86,7 +117,16 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid ipv6 issues on some hosts
     "extract_flat": False,
+    # Spoofing the Android client often avoids the bot-check wall even
+    # without cookies, since it uses a different (less aggressively
+    # checked) player API path than the default web client.
+    "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
 }
+if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
+    YTDLP_FORMAT_OPTIONS["cookiefile"] = YTDLP_COOKIES_FILE
+    print(f"✅ Music: using YouTube cookies from {YTDLP_COOKIES_FILE}")
+elif YTDLP_COOKIES_FILE:
+    print(f"⚠️  Music: YTDLP_COOKIES_FILE set to '{YTDLP_COOKIES_FILE}' but file not found.")
 
 FFMPEG_BEFORE_OPTS = (
     "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
