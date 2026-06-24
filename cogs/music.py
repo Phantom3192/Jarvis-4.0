@@ -642,6 +642,37 @@ class Music(commands.Cog):
         print(f"✅ Lavalink node ready: {payload.node.uri}  (resumed={payload.resumed})")
 
     @commands.Cog.listener()
+    async def on_wavelink_node_closed(self, payload: wavelink.NodeClosedEventPayload) -> None:
+        """
+        Fires when a Lavalink node disconnects. We schedule a reconnect so
+        that public/community nodes (which restart often) are transparently
+        re-established without manual intervention.
+        The session on the old node is gone — any player holding a reference
+        to it will get 404s until it is moved to a healthy node. We handle
+        that reactively in _do_play / _try_switch_to_healthy_node.
+        """
+        node = payload.node
+        print(f"⚠️  Lavalink node closed: {node.identifier} ({node.uri}) — scheduling reconnect...")
+
+        async def _reconnect() -> None:
+            for attempt in range(1, 6):
+                await asyncio.sleep(5 * attempt)   # back-off: 5s, 10s, 15s, 20s, 25s
+                try:
+                    fresh = wavelink.Node(
+                        identifier=node.identifier,
+                        uri=node.uri,
+                        password=node.password,
+                    )
+                    await wavelink.Pool.connect(nodes=[fresh], client=self.bot)
+                    print(f"✅  Reconnected to node {node.identifier} (attempt {attempt})")
+                    return
+                except Exception as e:
+                    print(f"❌  Reconnect attempt {attempt} for {node.identifier} failed: {e}")
+            print(f"❌  Giving up reconnecting to {node.identifier} after 5 attempts.")
+
+        self.bot.loop.create_task(_reconnect())
+
+    @commands.Cog.listener()
     async def on_wavelink_track_exception(
         self, payload: wavelink.TrackExceptionEventPayload
     ) -> None:
@@ -772,14 +803,10 @@ class Music(commands.Cog):
             # `player.node` is a read-only property — it has no setter.
             # The correct way to move a connected player to a different
             # node is Player.switch_node(), added in wavelink 3.5.0.
-            #
-            # switch_node() checks self._current and, if set, immediately
-            # re-plays that track on the new node before returning. Since
-            # self._current is still the failing track at this point,
-            # clearing it first makes switch_node() skip straight to the
-            # cheap filters/volume/pause branch instead of wasting a
-            # play() call on a track we're about to replace anyway.
-            player._current = None
+            # We do NOT touch player._current here — mutating private
+            # state is unsafe and can corrupt the player if wavelink
+            # internals change. switch_node() handles it correctly on
+            # its own.
             try:
                 await player.switch_node(sc_node)
             except Exception as e:
@@ -814,6 +841,36 @@ class Music(commands.Cog):
         print(f"✅  Now playing SoundCloud fallback: {fallback.title}")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    async def _ensure_healthy_node(self, player: wavelink.Player) -> bool:
+        """Return True if the player's current node is alive and connected."""
+        try:
+            return player.node.status == wavelink.NodeStatus.CONNECTED
+        except Exception:
+            return False
+
+    async def _try_switch_to_healthy_node(self, player: wavelink.Player) -> bool:
+        """
+        If the player's current node is unhealthy, try switching to any
+        connected public YT node. Returns True if the player ends up on a
+        healthy node (whether it was already fine or we switched), False if
+        no healthy node could be found.
+        """
+        if await self._ensure_healthy_node(player):
+            return True
+        for n in PUBLIC_YT_NODES:
+            try:
+                node = wavelink.Pool.get_node(n["identifier"])
+            except Exception:
+                continue
+            if node and node.status == wavelink.NodeStatus.CONNECTED:
+                try:
+                    await player.switch_node(node)
+                    print(f"[HealthCheck] Switched player to healthy node: {node.identifier}")
+                    return True
+                except Exception as e:
+                    print(f"[HealthCheck] Could not switch to {node.identifier}: {e}")
+        return False
 
     async def _get_player(
         self,
@@ -939,14 +996,51 @@ class Music(commands.Cog):
                     print(f"[Play] Switched player to node: {yt_node.identifier}")
                 except Exception as e:
                     print(f"[Play] Could not switch node: {e}")
+
+            # Ensure the node is healthy before attempting playback.
+            # Public/community Lavalink nodes restart often, which invalidates
+            # their session. A stale session causes a 404 on the first play()
+            # call after the restart — we catch that here and reconnect.
+            if not await self._try_switch_to_healthy_node(player):
+                print(f"[Play] No healthy node available, attempting full reconnect...")
+                try:
+                    await player.disconnect()
+                except Exception:
+                    pass
+                player = await self._get_player(guild, author, send_fn)
+                if not player:
+                    await send_fn(embed=_err("Lost connection to the audio server. Please try again."))
+                    return
+
             try:
                 print(f"[Play] Attempting playback on node: {player.node.identifier}")
                 await player.play(track, volume=100)
                 print(f"[Play] Success on node: {player.node.identifier}")
             except Exception as e:
+                err_str = str(e)
                 print(f"[Play] Playback error on node {player.node.identifier}: {e}")
-                await send_fn(embed=_err(f"Playback failed: `{e}`"))
-                return
+                # 404 / Not Found = Lavalink session expired (node restarted).
+                # Disconnect the stale player, reconnect fresh, and retry once.
+                if "404" in err_str or "Not Found" in err_str or "session" in err_str.lower():
+                    print(f"[Play] Session expired — reconnecting and retrying...")
+                    try:
+                        await player.disconnect()
+                    except Exception:
+                        pass
+                    player = await self._get_player(guild, author, send_fn)
+                    if not player:
+                        await send_fn(embed=_err("Lost connection to the audio server. Please try again."))
+                        return
+                    try:
+                        await player.play(track, volume=100)
+                        print(f"[Play] Retry succeeded on node: {player.node.identifier}")
+                    except Exception as retry_err:
+                        print(f"[Play] Retry also failed: {retry_err}")
+                        await send_fn(embed=_err(f"Playback failed after reconnect: `{retry_err}`"))
+                        return
+                else:
+                    await send_fn(embed=_err(f"Playback failed: `{e}`"))
+                    return
 
             self._last_requester[player.guild.id] = author.id
             append_song_history(author.id, _track_info(track))
