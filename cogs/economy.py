@@ -48,7 +48,7 @@ REFERRED_BONUS  = 0    # JC paid to the new user who redeemed a code (none — t
 # gets both the normal onboarding bonus AND the referral bonus)
 
 # ── JC Shop ──────────────────────────────────────────────────────────────────
-MYSTERY_BOX_COST     = 150  # JC to open a Mystery Box
+MYSTERY_BOX_COST     = 200  # JC to open a Mystery Box
 MYSTERY_BOX_MIN      = 0   # min payout
 MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 
