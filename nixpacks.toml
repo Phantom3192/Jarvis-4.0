@@ -1,2 +1,2 @@
 [phases.setup]
-aptPkgs = ["fonts-freefont-ttf", "fontconfig"]
+aptPkgs = ["fonts-freefont-ttf", "fontconfig", "ffmpeg"]

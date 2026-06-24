@@ -7,6 +7,5 @@ libsql-experimental
 psutil
 PyNaCl
 yt-dlp
-wavelink
 Pillow
 chess
