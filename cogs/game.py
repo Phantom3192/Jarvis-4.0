@@ -3037,6 +3037,38 @@ class Fun(commands.Cog):
         embed.set_author(name=f"A compliment for {user.display_name}", icon_url=user.display_avatar.url)
         await ctx.reply(embed=embed)
 
+    # ── !roll ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _roll_embed(user: discord.User | discord.Member) -> discord.Embed:
+        number = random.randint(1, 100)
+        if number == 100:
+            flavor, color = "🌟 PERFECT ROLL!", discord.Color.gold()
+        elif number >= 90:
+            flavor, color = "🔥 Incredible!", discord.Color.gold()
+        elif number == 1:
+            flavor, color = "💀 Ouch.", discord.Color.red()
+        elif number <= 10:
+            flavor, color = "😬 Rough one.", discord.Color.red()
+        else:
+            flavor, color = "🎲 Rolled!", discord.Color.blurple()
+
+        embed = discord.Embed(
+            title=flavor,
+            description=f"**{user.display_name}** rolled... **{number}** / 100",
+            color=color,
+        )
+        return embed
+
+    @commands.command(name="roll", aliases=["dice"])
+    async def prefix_roll(self, ctx: commands.Context):
+        """!roll — roll a random number between 1 and 100."""
+        await ctx.reply(embed=self._roll_embed(ctx.author))
+
+    @app_commands.command(name="roll", description="Roll a random number between 1 and 100")
+    async def slash_roll(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=self._roll_embed(interaction.user))
+
     # ── on_message — hangman + counting ──────────────────────────────────────
 
     @commands.Cog.listener()

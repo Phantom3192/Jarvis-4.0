@@ -79,7 +79,10 @@ CATEGORIES = {
         "commands": [
             ("🔮 **COMPLIMENT**", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             ("!compliment  /compliment @user", "Send someone a nice compliment"),
-            ("", ""),            
+            ("", ""),
+            ("🎲 **ROLL**", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
+            ("!roll / !dice  /roll", "Roll a random number between 1 and 100"),
+            ("", ""),
             ("🔢 **COUNTING GAME**", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"),
             ("!countsetup / /countsetup", "Set the counting channel for this server"),
             ("!countstats / /countstats", "Show current count and high score"),
@@ -119,7 +122,15 @@ CATEGORIES = {
         "commands": [
             ("!balance / !jc / !credits  /balance", "Check your (or someone else's) JC balance"),
             ("!leaderboard / !jcleaderboard / !jctop  /leaderboard", "View the top JC holders"),
+            ("!streak / !jcstreak  /streak", "Check your daily chat streak and milestone progress"),
+            ("!invite / !refer  /invite", "Get your personal referral code to share"),
+            ("!redeem <code>  /redeem", "Redeem a friend's referral code (must be your first-ever interaction with Jarvis)"),
+            ("!shop / !jcshop  /shop", "Browse the JC shop (buy with !shop buy <item_id>)"),
+            ("!shop buy <item_id>", "Buy a shop item directly without opening the menu"),
+            ("!mysterybox / !mbox  /mysterybox", "Open a Mystery Box (150 JC) for a random 10–300 JC reward"),
+            ("!transferjc @user <amount>  /transferjc", "Send JC to another user (they must accept)"),
             ("Daily check-in",        "Send your first message of the day to earn JC automatically"),
+            ("Daily streak",          "Chatting on consecutive days builds a streak — 7 days: +200 JC, 30 days: +500 JC"),
             ("Chat with Jarvis",      "Earn a small amount of JC for chatting with the AI (daily cap)"),
             ("Save a counting streak", "Spend JC to save the count when someone messes up"),
             ("Reset AI limit",        "Spend JC to reset your daily AI message limit"),
@@ -470,3 +481,4 @@ class Help(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Help(bot))
+    

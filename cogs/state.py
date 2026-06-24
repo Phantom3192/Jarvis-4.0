@@ -41,8 +41,10 @@ _data: dict[str, Any] = {
     "song_history":   {},    # str(user_id) -> [track_info, ...]
     "guild_bans":     {},    # str(guild_id) → {"reason": str, "banned_at": float}
     "credits":        {},    # str(user_id) → int balance of Jarvis Credits (JC)
-    "credit_meta":    {},    # str(user_id) → {"last_daily": "YYYY-MM-DD", "chat_day": "YYYY-MM-DD", "chat_count": int}
+    "credit_meta":    {},    # str(user_id) → {"last_daily": "YYYY-MM-DD", "chat_day": "YYYY-MM-DD", "chat_count": int, "streak": int, "last_streak_day": "YYYY-MM-DD", "streak_milestones": [int, ...]}
     "guild_logs":     {},    # str(guild_id) → {"name": str, "joined_at": float, "member_count": int, "owner_id": int}
+    "referral_codes": {},    # str(user_id) → str code (each user's own stable invite code)
+    "referred_by":    {},    # str(user_id) → referrer's user_id (int). Presence = "already redeemed a code".
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -61,6 +63,8 @@ _SERIALISE: dict[str, Any] = {
     "credits":         lambda: _data["credits"],
     "credit_meta":     lambda: _data["credit_meta"],
     "guild_logs":      lambda: _data["guild_logs"],
+    "referral_codes":  lambda: _data["referral_codes"],
+    "referred_by":     lambda: _data["referred_by"],
 }
 
 
@@ -119,6 +123,8 @@ async def init_db():
     if "credits"        in db: _data["credits"]        = db["credits"]
     if "credit_meta"    in db: _data["credit_meta"]    = db["credit_meta"]
     if "guild_logs"     in db: _data["guild_logs"]     = db["guild_logs"]
+    if "referral_codes" in db: _data["referral_codes"] = db["referral_codes"]
+    if "referred_by"    in db: _data["referred_by"]    = db["referred_by"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -615,6 +621,14 @@ def check_cooldown(user_id: int) -> bool:
 # JARVIS CREDITS (JC)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Streak length (consecutive days chatted) → JC bonus paid out once that
+# length is reached. Kept here (not economy.py) so state.py's bump_streak()
+# has no import dependency on the economy cog.
+STREAK_MILESTONES: dict[int, int] = {
+    7:  200,   # 🔥 7-day streak bonus
+    30: 500,   # ⭐ Monthly loyal user
+}
+
 def get_all_credits() -> dict[str, int]:
     """Return a copy of the str(user_id) → JC balance mapping."""
     return dict(_data["credits"])
@@ -653,8 +667,16 @@ def _credit_meta(user_id: int) -> dict:
     uid = str(user_id)
     meta = _data["credit_meta"].get(uid)
     if not meta:
-        meta = {"last_daily": "", "chat_day": "", "chat_count": 0}
+        meta = {
+            "last_daily": "", "chat_day": "", "chat_count": 0,
+            "streak": 0, "last_streak_day": "", "streak_milestones": [],
+        }
         _data["credit_meta"][uid] = meta
+    else:
+        # Backfill defaults for users created before streaks/mystery-box existed.
+        meta.setdefault("streak", 0)
+        meta.setdefault("last_streak_day", "")
+        meta.setdefault("streak_milestones", [])
     return meta
 
 
@@ -688,9 +710,158 @@ def earn_chat_credits(user_id: int, amount: int, daily_cap: int) -> int:
     return award
 
 
+def get_streak(user_id: int) -> int:
+    """Return the user's current consecutive daily-chat streak."""
+    return int(_credit_meta(user_id).get("streak", 0))
+
+
+def bump_streak(user_id: int) -> tuple[int, list[int]]:
+    """
+    Advance the user's daily streak. Call this once per UTC day, at the same
+    point `claim_daily_credits` fires (first message of the day) — both rely
+    on the same `chat_day`/date-rollover signal, so they always stay in sync.
+
+    Streak rules:
+      - Same day as last bump → no-op, streak unchanged.
+      - Exactly the day after `last_streak_day` → streak += 1.
+      - Any gap (missed a day, or brand new user) → streak resets to 1.
+
+    Returns (new_streak, newly_hit_milestones) where newly_hit_milestones is
+    a subset of STREAK_MILESTONES the user just reached *this call* (usually
+    empty, sometimes one entry). Milestones only fire once per user ever —
+    `streak_milestones` tracks which ones have already been paid out so a
+    user who breaks and rebuilds a streak across the same milestone twice
+    still gets paid both times (it's cleared on reset, see below).
+    """
+    today = _today_utc()
+    meta = _credit_meta(user_id)
+
+    if meta["last_streak_day"] == today:
+        return meta["streak"], []  # already counted today
+
+    if meta["last_streak_day"]:
+        try:
+            last = datetime.strptime(meta["last_streak_day"], "%Y-%m-%d").date()
+            cur = datetime.strptime(today, "%Y-%m-%d").date()
+            consecutive = (cur - last).days == 1
+        except ValueError:
+            consecutive = False
+    else:
+        consecutive = False
+
+    if consecutive:
+        meta["streak"] += 1
+    else:
+        meta["streak"] = 1
+        meta["streak_milestones"] = []  # streak broke — milestones can be earned again
+
+    meta["last_streak_day"] = today
+
+    hit = [m for m in STREAK_MILESTONES if meta["streak"] == m and m not in meta["streak_milestones"]]
+    for m in hit:
+        meta["streak_milestones"].append(m)
+
+    _schedule_save("credit_meta")
+    return meta["streak"], hit
+
+
 def grant_onboarding_bonus(user_id: int, amount: int) -> int:
     """One-time JC grant for a brand-new user. Returns new balance."""
     return add_credits(user_id, amount)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REFERRALS
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# How attribution works:
+#   - Every user can generate their own stable referral code with get_or_create_referral_code().
+#   - A code is only ever consumed via redeem_referral_code(), which must be the
+#     FIRST thing a brand-new user does — it checks is_new_user() itself and
+#     refuses anyone who has already been "seen" by the bot, so chatting first
+#     and redeeming a code afterwards never counts.
+#   - referred_by is also the de-dupe guard: once set for a user, that user can
+#     never redeem a second code (prevents farming bonuses with the same code
+#     on the same account, or chaining referrals).
+
+import random as _random
+import string as _string
+
+REFERRAL_CODE_LENGTH = 8
+REFERRAL_CODE_ALPHABET = _string.ascii_uppercase + _string.digits
+
+
+def _generate_referral_code() -> str:
+    return "".join(_random.choices(REFERRAL_CODE_ALPHABET, k=REFERRAL_CODE_LENGTH))
+
+
+def get_or_create_referral_code(user_id: int) -> str:
+    """Return the user's existing referral code, generating one if needed.
+    Codes are stable for a user's lifetime (used by !invite / /invite)."""
+    uid = str(user_id)
+    code = _data["referral_codes"].get(uid)
+    if code:
+        return code
+
+    existing = set(_data["referral_codes"].values())
+    code = _generate_referral_code()
+    while code in existing:
+        code = _generate_referral_code()
+
+    _data["referral_codes"][uid] = code
+    _schedule_save("referral_codes")
+    return code
+
+
+def get_referrer_id_for_code(code: str) -> int | None:
+    """Resolve a referral code back to the referrer's user_id, or None if invalid."""
+    code = code.strip().upper()
+    for uid, c in _data["referral_codes"].items():
+        if c == code:
+            return int(uid)
+    return None
+
+
+def has_been_referred(user_id: int) -> bool:
+    """True if this user has already redeemed a referral code (ever)."""
+    return str(user_id) in _data["referred_by"]
+
+
+def redeem_referral_code(user_id: int, code: str) -> tuple[bool, str, int | None]:
+    """
+    Attempt to attribute `user_id` as referred by whoever owns `code`.
+
+    This is intentionally strict — it's the only path that can ever set
+    referred_by, and it refuses unless ALL of the following hold:
+      - the code resolves to a real referrer
+      - the redeemer isn't the referrer themselves
+      - the redeemer is still a brand-new user (is_new_user) — i.e. this is
+        the first thing they've ever done with Jarvis, not a retroactive claim
+        after chatting normally
+      - the redeemer has never redeemed any code before
+
+    Returns (success, reason, referrer_id):
+      reason is one of: "ok", "invalid_code", "self_referral",
+      "already_seen" (chatted/used Jarvis before redeeming — too late),
+      "already_referred" (already redeemed a code previously).
+      referrer_id is the resolved referrer's id on success, else None.
+    """
+    referrer_id = get_referrer_id_for_code(code)
+    if referrer_id is None:
+        return False, "invalid_code", None
+
+    if referrer_id == user_id:
+        return False, "self_referral", None
+
+    if not is_new_user(user_id):
+        return False, "already_seen", None
+
+    if has_been_referred(user_id):
+        return False, "already_referred", None
+
+    _data["referred_by"][str(user_id)] = referrer_id
+    _schedule_save("referred_by")
+    return True, "ok", referrer_id
 
 
 # ══════════════════════════════════════════════════════════════════════════════

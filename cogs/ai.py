@@ -593,90 +593,137 @@ async def _race_providers(*tasks: asyncio.Task) -> str | None:
 # Maps natural-language chat messages to real bot command outputs.
 # Returns True if the message was handled (so caller skips the AI API),
 # False if it should proceed to the AI normally.
+#
+# ── DESIGN RULE ──────────────────────────────────────────────────────────────
+# Every pattern here must require EXPLICIT, UNAMBIGUOUS bot-directed phrasing.
+# A lone keyword like "skip", "play", "ping", or "pause" is NOT enough —
+# the surrounding phrase must clearly express intent to invoke that feature.
+# This prevents conversational messages like "let's play a game", "why do dogs
+# skip their chew toy", or "can you ping this user" from misfiring.
+# ─────────────────────────────────────────────────────────────────────────────
 
 _INTENT_PING = re.compile(
-    r"\b(ping|latency|lag|response\s*time|how\s*(fast|slow)|ms\b)",
+    # Must ask about *Jarvis/bot* latency — not "ping a user"
+    r"\b(what\'?s?\s+(your\s+)?(ping|latency)|check\s+(your\s+)?(ping|latency)|"
+    r"how\s+(fast|slow)\s+are\s+you|your\s+response\s+time|bot\s+latency|"
+    r"are\s+you\s+lagging|why\s+are\s+you\s+(slow|lagging))\b",
     re.IGNORECASE,
 )
 _INTENT_UPTIME = re.compile(
-    r"\b(uptime|how\s+long\s+(have\s+you|you'?ve|has\s+it|it'?s)\s+(been\s+)?(online|running|up|alive)|online\s+for|been\s+running)",
+    r"\b(uptime|how\s+long\s+have\s+you\s+been\s+(online|running|up|alive)|"
+    r"how\s+long\s+(you\'?ve|you\s+have)\s+been\s+(online|running|up)|"
+    r"when\s+did\s+you\s+(come\s+online|start)|been\s+running\s+for)\b",
     re.IGNORECASE,
 )
 _INTENT_USAGE = re.compile(
-    r"\b(usage|resource|cpu|ram|memory\s+usage|disk|system\s+stats?|host\s+stats?|server\s+stats?|load|how\s+much\s+(ram|cpu|memory|disk))",
+    r"\b(show\s+(me\s+)?(system|server|host)\s+(usage|stats?|resources?)|"
+    r"(system|server|host)\s+(usage|stats?|resources?)\s*(please|\?)?$|"
+    r"how\s+much\s+(ram|cpu|memory|disk)\s+(are\s+you\s+using|is\s+being\s+used))\b",
     re.IGNORECASE,
 )
 _INTENT_STATS = re.compile(
-    r"\b(my\s+stats?|usage\s+stats?|how\s+many\s+(messages|tokens)|messages?\s+sent|ai\s+limit|daily\s+limit)",
+    r"\b(show\s+(me\s+)?my\s+stats?|what\s+are\s+my\s+stats?|"
+    r"my\s+usage\s+stats?|how\s+many\s+(ai\s+)?(messages?|tokens)\s+(have\s+i\s+sent|do\s+i\s+have)|"
+    r"my\s+daily\s+(ai\s+)?limit)\b",
     re.IGNORECASE,
 )
 _INTENT_HELP = re.compile(
-    r"\b(what\s+(can\s+you|commands?|do\s+you)|show\s+(me\s+)?(commands?|help)|list\s+(commands?|what)|available\s+commands?|help\s+menu|command\s+list)",
+    r"\b(show\s+(me\s+)?(the\s+)?(help|commands?(\s+list)?|command\s+list)|"
+    r"what\s+commands?\s+(do\s+you\s+have|can\s+i\s+use|are\s+available)|"
+    r"list\s+(all\s+)?commands?|available\s+commands?|help\s+menu|open\s+help)\b",
     re.IGNORECASE,
 )
 _INTENT_MEMORY = re.compile(
-    r"\b(what\s+do\s+you\s+(know|remember)|what\s+have\s+you\s+(stored|saved|remembered)|my\s+memory|show\s+(my\s+)?memories)",
+    r"\b(what\s+do\s+you\s+(know|remember)\s+about\s+me|"
+    r"what\s+have\s+you\s+(stored|saved|remembered)\s+(about\s+me)?|"
+    r"show\s+(me\s+)?my\s+memor(y|ies)|clear\s+my\s+memor(y|ies))\b",
     re.IGNORECASE,
 )
 _INTENT_MODEL = re.compile(
-    r"\b(what\s+(model|ai)\s+(are\s+you|is\s+(running|active))|which\s+model|current\s+model|my\s+model|what\s+are\s+you\s+using)",
+    r"\b(what\s+(model|ai)\s+are\s+you(\s+using|\s+running\s+on)?|"
+    r"which\s+(ai\s+)?model\s+(are\s+you|is\s+(active|running))|"
+    r"what\s+ai\s+are\s+you|my\s+current\s+model|change\s+my\s+model)\b",
     re.IGNORECASE,
 )
 _INTENT_LIMIT = re.compile(
-    r"\b(how\s+many\s+(ai\s+)?(messages?|requests?)\s+(do\s+i\s+have|left|remaining)|my\s+(daily\s+)?limit|ai\s+limit|messages?\s+left)",
+    r"\b(how\s+many\s+(ai\s+)?(messages?|requests?)\s+(do\s+i\s+have\s+left|remaining)|"
+    r"what\'?s?\s+my\s+(daily\s+)?(ai\s+)?limit|ai\s+(messages?\s+)?left)\b",
     re.IGNORECASE,
 )
 
 # ── Music intents ─────────────────────────────────────────────────────────────
+# NOTE: "play" alone is too broad — must have explicit music context.
+# "let's play a game" must NOT trigger this.
 _INTENT_PLAY = re.compile(
-    r"\b(play|put\s+on|start\s+playing|queue\s+up|add\s+to\s+queue)\b",
+    r"(?:"
+    r"play\s+(?:some\s+)?(?:music|songs?|tracks?|tunes?|a\s+song|a\s+track|some\s+(?:\w+\s+)?music)\b"
+    r"|(?:put\s+on|start\s+playing|queue\s+up|add\s+to\s+(?:the\s+)?(?:music\s+)?queue)\s+\S"
+    r"|play\s+(?:me\s+)?(?:something|anything)\b"
+    r"|(?:can\s+you\s+)?play\s+(?:the\s+song|the\s+track|this\s+song|that\s+song)\b"
+    r"|play\s+\S+(?:\s+\S+)*?\s+by\s+\S"
+    r")",
     re.IGNORECASE,
 )
 _INTENT_SKIP = re.compile(
-    r"\b(skip|next\s+song|next\s+track|skip\s+(this|the\s+current)?(\s+song|\s+track)?)\b",
+    # Must clearly be about skipping a song/track
+    r"\b(?:skip\s+(?:this\s+)?(?:song|track|one)|next\s+(?:song|track)|"
+    r"(?:can\s+you\s+)?skip\s+(?:it|this)\b|skip\s+to\s+(?:the\s+)?next)\b",
     re.IGNORECASE,
 )
 _INTENT_STOP_MUSIC = re.compile(
-    r"\b(stop\s+(the\s+)?(music|song|playing|playback)|leave\s+(the\s+)?vc|disconnect\s+from\s+(vc|voice)|stop\s+playing)\b",
+    r"\b(?:stop\s+(?:the\s+)?(?:music|song|playback)|stop\s+playing\s+(?:music|the\s+song)|"
+    r"(?:leave|disconnect\s+from)\s+(?:the\s+)?(?:vc|voice\s+channel))\b",
     re.IGNORECASE,
 )
 _INTENT_PAUSE_MUSIC = re.compile(
-    r"\b(pause(\s+the\s+music|\s+the\s+song)?|resume(\s+the\s+music|\s+the\s+song)?|unpause)\b",
+    # "pause" alone is too vague; require music context
+    r"\b(?:pause\s+(?:the\s+)?(?:music|song|playback)|resume\s+(?:the\s+)?(?:music|song|playback)|"
+    r"unpause\s+(?:the\s+)?(?:music|song)?|(?:can\s+you\s+)?(?:pause|resume)\s+(?:it|the\s+music))\b",
     re.IGNORECASE,
 )
 _INTENT_QUEUE = re.compile(
-    r"\b(show\s+(the\s+)?queue|what'?s?\s+(in\s+)?(the\s+)?queue|song\s+queue|music\s+queue|queue\s+list)\b",
+    r"\b(?:show\s+(?:me\s+)?(?:the\s+)?(?:music\s+|song\s+)?queue|"
+    r"what\'?s?\s+in\s+(?:the\s+)?(?:music\s+|song\s+)?queue|"
+    r"(?:music|song)\s+queue(?:\s+list)?|queue\s+list)\b",
     re.IGNORECASE,
 )
 _INTENT_NOWPLAYING = re.compile(
-    r"\b(what'?s?\s+(currently\s+)?playing|now\s+playing|current\s+(song|track)|what\s+(song|track)\s+is\s+this)\b",
+    r"\b(?:what\'?s?\s+(?:currently\s+)?playing(?:\s+right\s+now)?|"
+    r"now\s+playing|what\s+(?:song|track)\s+is\s+(?:this|playing)|"
+    r"current\s+(?:song|track))\b",
     re.IGNORECASE,
 )
 
 # ── Image search intent ───────────────────────────────────────────────────────
+# Requires "send/show/find me an image/photo/picture OF something" — explicit request
 _INTENT_IMAGE = re.compile(
-    r"\b(send\s+(me\s+)?(an?\s+)?(image|photo|picture|pic)\s+(of|for)|show\s+(me\s+)?(an?\s+)?(image|photo|picture|pic)\s+(of|for)|(find|get|search(\s+for)?)\s+(an?\s+)?(image|photo|picture|pic)\s+(of|for)|image\s+of|picture\s+of|photo\s+of)\b",
+    r"\b(?:(?:send|show|find|get|search(?:\s+for)?)\s+(?:me\s+)?(?:an?\s+)?(?:image|photo|picture|pic)\s+(?:of|for)\s+\S"
+    r"|(?:can\s+you\s+)?(?:send|show)\s+(?:me\s+)?(?:a|an)\s+(?:image|photo|picture|pic)\s+of\s+\S)\b",
     re.IGNORECASE,
 )
 
 # ── Music controls intent ─────────────────────────────────────────────────────
 _INTENT_CONTROLS = re.compile(
-    r"\b(controls?|music\s+controls?|player\s+controls?|control\s+panel|"
-    r"(open|show|bring\s+up|pull\s+up|give\s+me)(\s+the)?\s+controls?)\b",
+    r"\b(?:(?:open|show|bring\s+up|pull\s+up|give\s+me)\s+(?:the\s+)?(?:music\s+)?controls?|"
+    r"music\s+controls?\s+(?:panel|menu)|player\s+controls?\s+(?:panel|menu))\b",
     re.IGNORECASE,
 )
 
 # ── YouTube intents ───────────────────────────────────────────────────────────
 _INTENT_YT_SEARCH = re.compile(
-    r"\b(search\s+(youtube|yt)\s+(for)?|youtube\s+search|find\s+(on\s+)?(youtube|yt)|look\s+up\s+(on\s+)?(youtube|yt)|(youtube|yt)\s+(video|videos?)\s+(of|for|about))\b",
+    r"\b(?:search\s+(?:youtube|yt)\s+for\s+\S|youtube\s+search\s+\S|"
+    r"find\s+(?:on\s+)?(?:youtube|yt)\s+\S|look\s+up\s+(?:on\s+)?(?:youtube|yt)\s+\S|"
+    r"(?:youtube|yt)\s+(?:video|videos?)\s+(?:of|for|about)\s+\S)\b",
     re.IGNORECASE,
 )
 _INTENT_YT_TREND = re.compile(
-    r"\b(trending\s+(on\s+)?(youtube|yt)|(youtube|yt)\s+trend(ing)?|what'?s?\s+trending\s+(on\s+)?(youtube|yt)|top\s+(youtube|yt)\s+videos?)\b",
+    r"\b(?:what\'?s?\s+trending\s+on\s+(?:youtube|yt)|(?:youtube|yt)\s+trending|"
+    r"show\s+(?:me\s+)?(?:youtube|yt)\s+trends?|top\s+(?:youtube|yt)\s+videos?\s+(?:today|now|right\s+now))\b",
     re.IGNORECASE,
 )
 _INTENT_YT_INFO = re.compile(
-    r"\b(youtube\s+info|ytinfo|video\s+info\s+for|details\s+(for|about|of)\s+(this\s+)?(youtube|yt)|get\s+info\s+(for|about|on)\s+(https?://|youtu\.?be))\b",
+    r"\b(?:youtube\s+info|ytinfo|video\s+info\s+for\s+\S|"
+    r"get\s+info\s+(?:for|about|on)\s+https?://\S*(?:youtube|youtu\.be)\S*)\b",
     re.IGNORECASE,
 )
 
