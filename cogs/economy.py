@@ -49,7 +49,7 @@ REFERRED_BONUS  = 0    # JC paid to the new user who redeemed a code (none — t
 
 # ── JC Shop ──────────────────────────────────────────────────────────────────
 MYSTERY_BOX_COST     = 150  # JC to open a Mystery Box
-MYSTERY_BOX_MIN      = 10   # min payout
+MYSTERY_BOX_MIN      = 0   # min payout
 MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 
 # Shop catalog. Keys are stable item ids (used by !shop buy <id>).
