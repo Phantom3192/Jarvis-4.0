@@ -1610,6 +1610,43 @@ def _err(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
 
 
+_OPUS_CANDIDATES = (
+    "opus",            # generic name, works if a dev-symlink exists
+    "libopus.so.0",    # common Debian/Ubuntu runtime name
+    "libopus.so",
+    "libopus.0.dylib", # macOS (Homebrew)
+    "libopus.dylib",
+)
+
+
+def _ensure_opus_loaded() -> None:
+    """
+    discord.py needs the native libopus library loaded before any audio can
+    be encoded for voice. On Windows, discord.opus.load_default() finds the
+    bundled DLL automatically — but on Linux/Mac there's no auto-detection,
+    so VoiceClient.play() raises a bare `OpusNotLoaded()` (which prints as
+    an EMPTY string, e.g. "[Play] Playback error: ") if nothing loads it
+    first. We try a few common library names so this works out of the box
+    on most distros without the user having to call discord.opus.load_opus()
+    themselves.
+    """
+    if discord.opus.is_loaded():
+        return
+    for name in _OPUS_CANDIDATES:
+        try:
+            discord.opus.load_opus(name)
+            print(f"✅ Music: loaded libopus via '{name}'")
+            return
+        except OSError:
+            continue
+    print(
+        "⚠️  Music: could not auto-load libopus — voice playback will fail "
+        "with a blank 'OpusNotLoaded' error. Install it via your package "
+        "manager (e.g. `apt install libopus0` / `brew install opus`), or "
+        "set a custom path with discord.opus.load_opus('<path-to-lib>')."
+    )
+
+
 class Track:
     """
     Lightweight stand-in for wavelink.Playable — holds metadata plus the
@@ -1836,7 +1873,8 @@ class GuildPlayer:
 
         def _after(error: Exception | None) -> None:
             if error:
-                print(f"[Player] Playback error for '{track.title}': {error}")
+                detail = str(error) or error.__class__.__name__
+                print(f"[Player] Playback error for '{track.title}' ({error.__class__.__name__}): {detail}")
             fut = asyncio.run_coroutine_threadsafe(
                 self.cog._on_track_end(self.guild_id, track, error), loop
             )
@@ -2150,6 +2188,7 @@ class Music(commands.Cog):
                 "⚠️  Music: ffmpeg not found on PATH and FFMPEG_PATH is not set. "
                 "Install ffmpeg (e.g. `apt install ffmpeg`) or set FFMPEG_PATH."
             )
+        _ensure_opus_loaded()
         print("✅ Music: yt-dlp/FFmpeg backend ready (no Lavalink needed)")
 
     async def cog_unload(self) -> None:
@@ -2303,8 +2342,9 @@ class Music(commands.Cog):
             try:
                 await player.play(track, volume=player.volume)
             except Exception as e:
-                print(f"[Play] Playback error: {e}")
-                await send_fn(embed=_err(f"Playback failed: `{e}`"))
+                detail = str(e) or e.__class__.__name__
+                print(f"[Play] Playback error ({e.__class__.__name__}): {detail}")
+                await send_fn(embed=_err(f"Playback failed: `{detail}`"))
                 return
 
             self._last_requester[guild.id] = author.id
