@@ -3,10 +3,8 @@ from discord.ext import commands
 from discord import app_commands
 import random
 import asyncio
-import json
 import os
 from cogs.ai import generate_ai_response
-from cogs.http_session import get_session
 from cogs.state import check_cooldown
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -80,7 +78,7 @@ _count_conn = None
 
 async def _count_init_db():
     """Connect to Turso and load counting data. Called from cog __init__."""
-    global _count_conn, _count_data
+    global _count_conn
     turso_url   = os.getenv("TURSO_URL",   "").strip().lstrip("=").strip()
     turso_token = os.getenv("TURSO_TOKEN", "").strip().lstrip("=").strip()
     if not turso_url or not turso_token:
@@ -861,7 +859,6 @@ class ChessMoveSelect(discord.ui.View):
             self.selected_piece = from_sq
             # Show destination selector as a new message
             view = DestinationSelect(self.game, self.player, from_sq, moves)
-            board = self.game["board"]
             embed = _chess_embed(self.game, msg=f"Selected {_PIECE_NAMES[piece.piece_type]}. Where to move?")
             
             await interaction.response.send_message(
@@ -1403,7 +1400,6 @@ class MafiaJoinView(discord.ui.View):
             "member": interaction.user, "role": None, "alive": True,
             "last_will": "", "revealed": False, "guilt": False, "protected_by": None,
         }
-        n = len(game["players"])
         embed = _mafia_lobby_embed(game)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -1559,7 +1555,7 @@ async def _mafia_begin(interaction: discord.Interaction, game: dict):
     msg = await interaction.channel.send(embed=embed, view=view)
     game["last_msg"] = msg
 
-    await _send_night_dms(game, interaction.channel_id)
+    await _send_night_dms(game, interaction.channel_id, bot=interaction.client)
     await _start_phase_timer(interaction.channel, game, interaction.channel_id)
 
 
@@ -1668,7 +1664,7 @@ async def _auto_end_day(channel, game: dict, channel_id: int, reason: str = ""):
     new_msg = await channel.send(embed=embed, view=view)
     game["last_msg"] = new_msg
 
-    await _send_night_dms(game, channel_id)
+    await _send_night_dms(game, channel_id, bot=channel._state._get_client())
     await _start_phase_timer(channel, game, channel_id)
 
 
@@ -1773,7 +1769,6 @@ def _resolve_night_actions(game: dict) -> list[str]:
 
     # Escort blocks
     for blocker_id, target_id in escort_blocks.items():
-        blocker_name = players[blocker_id]["member"].display_name
         # Null out the blocked player's action
         for role_key, tid in list(actions.items()):
             if role_key not in ("mafia", "doctor", "bodyguard") and tid == target_id:
@@ -1782,7 +1777,6 @@ def _resolve_night_actions(game: dict) -> list[str]:
                 break
 
     # Bodyguard: redirect kill to themselves if they're protecting the target
-    bg_died = False
     if mafia_kill and bg_protect == mafia_kill:
         # Bodyguard intercepts the mafia kill
         bg_id = next((uid for uid, v in players.items() if v["alive"] and v["role"] == "bodyguard"), None)
@@ -1796,7 +1790,6 @@ def _resolve_night_actions(game: dict) -> list[str]:
                 f"🛡️ **{bg_name}** (Bodyguard) died protecting **{saved_name}** from the Mafia!{will_str}"
             )
             mafia_kill = None  # kill was intercepted
-            bg_died = True
 
     # Mafia kill
     if mafia_kill:
@@ -1875,7 +1868,7 @@ def _resolve_night_actions(game: dict) -> list[str]:
 
 # ── Night DM sender ─────────────────────────────────────────────────────────────
 
-async def _send_night_dms(game: dict, channel_id: int):
+async def _send_night_dms(game: dict, channel_id: int, bot=None):
     """Send DM buttons to all special-role alive players."""
     for uid, v in game["players"].items():
         if not v["alive"]:
@@ -1889,7 +1882,7 @@ async def _send_night_dms(game: dict, channel_id: int):
                        if p["member"].id != uid and p["role"] != "mafia"]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "mafia", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "mafia", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Mafia action",
                 description="Choose someone to **eliminate** tonight.",
@@ -1901,7 +1894,7 @@ async def _send_night_dms(game: dict, channel_id: int):
             targets = [p["member"] for p in _mafia_alive(game) if p["member"].id != uid]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "detective", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "detective", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Detective action",
                 description="Choose someone to **investigate**. You'll learn if they're Mafia.",
@@ -1913,7 +1906,7 @@ async def _send_night_dms(game: dict, channel_id: int):
             targets = [p["member"] for p in _mafia_alive(game)]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "doctor", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "doctor", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Doctor action",
                 description="Choose someone to **protect** from the Mafia tonight.",
@@ -1932,7 +1925,7 @@ async def _send_night_dms(game: dict, channel_id: int):
             targets = [p["member"] for p in _mafia_alive(game) if p["member"].id != uid]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "vigilante", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "vigilante", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Vigilante action",
                 description="**One-shot kill**: choose someone to shoot tonight. Killing an innocent will cause your death next night.",
@@ -1944,7 +1937,7 @@ async def _send_night_dms(game: dict, channel_id: int):
             targets = [p["member"] for p in _mafia_alive(game) if p["member"].id != uid]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "serialkiller", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "serialkiller", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Serial Killer action",
                 description="Choose someone to **kill** tonight. You bypass all protections.",
@@ -1956,7 +1949,7 @@ async def _send_night_dms(game: dict, channel_id: int):
             targets = [p["member"] for p in _mafia_alive(game)]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "bodyguard", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "bodyguard", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Bodyguard action",
                 description="Choose someone to **protect**. If they're attacked, you die instead.",
@@ -1994,7 +1987,7 @@ async def _send_night_dms(game: dict, channel_id: int):
             targets = [p["member"] for p in _mafia_alive(game) if p["member"].id != uid]
             if not targets:
                 continue
-            view = MafiaNightActionView(game, channel_id, uid, "escort", targets)
+            view = MafiaNightActionView(game, channel_id, uid, "escort", targets, bot=bot)
             e = discord.Embed(
                 title="🌙 Night falls — Escort action",
                 description="Choose someone to **distract** tonight. They can't use their ability.",
@@ -2017,12 +2010,13 @@ async def _send_night_dms(game: dict, channel_id: int):
 class MafiaNightActionView(discord.ui.View):
     """Sent via DM; player picks a target privately."""
 
-    def __init__(self, game: dict, channel_id: int, actor_id: int, role: str, targets: list):
+    def __init__(self, game: dict, channel_id: int, actor_id: int, role: str, targets: list, bot=None):
         super().__init__(timeout=NIGHT_TIMEOUT)
         self.game       = game
         self.channel_id = channel_id
         self.actor_id   = actor_id
         self.role       = role
+        self._bot       = bot   # stored so on_timeout can trigger auto-resolve
         self._submitted = False
         day = game.get("day", 1)
 
@@ -2049,29 +2043,29 @@ class MafiaNightActionView(discord.ui.View):
 
     def _make_callback(self, target: discord.Member):
         async def callback(interaction: discord.Interaction):
+            # ── Defer IMMEDIATELY — Discord only gives 3 seconds before showing
+            #    "Interaction Failed". Deferring buys unlimited time for async work.
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass  # already responded — still safe to continue
+
             if interaction.user.id != self.actor_id:
-                await interaction.response.send_message("❌ This isn't your action!", ephemeral=True)
+                await interaction.followup.send("❌ This isn't your action!", ephemeral=True)
                 return
 
             game = active_mafia.get(self.channel_id)
             if not game or game["phase"] != "night":
-                await interaction.response.edit_message(
-                    content="⚠️ The night phase has already ended.", view=None
-                )
+                await interaction.followup.send("⚠️ The night phase has already ended.", ephemeral=True)
                 return
 
             if self._submitted:
-                await interaction.response.edit_message(
-                    content="⚠️ You already submitted your action for this night.", view=None
-                )
+                await interaction.followup.send("⚠️ You already submitted your action for this night.", ephemeral=True)
                 return
 
             p = game["players"].get(target.id)
             if not p or not p["alive"]:
-                await interaction.response.edit_message(
-                    content=f"❌ **{target.display_name}** is no longer alive.",
-                    view=None,
-                )
+                await interaction.followup.send(f"❌ **{target.display_name}** is no longer alive.", ephemeral=True)
                 return
 
             self._submitted = True
@@ -2093,29 +2087,26 @@ class MafiaNightActionView(discord.ui.View):
             for item in self.children:
                 item.disabled = True
 
-            # Feedback DM
+            # Build feedback content
             if role == "detective":
                 is_evil = game["players"][target.id]["role"] in ("mafia", "serialkiller")
                 result = "🔫 **EVIL**" if is_evil else "✅ **NOT Evil**"
-                await interaction.response.edit_message(
-                    content=f"🔍 **Investigation result:** {target.display_name} is {result}.",
-                    view=self,
-                )
+                content = f"🔍 **Investigation result:** {target.display_name} is {result}."
             elif role == "escort":
-                await interaction.response.edit_message(
-                    content=f"💃 You distracted **{target.display_name}** — their ability is blocked tonight.",
-                    view=self,
-                )
+                content = f"💃 You distracted **{target.display_name}** — their ability is blocked tonight."
             else:
                 action_past = {
                     "mafia": "targeted", "doctor": "protected",
                     "vigilante": "shot", "serialkiller": "attacked",
                     "bodyguard": "stationed yourself to protect",
                 }.get(role, "acted on")
-                await interaction.response.edit_message(
-                    content=f"✅ You {action_past} **{target.display_name}** tonight.",
-                    view=self,
-                )
+                content = f"✅ You {action_past} **{target.display_name}** tonight."
+
+            # Edit the original DM to show the result with buttons disabled
+            try:
+                await interaction.edit_original_response(content=content, view=self)
+            except Exception:
+                await interaction.followup.send(content, ephemeral=True)
 
             # Check if all actions are in — auto-advance if so
             channel = interaction.client.get_channel(self.channel_id)
@@ -2125,7 +2116,7 @@ class MafiaNightActionView(discord.ui.View):
         return callback
 
     async def on_timeout(self):
-        """Auto-submit a null action so the night isn't blocked by AFK players."""
+        """Auto-submit a null action AND trigger night resolution so AFK players don't stall the game."""
         if self._submitted:
             return
         self._submitted = True
@@ -2141,10 +2132,14 @@ class MafiaNightActionView(discord.ui.View):
         # Disable buttons
         for item in self.children:
             item.disabled = True
-        # Trigger auto-advance in case this was the last action
-        import discord as _discord
-        # We don't have a channel reference here, so we rely on the phase timer
-        # to fire — but try to get the channel via the stored bot if possible
+        # ── KEY FIX: use the stored bot reference to trigger auto-advance ──────
+        bot = self._bot
+        if bot:
+            channel = bot.get_channel(self.channel_id)
+            if channel:
+                asyncio.get_event_loop().create_task(
+                    _check_auto_advance(channel, game, self.channel_id)
+                )
 
 
 # ── Day view ────────────────────────────────────────────────────────────────────
@@ -2180,6 +2175,9 @@ class MafiaDayView(discord.ui.View):
         select = discord.ui.Select(placeholder="Vote to eliminate…", options=alive_options)
 
         async def on_select(inter: discord.Interaction):
+            # Defer immediately — prevents "Interaction Failed" while we process
+            await inter.response.defer()
+
             chosen = inter.data["values"][0]
             # Mark this player as having voted (regardless of abstain)
             game.setdefault("voted_players", set()).add(uid)
@@ -2187,7 +2185,7 @@ class MafiaDayView(discord.ui.View):
             if chosen == "abstain":
                 game["votes"].pop(uid, None)
                 voted_count, alive_count = _count_votes(game)
-                await inter.response.send_message(
+                await inter.followup.send(
                     f"🤷 **{inter.user.display_name}** abstained. ({voted_count}/{alive_count} voted)",
                     ephemeral=False
                 )
@@ -2207,7 +2205,7 @@ class MafiaDayView(discord.ui.View):
                     for vid, cnt in sorted(tally_counts.items(), key=lambda x: -x[1])
                 )
                 voted_count, alive_count = _count_votes(game)
-                await inter.response.send_message(
+                await inter.followup.send(
                     f"🗳️ **{inter.user.display_name}** voted for **{target_name}**!\n"
                     f"**Votes ({voted_count}/{alive_count}):**\n{tally}",
                     ephemeral=False
@@ -2838,7 +2836,7 @@ class Fun(commands.Cog):
         view = MafiaNightView(game, ctx.channel.id)
         msg  = await ctx.send(embed=embed, view=view)
         game["last_msg"] = msg
-        await _send_night_dms(game, ctx.channel.id)
+        await _send_night_dms(game, ctx.channel.id, bot=ctx.bot)
         await _start_phase_timer(ctx.channel, game, ctx.channel.id)
 
     @commands.command(name="mafvote")
