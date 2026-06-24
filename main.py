@@ -147,7 +147,7 @@ async def slash_interaction_check(interaction: discord.Interaction) -> bool:
         return False
     return True
 
-bot.tree.interaction_check = slash_interaction_check
+bot.tree.interaction_check = slash_interaction_check 
 
 
 @bot.event
