@@ -123,7 +123,11 @@ def set_user_model(user_id: int, model_key: str) -> None:
 DEFAULT_SYSTEM_PROMPT = (
     "You are Jarvis, a sharp, efficient, and slightly witty AI assistant built for Discord by Phantom. "
     "If someone asks who made you or who your creator is, say Phantom — but never volunteer or repeat this unprompted. "
-    "Keep responses concise and helpful. Do not start sentences with someone's name. Avoid unnecessary filler."
+    "Keep responses concise and helpful. Do not start sentences with someone's name. Avoid unnecessary filler. "
+    "CRITICAL: Never fabricate or invent real-time bot data. "
+    "If someone asks for your ping/latency, uptime, usage stats, or any live bot metric, "
+    "say you can't retrieve that right now and suggest they use the relevant command (e.g. !ping, !uptime). "
+    "Never make up a number for ping or any other live value."
 )
 
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
@@ -603,10 +607,20 @@ async def _race_providers(*tasks: asyncio.Task) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _INTENT_PING = re.compile(
-    # Must ask about *Jarvis/bot* latency — not "ping a user"
-    r"\b(what\'?s?\s+(your\s+)?(ping|latency)|check\s+(your\s+)?(ping|latency)|"
-    r"how\s+(fast|slow)\s+are\s+you|your\s+response\s+time|bot\s+latency|"
-    r"are\s+you\s+lagging|why\s+are\s+you\s+(slow|lagging))\b",
+    # Must ask about *Jarvis/bot* latency — not "ping a user" or "ping @someone"
+    # Excluded: "ping <username>", "ping @user", "ping this user", "ping them"
+    r"\b(?:what\'?s?\s+(?:your\s+)?(?:ping|latency)"
+    r"|check\s+(?:your\s+)?(?:ping|latency)"
+    r"|how\s+(?:fast|slow)\s+are\s+you"
+    r"|your\s+response\s+time"
+    r"|bot\s+latency"
+    r"|are\s+you\s+lagging"
+    r"|why\s+are\s+you\s+(?:slow|lagging)"
+    # "show ping", "show me ping", "what is your ping", "show your latency"
+    r"|show\s+(?:me\s+)?(?:your\s+)?(?:ping|latency)"
+    r"|(?:your\s+)?ping\s*\?"         # "your ping?" or just "ping?"
+    r"|(?:^|\s)ping\s*$"              # lone "ping" at end of message
+    r")\b",
     re.IGNORECASE,
 )
 _INTENT_UPTIME = re.compile(
@@ -654,13 +668,35 @@ _INTENT_LIMIT = re.compile(
 # ── Music intents ─────────────────────────────────────────────────────────────
 # NOTE: "play" alone is too broad — must have explicit music context.
 # "let's play a game" must NOT trigger this.
+#
+# Matching rules:
+#  1. Generic music: "play music", "play some songs", etc.
+#  2. Explicit queue actions: "put on X", "queue up X"
+#  3. Vague play: "play me something", "play anything"
+#  4. Song reference: "play the song", "play this track"
+#  5. "X by Y" pattern: "play Someone You Loved by Lewis Capaldi"
+#  6. Bare song title: "play <2+ words>" — catches "play Someone You Loved"
+#     BUT we exclude game-like contexts: "play a game", "play [game name]",
+#     "let's play", "wanna play" etc. to avoid misfires.
 _INTENT_PLAY = re.compile(
     r"(?:"
+    # 1. Generic music keywords
     r"play\s+(?:some\s+)?(?:music|songs?|tracks?|tunes?|a\s+song|a\s+track|some\s+(?:\w+\s+)?music)\b"
+    # 2. Explicit queue/put-on actions with a target
     r"|(?:put\s+on|start\s+playing|queue\s+up|add\s+to\s+(?:the\s+)?(?:music\s+)?queue)\s+\S"
+    # 3. Vague play requests
     r"|play\s+(?:me\s+)?(?:something|anything)\b"
+    # 4. Explicit song/track reference
     r"|(?:can\s+you\s+)?play\s+(?:the\s+song|the\s+track|this\s+song|that\s+song)\b"
+    # 5. "X by Y" pattern — "play Someone You Loved by Lewis Capaldi"
     r"|play\s+\S+(?:\s+\S+)*?\s+by\s+\S"
+    # 6. Bare song title with 2+ words — catches "play Someone You Loved",
+    #    "play Blinding Lights", etc.
+    #    Must appear at start of (cleaned) message or after a non-game-intent prefix.
+    #    Excluded targets: game keywords, and single-word-only targets.
+    #    Game-intent phrases ("let's play", "wanna play") are handled upstream
+    #    by checking the full user_text in _try_intent_intercept before this fires.
+    r"|(?:^|\.\s+|\?\s+)play\s+(?!a\s+game\b)(?!me\b)(?!some\b)(?!any\b)(?!trivia\b)(?!hangman\b)(?!chess\b)(?!uno\b)(?!poker\b)(?!minecraft\b)(?!roulette\b)(?!\w+\s*$)\w[\w\s']{2,}"
     r")",
     re.IGNORECASE,
 )
@@ -843,14 +879,24 @@ async def _try_intent_intercept(
         return True
 
     # ── music: play ───────────────────────────────────────────────────────────
-    if _INTENT_PLAY.search(user_text) and message.guild:
+    # Guard: reject game-intent phrases before checking the play regex.
+    # "let's play", "wanna play", "want to play" should never trigger music.
+    _GAME_INTENT = re.compile(
+        r"\b(?:let'?s\s+play|wanna\s+play|want\s+to\s+play|can\s+we\s+play|"
+        r"play\s+(?:a\s+)?(?:game|round|match)|i\s+want\s+to\s+play\s+a)\b",
+        re.IGNORECASE,
+    )
+    if _INTENT_PLAY.search(user_text) and message.guild and not _GAME_INTENT.search(user_text):
         music_cog = bot.cogs.get("Music")
         if music_cog:
             if _music_module.MUSIC_FEATURE_DOWN:
                 await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
                 return True
+            # Strip common prefixes to extract the actual song query
             query = re.sub(
-                r"^\s*(play|put\s+on|start\s+playing|queue\s+up|add\s+to\s+queue)\s*",
+                r"^\s*(?:can\s+you\s+)?(?:please\s+)?"
+                r"(?:play|put\s+on|start\s+playing|queue\s+up|add\s+to\s+(?:the\s+)?(?:music\s+)?queue)"
+                r"(?:\s+(?:me\s+)?(?:the\s+song\s+)?(?:called\s+)?)?",
                 "", user_text, flags=re.IGNORECASE
             ).strip(" ,:-")
             if not query:
