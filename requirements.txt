@@ -7,5 +7,6 @@ libsql-experimental
 psutil
 PyNaCl
 yt-dlp
+yt-dlp-ejs
 Pillow
 chess

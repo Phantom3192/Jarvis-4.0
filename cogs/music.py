@@ -143,33 +143,23 @@ YTDLP_FORMAT_OPTIONS = {
     "source_address": "0.0.0.0",  # avoid IPv6 issues on some hosts
     "extract_flat": False,
     # ── Player client selection ──────────────────────────────────────────
-    # WHY we set this explicitly:
+    # We use yt-dlp's built-in "default" client list rather than a
+    # hardcoded set — yt-dlp maintainers update it automatically as
+    # YouTube changes its API.
     #
-    # yt-dlp's auto-selected clients (web_safari, tv_downgraded) require
-    # a JavaScript runtime (Node/Deno/Bun) to solve YouTube's signature
-    # and n-parameter challenges. On Railway/Render/serverless deployments
-    # where no JS runtime is available ("JS runtimes: none" in !ytdebug),
-    # those clients return zero usable formats → "Requested format is not
-    # available".
+    # The critical dependency that makes this work is `yt-dlp-ejs`
+    # (in requirements.txt). Without it, yt-dlp reports "node (unavailable)"
+    # even when Node.js v22+ is installed, because EJS is the challenge
+    # solver script package that actually decrypts YouTube's sig/n-params.
+    # With yt-dlp-ejs installed + Node.js on PATH, yt-dlp can solve
+    # YouTube's JS challenges and the default client set works correctly.
     #
-    # The clients below do NOT require JS challenge solving:
-    #
-    #   tv_embedded  — YouTube TV embedded API. No sig/n-param encryption.
-    #                  Works without cookies. Best first choice for servers.
-    #
-    #   mweb         — YouTube mobile-web API. Also no JS challenge needed.
-    #                  Good fallback; slightly lower quality ceiling.
-    #
-    #   android_vr   — YouTube VR app API. No JS needed. Included as a
-    #                  third fallback for age-restricted or geo-restricted
-    #                  content that tv_embedded/mweb sometimes block.
-    #
-    # These clients are stable and actively maintained by yt-dlp. If one
-    # starts breaking, run !ytdebug on a failing URL and check which client
-    # rows show url_present=True — adjust the list accordingly.
+    # "default" expands to yt-dlp's built-in default client list for
+    # the current auth state (authed → tv_downgraded+web_safari,
+    # unauthed → android_vr+web_safari, no-JS → android_vr).
     "extractor_args": {
         "youtube": {
-            "player_client": ["tv_embedded", "mweb", "android_vr"],
+            "player_client": ["default"],
         }
     },
 }
@@ -295,19 +285,18 @@ def _ensure_opus_loaded() -> None:
 
 def _ensure_node_available() -> None:
     """
-    yt-dlp's JS challenge solver (needed to decrypt YouTube's signature/n
-    parameters on most current player clients) looks for an executable
-    literally named `node` on PATH. Some package managers — notably
-    Debian/Ubuntu's apt `nodejs` package — only install a binary named
-    `nodejs`, not `node` (the old `nodejs-legacy` package that provided
-    that symlink no longer exists on modern releases). Without `node` on
-    PATH, yt-dlp reports all JS runtimes as "(unavailable)" and many
-    videos fail with "Requested format is not available" even though
-    Node.js is technically installed.
+    yt-dlp's JS challenge solver needs two things to work:
+      1. A `node` binary on PATH (Node.js v22+)
+      2. The `yt-dlp-ejs` pip package (the actual solver scripts)
 
-    This creates a `node` symlink pointing at `nodejs` in a writable
-    directory we add to PATH, as a safety net in case the deployment
-    environment's package manager has this naming quirk.
+    Without BOTH, yt-dlp reports all JS runtimes as "(unavailable)" and
+    many videos fail with "Requested format is not available" — even if
+    Node.js is installed, yt-dlp-ejs is what makes node "available" to
+    yt-dlp. Make sure `yt-dlp-ejs` is in requirements.txt.
+
+    This function handles a Debian/Ubuntu naming quirk where apt installs
+    the binary as `nodejs` instead of `node`. It creates a `node` symlink
+    in a temp dir so yt-dlp can find it.
     """
     if shutil.which("node"):
         return
