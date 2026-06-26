@@ -240,10 +240,29 @@ if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
 elif YTDLP_COOKIES_FILE:
     print(f"⚠️  Music: YTDLP_COOKIES_FILE set to '{YTDLP_COOKIES_FILE}' but file not found.")
 
-FFMPEG_BEFORE_OPTS = (
-    "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-)
-FFMPEG_OPTS = "-vn"
+FFMPEG_BEFORE_OPTS = " ".join([
+    # Network resilience
+    "-reconnect 1",
+    "-reconnect_streamed 1",
+    "-reconnect_delay_max 5",
+    # Input buffering — prevents crackling from demuxer starvation.
+    # analyzeduration 0 + probesize 32 = skip slow stream analysis so
+    # FFmpeg starts immediately without a long blocking probe.
+    # thread_queue_size 4096 = large demuxer queue so the decoder never
+    # starves waiting for packets (the main cause of crackling on Railway).
+    "-analyzeduration 0",
+    "-probesize 32",
+    "-thread_queue_size 4096",
+])
+
+FFMPEG_OPTS = " ".join([
+    "-vn",           # drop video track, audio only
+    # Explicit resample to Discord's expected format.
+    # Without -ar 48000, a 44.1kHz YouTube m4a gets silently resampled
+    # mid-stream, causing subtle crackling when the sample rate changes.
+    "-ar 48000",     # 48 kHz — Discord voice chat rate
+    "-ac 2",         # stereo
+])
 
 # Minimum gap (in seconds) between consecutive yt-dlp extraction requests,
 # to avoid hammering YouTube and tripping rate limits / bot checks.
@@ -600,6 +619,11 @@ class GuildPlayer:
         self._stopped = False
 
         def _make_source() -> discord.AudioSource:
+            # FFmpegPCMAudio decodes to raw PCM, then PCMVolumeTransformer
+            # adjusts volume, then discord.py re-encodes to Opus for the VC.
+            # The -ar 48000 -ac 2 in FFMPEG_OPTS ensures the PCM matches
+            # Discord's expected format exactly, avoiding a silent mid-stream
+            # resample that is the most common cause of crackling.
             source = discord.FFmpegPCMAudio(
                 track.uri,
                 executable=FFMPEG_EXECUTABLE,
