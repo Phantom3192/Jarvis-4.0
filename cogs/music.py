@@ -60,7 +60,7 @@ ERROR_COLOR  = discord.Color.red()
 # ── Temporary feature toggle ────────────────────────────────────────────────
 # Set to True to make ALL music/VC commands respond with a "temporarily down"
 # message instead of running. Set back to False to restore normal behaviour.
-MUSIC_FEATURE_DOWN = True
+MUSIC_FEATURE_DOWN = False
 
 MUSIC_DOWN_EMBED = discord.Embed(
     title="🚧 Music is temporarily down",
@@ -96,7 +96,24 @@ YTDLP_COOKIES_FILE = _os.environ.get("YTDLP_COOKIES_FILE", "").strip()
 
 if YTDLP_COOKIES_B64:
     try:
-        decoded = _base64.b64decode(YTDLP_COOKIES_B64)
+        # validate=True rejects strings containing characters outside the
+        # base64 alphabet — without it, b64decode silently treats any text
+        # as "valid" base64 and produces garbage bytes instead of erroring,
+        # which is exactly what happens if raw cookie text gets pasted into
+        # this var by mistake instead of its base64 encoding.
+        decoded = _base64.b64decode(YTDLP_COOKIES_B64, validate=True)
+        # A real Netscape cookies.txt is plain ASCII/UTF-8 text starting
+        # with a comment line or tab-separated fields — sanity check this
+        # before trusting it, since garbage-but-validly-padded base64 can
+        # still slip through the line above.
+        preview = decoded[:200].decode("utf-8")
+        if not (preview.startswith("#") or "\t" in preview):
+            raise ValueError(
+                "decoded content doesn't look like a Netscape cookies.txt "
+                "file (expected a '#' comment or tab-separated fields). "
+                "Did you paste the file's raw text instead of its base64 "
+                "encoding?"
+            )
         _tmp = _tempfile.NamedTemporaryFile(
             mode="wb", suffix="_cookies.txt", delete=False
         )
@@ -105,10 +122,18 @@ if YTDLP_COOKIES_B64:
         YTDLP_COOKIES_FILE = _tmp.name
         print(f"✅ Music: decoded YTDLP_COOKIES_B64 to temp file {YTDLP_COOKIES_FILE}")
     except Exception as e:
-        print(f"⚠️  Music: failed to decode YTDLP_COOKIES_B64: {e}")
+        print(
+            f"⚠️  Music: failed to decode YTDLP_COOKIES_B64: {e}\n"
+            "   Make sure you pasted the OUTPUT of the base64 command "
+            "(a long string of letters/numbers), not the cookies.txt "
+            "file's own content."
+        )
 
 YTDLP_FORMAT_OPTIONS = {
-    "format": "bestaudio/best",
+    # Fallback chain: prefer a pure-audio stream, but accept a combined
+    # video+audio stream if that's all a given client/video offers, rather
+    # than erroring out with "Requested format is not available."
+    "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "nocheckcertificate": True,
     "ignoreerrors": False,
@@ -117,10 +142,15 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid ipv6 issues on some hosts
     "extract_flat": False,
-    # Spoofing the Android client often avoids the bot-check wall even
-    # without cookies, since it uses a different (less aggressively
-    # checked) player API path than the default web client.
-    "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+    # NOTE: we now rely on cookies (set above) to get past YouTube's bot
+    # check, instead of spoofing the "android" client. The android client
+    # has recently started returning HLS/SABR-only manifests with no
+    # direct-URL audio format for many videos, which made bestaudio fail
+    # with "Requested format is not available" even though the video
+    # plays fine in a browser. "web" (yt-dlp's default) + "ios" as a
+    # fallback are the clients currently known to still return real
+    # direct-URL formats when an authenticated cookie session is present.
+    "extractor_args": {"youtube": {"player_client": ["web", "ios"]}},
 }
 if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
     YTDLP_FORMAT_OPTIONS["cookiefile"] = YTDLP_COOKIES_FILE
