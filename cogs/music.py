@@ -276,6 +276,40 @@ def _ensure_opus_loaded() -> None:
     )
 
 
+def _ensure_node_available() -> None:
+    """
+    yt-dlp's JS challenge solver (needed to decrypt YouTube's signature/n
+    parameters on most current player clients) looks for an executable
+    literally named `node` on PATH. Some package managers — notably
+    Debian/Ubuntu's apt `nodejs` package — only install a binary named
+    `nodejs`, not `node` (the old `nodejs-legacy` package that provided
+    that symlink no longer exists on modern releases). Without `node` on
+    PATH, yt-dlp reports all JS runtimes as "(unavailable)" and many
+    videos fail with "Requested format is not available" even though
+    Node.js is technically installed.
+
+    This creates a `node` symlink pointing at `nodejs` in a writable
+    directory we add to PATH, as a safety net in case the deployment
+    environment's package manager has this naming quirk.
+    """
+    if shutil.which("node"):
+        return
+    nodejs_path = shutil.which("nodejs")
+    if not nodejs_path:
+        return  # neither exists — nothing we can do here, just no JS runtime
+
+    try:
+        bin_dir = _os.path.join(_tempfile.gettempdir(), "music_cog_bin")
+        _os.makedirs(bin_dir, exist_ok=True)
+        link_path = _os.path.join(bin_dir, "node")
+        if not _os.path.exists(link_path):
+            _os.symlink(nodejs_path, link_path)
+        _os.environ["PATH"] = bin_dir + _os.pathsep + _os.environ.get("PATH", "")
+        print(f"✅ Music: 'node' not found but 'nodejs' was — symlinked {link_path} -> {nodejs_path}")
+    except OSError as e:
+        print(f"⚠️  Music: found 'nodejs' but failed to create 'node' symlink: {e}")
+
+
 class Track:
     """
     Lightweight stand-in for wavelink.Playable — holds metadata plus the
@@ -818,6 +852,7 @@ class Music(commands.Cog):
                 "⚠️  Music: ffmpeg not found on PATH and FFMPEG_PATH is not set. "
                 "Install ffmpeg (e.g. `apt install ffmpeg`) or set FFMPEG_PATH."
             )
+        _ensure_node_available()
         _ensure_opus_loaded()
         print("✅ Music: yt-dlp/FFmpeg backend ready (no Lavalink needed)")
 
