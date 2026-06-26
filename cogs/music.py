@@ -142,21 +142,17 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid IPv6 issues on some hosts
     "extract_flat": False,
-    # ── Player client selection ──────────────────────────────────────────
-    # We use yt-dlp's built-in "default" client list rather than a
-    # hardcoded set — yt-dlp maintainers update it automatically as
-    # YouTube changes its API.
-    #
-    # The critical dependency that makes this work is `yt-dlp-ejs`
-    # (in requirements.txt). Without it, yt-dlp reports "node (unavailable)"
-    # even when Node.js v22+ is installed, because EJS is the challenge
-    # solver script package that actually decrypts YouTube's sig/n-params.
-    # With yt-dlp-ejs installed + Node.js on PATH, yt-dlp can solve
-    # YouTube's JS challenges and the default client set works correctly.
-    #
-    # "default" expands to yt-dlp's built-in default client list for
-    # the current auth state (authed → tv_downgraded+web_safari,
-    # unauthed → android_vr+web_safari, no-JS → android_vr).
+    # ── JS runtime ──────────────────────────────────────────────────────
+    # yt-dlp's default js_runtimes is {'deno': {}} — node is NOT included
+    # unless you pass it explicitly, even if node is on PATH and yt-dlp-ejs
+    # is installed. Without node in this dict, yt-dlp logs "JS runtimes:
+    # none" and can't solve YouTube's sig/n-param challenges → 0 formats.
+    # We include node first (highest preference when EJS scripts present),
+    # deno second for environments where deno is available instead.
+    "js_runtimes": {"node": {}, "deno": {}},
+    # ── Player clients ──────────────────────────────────────────────────
+    # "default" lets yt-dlp pick the right client set for the current auth
+    # state. With a working JS runtime above, sig/n challenges now succeed.
     "extractor_args": {
         "youtube": {
             "player_client": ["default"],
@@ -1354,6 +1350,7 @@ class Music(commands.Cog):
             opts["no_warnings"] = False
             opts["verbose"] = True
             opts["logger"] = None
+            opts["js_runtimes"] = {"node": {}, "deno": {}}
             is_url = bool(_URL_RE.match(query.strip()))
             target = query.strip() if is_url else f"ytsearch1:{query.strip()}"
 
