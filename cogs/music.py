@@ -130,11 +130,9 @@ if YTDLP_COOKIES_B64:
         )
 
 YTDLP_FORMAT_OPTIONS = {
-    # Fallback chain: prefer a pure-audio stream, but accept a combined
-    # video+audio stream if that's all a given client/video offers, rather
-    # than erroring out with "Requested format is not available." FFmpeg
-    # can consume HLS (m3u8) streams natively, so we don't need to exclude
-    # those — only direct-URL/m3u8 formats matter, not "no formats at all".
+    # Fallback chain: prefer a pure-audio m4a, then any audio stream,
+    # then any combined stream. This avoids "Requested format is not
+    # available" when only certain clients/formats survive.
     "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "nocheckcertificate": True,
@@ -142,19 +140,38 @@ YTDLP_FORMAT_OPTIONS = {
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
-    "source_address": "0.0.0.0",  # avoid ipv6 issues on some hosts
+    "source_address": "0.0.0.0",  # avoid IPv6 issues on some hosts
     "extract_flat": False,
-    # NOTE: deliberately NOT setting player_client here. yt-dlp picks its
-    # own default client combo (currently `tv_downgraded,web_safari` when
-    # cookies are present, or `android_vr,web_safari` otherwise) and that
-    # default is actively updated by the yt-dlp maintainers to track
-    # whatever YouTube is currently doing — usually faster than we can
-    # keep a hardcoded list correct. Earlier we manually forced
-    # `tv,ios`, which actually made things worse: `ios` silently gets
-    # skipped entirely when cookies are present (its API doesn't support
-    # cookie auth), and `tv` alone needs yt-dlp's JS challenge solver
-    # (Node.js) to decrypt signature/n-parameters — see the nodejs apt
-    # package added in nixpacks.toml for that requirement.
+    # ── Player client selection ──────────────────────────────────────────
+    # WHY we set this explicitly:
+    #
+    # yt-dlp's auto-selected clients (web_safari, tv_downgraded) require
+    # a JavaScript runtime (Node/Deno/Bun) to solve YouTube's signature
+    # and n-parameter challenges. On Railway/Render/serverless deployments
+    # where no JS runtime is available ("JS runtimes: none" in !ytdebug),
+    # those clients return zero usable formats → "Requested format is not
+    # available".
+    #
+    # The clients below do NOT require JS challenge solving:
+    #
+    #   tv_embedded  — YouTube TV embedded API. No sig/n-param encryption.
+    #                  Works without cookies. Best first choice for servers.
+    #
+    #   mweb         — YouTube mobile-web API. Also no JS challenge needed.
+    #                  Good fallback; slightly lower quality ceiling.
+    #
+    #   android_vr   — YouTube VR app API. No JS needed. Included as a
+    #                  third fallback for age-restricted or geo-restricted
+    #                  content that tv_embedded/mweb sometimes block.
+    #
+    # These clients are stable and actively maintained by yt-dlp. If one
+    # starts breaking, run !ytdebug on a failing URL and check which client
+    # rows show url_present=True — adjust the list accordingly.
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["tv_embedded", "mweb", "android_vr"],
+        }
+    },
 }
 
 if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
@@ -1307,11 +1324,16 @@ class Music(commands.Cog):
         """
         Owner-only diagnostic: dumps yt-dlp's raw format list + any
         warnings/errors for a URL or search query, straight to Discord.
-        Use this instead of guessing player_client combinations blindly —
-        it shows exactly what formats (if any) come back and why.
+
+        Also shows JS runtime availability and which player clients succeeded,
+        so you can tell at a glance whether the no-JS-runtime fix is working.
         """
         if not query:
-            await ctx.reply("**Usage:** `!ytdebug <YouTube URL or search terms>`")
+            await ctx.reply(
+                "**Usage:** `!ytdebug <YouTube URL or search terms>`\n"
+                "This dumps format availability, JS runtime status, and "
+                "per-client results so you can diagnose playback failures."
+            )
             return
 
         await ctx.reply(f"🔍 Running yt-dlp diagnostics for: `{query}` …")
@@ -1321,13 +1343,28 @@ class Music(commands.Cog):
             import contextlib
 
             buf = io.StringIO()
+
+            # ── 1. JS runtime availability ───────────────────────────────
+            buf.write("=== JS Runtime Check ===\n")
+            for rt in ("node", "nodejs", "deno", "bun"):
+                path = shutil.which(rt)
+                buf.write(f"  {rt:8s}: {'✅ ' + path if path else '❌ not found'}\n")
+
+            # ── 2. Active player_client setting ─────────────────────────
+            clients = (
+                YTDLP_FORMAT_OPTIONS.get("extractor_args", {})
+                .get("youtube", {})
+                .get("player_client", ["(auto)"])
+            )
+            buf.write(f"\n=== Player clients in use: {clients} ===\n")
+
+            # ── 3. Format extraction ─────────────────────────────────────
+            buf.write("\n=== yt-dlp extraction ===\n")
             opts = dict(YTDLP_FORMAT_OPTIONS)
             opts["quiet"] = False
             opts["no_warnings"] = False
             opts["verbose"] = True
-            opts["logger"] = None  # let it print via stdout, which we capture
-            # Don't actually need search expansion here — caller passes
-            # either a direct URL or plain text; mirror _smart_search's logic.
+            opts["logger"] = None
             is_url = bool(_URL_RE.match(query.strip()))
             target = query.strip() if is_url else f"ytsearch1:{query.strip()}"
 
@@ -1336,21 +1373,43 @@ class Music(commands.Cog):
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         info = ydl.extract_info(target, download=False)
                     if info:
-                        entries = info.get("entries", [info]) if "entries" in info else [info]
+                        entries = (
+                            info.get("entries", [info])
+                            if "entries" in info
+                            else [info]
+                        )
                         for e in entries:
                             if not e:
                                 continue
                             fmts = e.get("formats") or []
-                            buf.write(f"\n--- {e.get('title')} ({e.get('id')}) ---\n")
-                            buf.write(f"Total formats returned: {len(fmts)}\n")
-                            for f in fmts[:30]:
+                            audio_fmts = [
+                                f for f in fmts
+                                if f.get("acodec") not in (None, "none")
+                                and f.get("url")
+                            ]
+                            buf.write(
+                                f"\n--- {e.get('title')} ({e.get('id')}) ---\n"
+                                f"Total formats: {len(fmts)}  |  "
+                                f"Audio-bearing with URL: {len(audio_fmts)}\n"
+                            )
+                            if not audio_fmts:
                                 buf.write(
-                                    f"  id={f.get('format_id')!s:>6} "
+                                    "  ⚠️  NO usable audio formats — "
+                                    "this is why playback fails!\n"
+                                )
+                            for f in fmts[:30]:
+                                has_url = bool(f.get("url"))
+                                acodec = f.get("acodec") or "none"
+                                vcodec = f.get("vcodec") or "none"
+                                marker = "🔊" if (has_url and acodec != "none") else "  "
+                                buf.write(
+                                    f"  {marker} id={f.get('format_id')!s:>6} "
                                     f"ext={f.get('ext')!s:>5} "
-                                    f"acodec={f.get('acodec')!s:>10} "
-                                    f"vcodec={f.get('vcodec')!s:>10} "
+                                    f"acodec={acodec!s:>10} "
+                                    f"vcodec={vcodec!s:>10} "
                                     f"proto={f.get('protocol')!s:>10} "
-                                    f"url_present={bool(f.get('url'))}\n"
+                                    f"url={'✅' if has_url else '❌'} "
+                                    f"client={f.get('format_note', '')}\n"
                                 )
                 except Exception as e:
                     buf.write(f"\nEXCEPTION: {e.__class__.__name__}: {e}\n")
@@ -1359,8 +1418,6 @@ class Music(commands.Cog):
         loop = asyncio.get_event_loop()
         output = await loop.run_in_executor(None, _run_debug)
 
-        # Discord message limit is 2000 chars; chunk into multiple messages
-        # wrapped in code blocks for readability.
         chunk_size = 1900
         if not output.strip():
             await ctx.send("(no output captured)")
