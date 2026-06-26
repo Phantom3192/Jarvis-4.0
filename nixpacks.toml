@@ -1,3 +1,8 @@
 [phases.setup]
-aptPkgs = ["fonts-freefont-ttf", "fontconfig", "ffmpeg", "libopus0", "nodejs"]
-nixPkgs = ["..."]
+# nodejs_22 gives Node.js 22.x via nixpkgs — yt-dlp-ejs requires Node >= 22
+# to solve YouTube's JS challenges (sig/n-param decryption). The default
+# apt `nodejs` package on Debian gives v18 which yt-dlp rejects as too old.
+# music.py detects the node binary path at startup and passes it explicitly
+# to yt-dlp's js_runtimes so PATH ordering doesn't cause version confusion.
+aptPkgs = ["fonts-freefont-ttf", "fontconfig", "ffmpeg", "libopus0"]
+nixPkgs = ["...", "nodejs_22"]

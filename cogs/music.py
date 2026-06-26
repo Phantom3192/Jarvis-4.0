@@ -129,6 +129,79 @@ if YTDLP_COOKIES_B64:
             "file's own content."
         )
 
+def _find_node22_path() -> str | None:
+    """
+    Find a Node.js binary that is version 22 or higher.
+
+    WHY this exists: yt-dlp-ejs requires Node >= 22 to solve YouTube's
+    sig/n-parameter challenges. Railway's nixpkgs installs nodejs_22, but
+    PATH ordering can put an older system Node (e.g. v18 from apt) first,
+    causing yt-dlp to find the wrong binary and log "node-18.x (unsupported)".
+
+    By scanning known paths and checking `node --version` directly, we can
+    pass the correct binary path explicitly via js_runtimes={'node': {'path':...}}
+    instead of relying on PATH order.
+
+    Returns the path to a Node >= 22 binary, or None if none is found.
+    """
+    import subprocess as _sp
+
+    candidates: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    # Explicit paths to check in addition to PATH lookup
+    extra_paths = [
+        # nixpkgs nodejs_22 typical install locations on Railway/Nix
+        "/root/.nix-profile/bin/node",
+        "/nix/var/nix/profiles/default/bin/node",
+        # common system paths
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+        "/bin/node",
+        "/opt/homebrew/bin/node",
+    ]
+    # Also check all 'node' and 'node22' entries on PATH
+    for name in ("node", "node22", "nodejs"):
+        found = shutil.which(name)
+        if found:
+            extra_paths.append(found)
+
+    for path in extra_paths:
+        real = _os.path.realpath(path) if _os.path.exists(path) else None
+        key = real or path
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            r = _sp.run(
+                [path, "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                ver_str = r.stdout.strip().lstrip("v")
+                major = int(ver_str.split(".")[0])
+                if major >= 22:
+                    candidates.append((major, path))
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    chosen = candidates[0][1]
+    print(f"✅ Music: found Node.js {candidates[0][0]}.x at '{chosen}' for yt-dlp JS challenge solver")
+    return chosen
+
+
+# Resolved at import time so the scan runs once at startup.
+_NODE22_PATH: str | None = _find_node22_path()
+if not _NODE22_PATH:
+    print(
+        "⚠️  Music: no Node.js >= 22 found — YouTube JS challenges will fail.\n"
+        "   Make sure nodejs_22 is in nixpacks.toml nixPkgs and yt-dlp-ejs is in requirements.txt."
+    )
+
+
 YTDLP_FORMAT_OPTIONS = {
     # Fallback chain: prefer a pure-audio m4a, then any audio stream,
     # then any combined stream. This avoids "Requested format is not
@@ -144,12 +217,13 @@ YTDLP_FORMAT_OPTIONS = {
     "extract_flat": False,
     # ── JS runtime ──────────────────────────────────────────────────────
     # yt-dlp's default js_runtimes is {'deno': {}} — node is NOT included
-    # unless you pass it explicitly, even if node is on PATH and yt-dlp-ejs
-    # is installed. Without node in this dict, yt-dlp logs "JS runtimes:
-    # none" and can't solve YouTube's sig/n-param challenges → 0 formats.
-    # We include node first (highest preference when EJS scripts present),
-    # deno second for environments where deno is available instead.
-    "js_runtimes": {"node": {}, "deno": {}},
+    # unless passed explicitly. We also pass the full path to the Node >= 22
+    # binary found at startup, because PATH ordering on Railway can put an
+    # older node (v18, unsupported) ahead of the nodejs_22 nix package.
+    "js_runtimes": {
+        "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
+        "deno": {},
+    },
     # ── Player clients ──────────────────────────────────────────────────
     # "default" lets yt-dlp pick the right client set for the current auth
     # state. With a working JS runtime above, sig/n challenges now succeed.
@@ -1333,7 +1407,17 @@ class Music(commands.Cog):
             buf.write("=== JS Runtime Check ===\n")
             for rt in ("node", "nodejs", "deno", "bun"):
                 path = shutil.which(rt)
-                buf.write(f"  {rt:8s}: {'✅ ' + path if path else '❌ not found'}\n")
+                if path:
+                    try:
+                        import subprocess as _sp
+                        r = _sp.run([path, "--version"], capture_output=True, text=True, timeout=5)
+                        ver = r.stdout.strip()
+                        buf.write(f"  {rt:8s}: ✅ {path} ({ver})\n")
+                    except Exception:
+                        buf.write(f"  {rt:8s}: ✅ {path} (version check failed)\n")
+                else:
+                    buf.write(f"  {rt:8s}: ❌ not found\n")
+            buf.write(f"\n  Detected Node22+ path for yt-dlp: {_NODE22_PATH or '❌ NONE FOUND'}\n")
 
             # ── 2. Active player_client setting ─────────────────────────
             clients = (
@@ -1350,7 +1434,10 @@ class Music(commands.Cog):
             opts["no_warnings"] = False
             opts["verbose"] = True
             opts["logger"] = None
-            opts["js_runtimes"] = {"node": {}, "deno": {}}
+            opts["js_runtimes"] = {
+                "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
+                "deno": {},
+            }
             is_url = bool(_URL_RE.match(query.strip()))
             target = query.strip() if is_url else f"ytsearch1:{query.strip()}"
 
