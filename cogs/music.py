@@ -785,6 +785,7 @@ class Music(commands.Cog):
     _FORCE_COMMAND_NAMES = {
         "forcejoin", "forceplay", "forcestop", "forcepause", "forceresume",
         "forceskip", "forcequeue", "forcenp", "forcevolume", "forcecontrols",
+        "ytdebug",
     }
 
     async def cog_check(self, ctx: commands.Context) -> bool:
@@ -1262,6 +1263,74 @@ class Music(commands.Cog):
     # These bypass MUSIC_FEATURE_DOWN entirely (cog_check already allows the
     # bot owner through), so you can test the VC/music backend even while it
     # shows "temporarily down" to everyone else.
+
+    @commands.command(name="ytdebug")
+    @commands.is_owner()
+    async def prefix_ytdebug(self, ctx: commands.Context, *, query: str = "") -> None:
+        """
+        Owner-only diagnostic: dumps yt-dlp's raw format list + any
+        warnings/errors for a URL or search query, straight to Discord.
+        Use this instead of guessing player_client combinations blindly —
+        it shows exactly what formats (if any) come back and why.
+        """
+        if not query:
+            await ctx.reply("**Usage:** `!ytdebug <YouTube URL or search terms>`")
+            return
+
+        await ctx.reply(f"🔍 Running yt-dlp diagnostics for: `{query}` …")
+
+        def _run_debug() -> str:
+            import io
+            import contextlib
+
+            buf = io.StringIO()
+            opts = dict(YTDLP_FORMAT_OPTIONS)
+            opts["quiet"] = False
+            opts["no_warnings"] = False
+            opts["verbose"] = True
+            opts["logger"] = None  # let it print via stdout, which we capture
+            # Don't actually need search expansion here — caller passes
+            # either a direct URL or plain text; mirror _smart_search's logic.
+            is_url = bool(_URL_RE.match(query.strip()))
+            target = query.strip() if is_url else f"ytsearch1:{query.strip()}"
+
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(target, download=False)
+                    if info:
+                        entries = info.get("entries", [info]) if "entries" in info else [info]
+                        for e in entries:
+                            if not e:
+                                continue
+                            fmts = e.get("formats") or []
+                            buf.write(f"\n--- {e.get('title')} ({e.get('id')}) ---\n")
+                            buf.write(f"Total formats returned: {len(fmts)}\n")
+                            for f in fmts[:30]:
+                                buf.write(
+                                    f"  id={f.get('format_id')!s:>6} "
+                                    f"ext={f.get('ext')!s:>5} "
+                                    f"acodec={f.get('acodec')!s:>10} "
+                                    f"vcodec={f.get('vcodec')!s:>10} "
+                                    f"proto={f.get('protocol')!s:>10} "
+                                    f"url_present={bool(f.get('url'))}\n"
+                                )
+                except Exception as e:
+                    buf.write(f"\nEXCEPTION: {e.__class__.__name__}: {e}\n")
+            return buf.getvalue()
+
+        loop = asyncio.get_event_loop()
+        output = await loop.run_in_executor(None, _run_debug)
+
+        # Discord message limit is 2000 chars; chunk into multiple messages
+        # wrapped in code blocks for readability.
+        chunk_size = 1900
+        if not output.strip():
+            await ctx.send("(no output captured)")
+            return
+        for i in range(0, len(output), chunk_size):
+            chunk = output[i:i + chunk_size]
+            await ctx.send(f"```\n{chunk}\n```")
 
     @commands.command(name="forcejoin", aliases=["fjoin"])
     @commands.is_owner()
