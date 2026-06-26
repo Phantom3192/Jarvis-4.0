@@ -132,7 +132,9 @@ if YTDLP_COOKIES_B64:
 YTDLP_FORMAT_OPTIONS = {
     # Fallback chain: prefer a pure-audio stream, but accept a combined
     # video+audio stream if that's all a given client/video offers, rather
-    # than erroring out with "Requested format is not available."
+    # than erroring out with "Requested format is not available." FFmpeg
+    # can consume HLS (m3u8) streams natively, so we don't need to exclude
+    # those — only direct-URL/m3u8 formats matter, not "no formats at all".
     "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "nocheckcertificate": True,
@@ -142,15 +144,16 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid ipv6 issues on some hosts
     "extract_flat": False,
-    # NOTE: we now rely on cookies (set above) to get past YouTube's bot
-    # check, instead of spoofing the "android" client. The android client
-    # has recently started returning HLS/SABR-only manifests with no
-    # direct-URL audio format for many videos, which made bestaudio fail
-    # with "Requested format is not available" even though the video
-    # plays fine in a browser. "web" (yt-dlp's default) + "ios" as a
-    # fallback are the clients currently known to still return real
-    # direct-URL formats when an authenticated cookie session is present.
-    "extractor_args": {"youtube": {"player_client": ["web", "ios"]}},
+    # NOTE: YouTube has been rolling out "SABR" streaming, which makes the
+    # "web"/"web_safari" clients return formats with NO direct/HLS url at
+    # all ("Some web client https formats have been skipped... YouTube is
+    # forcing SABR streaming for this client" — yt-dlp issue #12482). That
+    # leaves zero usable formats, hence "Requested format is not
+    # available" even though bestaudio/best should always match something.
+    # "tv" and "ios" are the clients still returning real playable URLs as
+    # of mid-2026. We rely on cookies (set above) for the bot-check, and
+    # these clients for getting an actual stream URL back.
+    "extractor_args": {"youtube": {"player_client": ["tv", "ios"]}},
 }
 if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
     YTDLP_FORMAT_OPTIONS["cookiefile"] = YTDLP_COOKIES_FILE
