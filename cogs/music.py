@@ -144,17 +144,19 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid ipv6 issues on some hosts
     "extract_flat": False,
-    # NOTE: YouTube has been rolling out "SABR" streaming, which makes the
-    # "web"/"web_safari" clients return formats with NO direct/HLS url at
-    # all ("Some web client https formats have been skipped... YouTube is
-    # forcing SABR streaming for this client" — yt-dlp issue #12482). That
-    # leaves zero usable formats, hence "Requested format is not
-    # available" even though bestaudio/best should always match something.
-    # "tv" and "ios" are the clients still returning real playable URLs as
-    # of mid-2026. We rely on cookies (set above) for the bot-check, and
-    # these clients for getting an actual stream URL back.
-    "extractor_args": {"youtube": {"player_client": ["tv", "ios"]}},
+    # NOTE: deliberately NOT setting player_client here. yt-dlp picks its
+    # own default client combo (currently `tv_downgraded,web_safari` when
+    # cookies are present, or `android_vr,web_safari` otherwise) and that
+    # default is actively updated by the yt-dlp maintainers to track
+    # whatever YouTube is currently doing — usually faster than we can
+    # keep a hardcoded list correct. Earlier we manually forced
+    # `tv,ios`, which actually made things worse: `ios` silently gets
+    # skipped entirely when cookies are present (its API doesn't support
+    # cookie auth), and `tv` alone needs yt-dlp's JS challenge solver
+    # (Node.js) to decrypt signature/n-parameters — see the nodejs apt
+    # package added in nixpacks.toml for that requirement.
 }
+
 if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
     YTDLP_FORMAT_OPTIONS["cookiefile"] = YTDLP_COOKIES_FILE
     print(f"✅ Music: using YouTube cookies from {YTDLP_COOKIES_FILE}")
