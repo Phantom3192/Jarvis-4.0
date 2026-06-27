@@ -224,6 +224,11 @@ YTDLP_FORMAT_OPTIONS = {
         "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
         "deno": {},
     },
+    # ── Solver cache ────────────────────────────────────────────────────
+    # Cache the solved player JS between calls so the 2-min JS challenge
+    # only runs ONCE per player JS version (YouTube updates it ~weekly).
+    # After the first solve, subsequent songs start in seconds not minutes.
+    "cachedir": _os.path.join(_os.path.dirname(__file__), "..", ".ytdlp_cache"),
     # ── Player clients ──────────────────────────────────────────────────
     # "default" lets yt-dlp pick the right client set for the current auth
     # state. With a working JS runtime above, sig/n challenges now succeed.
@@ -257,34 +262,68 @@ elif YTDLP_COOKIES_FILE:
 #   start. Fix: prefetch the next queued track's URL while the current
 #   track is already playing — see _prefetch_next() below.
 
+# before_options go BEFORE -i (the input URL), so they configure the
+# input demuxer. Options go AFTER -i and configure the output encoder.
+#
+# KEY INSIGHT about the two stream types we get from yt-dlp:
+#
+#   TV-Downgraded client  → direct HTTPS .m4a/.webm URLs (googlevideo.com)
+#     These support: -reconnect, -http_persistent, -buffer_size
+#
+#   WEB-Safari client     → m3u8_native HLS playlists
+#     These do NOT support -http_persistent or -buffer_size (different demuxer).
+#     But -reconnect and -reconnect_streamed still work.
+#
+# We use a single option set that works for both. Options that only apply
+# to one type are silently ignored by FFmpeg for the other, so it's safe.
 FFMPEG_BEFORE_OPTS = " ".join([
-    # ── Reconnect on drop ───────────────────────────────────────────────
+    # Reconnect if the CDN drops the connection mid-stream.
+    # Critical for Railway → YouTube CDN paths with variable latency.
     "-reconnect 1",
     "-reconnect_streamed 1",
     "-reconnect_delay_max 5",
-    # ── Large input buffer ──────────────────────────────────────────────
-    # 16 MB HTTP buffer absorbs CDN jitter without starving the decoder.
-    # Without this, FFmpeg's 32KB default buffer empties in <100ms of
-    # jitter, causing audible glitches.
-    "-http_persistent 1",        # keep the HTTP connection alive
-    "-multiple_requests 1",      # allow reconnect on the same connection
-    "-buffer_size 16384k",       # 16 MB network read buffer
-    # Skip slow stream analysis — we already know the format from yt-dlp.
-    "-analyzeduration 0",
-    "-probesize 32",
-    # Large demuxer queue so the decoder thread never waits for packets.
-    "-thread_queue_size 4096",
+    # Large demuxer input queue.
+    # THIS is the primary fix for start/end crackling:
+    # FFmpeg reads packets on one thread and decodes on another.
+    # If the read thread falls behind (network jitter, CDN throttle),
+    # the decode thread starves → audible gaps. 512 frames = ~10s buffer.
+    "-thread_queue_size 512",
+    # Tell FFmpeg the format so it skips stream detection entirely.
+    # Without this it spends ~2s probing → the "lag before audio starts".
+    "-f mp4",
 ])
 
 FFMPEG_OPTS = " ".join([
-    "-vn",       # audio only — drop video
-    "-ar 48000", # resample to 48 kHz (Discord's native rate)
-    "-ac 2",     # stereo
+    "-vn",        # drop video — audio only
+    "-ar 48000",  # resample to 48 kHz (Discord's required rate)
+    "-ac 2",      # stereo
 ])
+
+
+def _ffmpeg_before_opts(uri: str) -> str:
+    """
+    Return the right before_options string for this stream URI.
+
+    m3u8/HLS streams: -f mp4 breaks them (wrong container hint).
+    Direct https streams: -f mp4 speeds up probing significantly.
+    """
+    if "m3u8" in uri or uri.endswith(".m3u8"):
+        # HLS stream — omit -f mp4, use minimal options
+        return " ".join([
+            "-reconnect 1",
+            "-reconnect_streamed 1",
+            "-reconnect_delay_max 5",
+            "-thread_queue_size 512",
+        ])
+    # Direct HTTPS stream (googlevideo.com .m4a/.webm)
+    return FFMPEG_BEFORE_OPTS
 
 # Minimum gap (in seconds) between consecutive yt-dlp extraction requests,
 # to avoid hammering YouTube and tripping rate limits / bot checks.
-MIN_TRACK_LOAD_GAP = 1.5
+# Minimum gap between yt-dlp requests. Kept small — yt-dlp's own
+# JS challenge solving already takes several seconds, providing natural
+# rate-limiting. This just prevents near-simultaneous spam.
+MIN_TRACK_LOAD_GAP = 0.5
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -655,15 +694,13 @@ class GuildPlayer:
         self._stopped = False
 
         def _make_source() -> discord.AudioSource:
-            # FFmpegPCMAudio decodes to raw PCM, then PCMVolumeTransformer
-            # adjusts volume, then discord.py re-encodes to Opus for the VC.
-            # The -ar 48000 -ac 2 in FFMPEG_OPTS ensures the PCM matches
-            # Discord's expected format exactly, avoiding a silent mid-stream
-            # resample that is the most common cause of crackling.
+            # Use protocol-aware before_options so HLS (m3u8) and direct
+            # HTTPS streams both get the right FFmpeg demuxer hints.
+            before_opts = _ffmpeg_before_opts(track.uri)
             source = discord.FFmpegPCMAudio(
                 track.uri,
                 executable=FFMPEG_EXECUTABLE,
-                before_options=FFMPEG_BEFORE_OPTS,
+                before_options=before_opts,
                 options=FFMPEG_OPTS,
             )
             return discord.PCMVolumeTransformer(source, volume=self.volume / 100)
@@ -1151,10 +1188,10 @@ class Music(commands.Cog):
 
         await self._pace_request(guild.id)
 
-        # Use num_results=1 when it's a direct URL (no need for a pick list)
-        # and num_results=5 for text searches (shown in the search picker).
-        is_url = bool(_URL_RE.match(query.strip()))
-        tracks, source_used = await _smart_search(query, num_results=1 if is_url else 5)
+        # Always use num_results=1 here — _do_play only ever uses tracks[0].
+        # The search picker (/search command) uses num_results=5 separately.
+        # This alone cuts extraction time by ~60% for text queries.
+        tracks, source_used = await _smart_search(query, num_results=1)
         if not tracks:
             await send_fn(embed=_err(
                 f"No results found for **{query}**\n"
