@@ -276,47 +276,20 @@ elif YTDLP_COOKIES_FILE:
 #
 # We use a single option set that works for both. Options that only apply
 # to one type are silently ignored by FFmpeg for the other, so it's safe.
-FFMPEG_BEFORE_OPTS = " ".join([
-    # Reconnect if the CDN drops the connection mid-stream.
-    # Critical for Railway → YouTube CDN paths with variable latency.
+_BEFORE_OPTS_COMMON = " ".join([
     "-reconnect 1",
     "-reconnect_streamed 1",
     "-reconnect_delay_max 5",
-    # Large demuxer input queue.
-    # THIS is the primary fix for start/end crackling:
-    # FFmpeg reads packets on one thread and decodes on another.
-    # If the read thread falls behind (network jitter, CDN throttle),
-    # the decode thread starves → audible gaps. 512 frames = ~10s buffer.
-    "-thread_queue_size 512",
-    # Tell FFmpeg the format so it skips stream detection entirely.
-    # Without this it spends ~2s probing → the "lag before audio starts".
-    "-f mp4",
+    "-thread_queue_size 4096",
+    "-probesize 500000",
+    "-analyzeduration 0",
 ])
 
-FFMPEG_OPTS = " ".join([
-    "-vn",        # drop video — audio only
-    "-ar 48000",  # resample to 48 kHz (Discord's required rate)
-    "-ac 2",      # stereo
-])
+FFMPEG_OPTS = "-vn"
 
 
 def _ffmpeg_before_opts(uri: str) -> str:
-    """
-    Return the right before_options string for this stream URI.
-
-    m3u8/HLS streams: -f mp4 breaks them (wrong container hint).
-    Direct https streams: -f mp4 speeds up probing significantly.
-    """
-    if "m3u8" in uri or uri.endswith(".m3u8"):
-        # HLS stream — omit -f mp4, use minimal options
-        return " ".join([
-            "-reconnect 1",
-            "-reconnect_streamed 1",
-            "-reconnect_delay_max 5",
-            "-thread_queue_size 512",
-        ])
-    # Direct HTTPS stream (googlevideo.com .m4a/.webm)
-    return FFMPEG_BEFORE_OPTS
+    return _BEFORE_OPTS_COMMON
 
 # Minimum gap (in seconds) between consecutive yt-dlp extraction requests,
 # to avoid hammering YouTube and tripping rate limits / bot checks.
