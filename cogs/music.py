@@ -77,13 +77,12 @@ NODE_SELF = "jarvis-lavalink"
 LAVALINK_NODES = [
     {
         "identifier": NODE_SELF,
-        "host":       "jarvislavalink-production.up.railway.app",
+        "host":       "2db830cc-6351-4584-bc10-421d57e7b846-00-2yigqhz2anami.pike.replit.dev",
         "password":   "jarvisbot",
         "secure":     True,
         "port":       443,
     },
 ]
-
 
 # Minimum gap (in seconds) between consecutive track-load requests.
 MIN_TRACK_LOAD_GAP = 2.5

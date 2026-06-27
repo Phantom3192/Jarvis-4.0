@@ -9,3 +9,4 @@ PyNaCl
 Pillow
 chess
 wavelink
+yt_dlp 
