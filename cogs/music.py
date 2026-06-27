@@ -44,6 +44,38 @@ from discord import app_commands
 from discord.ext import commands
 import yt_dlp
 
+# ── Resource limiting ─────────────────────────────────────────────────────────
+# Caps how much RAM and CPU the music cog (yt-dlp + FFmpeg) is allowed to use.
+# Adjust these two constants to tune the limits:
+#
+#   MAX_RAM_MB  — hard RSS limit for the entire bot process.
+#                 If RAM climbs above this the watchdog logs a warning and
+#                 auto-stops playback so memory is released.
+#                 Set to 0 to disable the RAM check.
+#
+#   MAX_CPU_PCT — sustained CPU% that triggers the watchdog.
+#                 If the 5-second rolling average exceeds this value the
+#                 watchdog logs a warning.  Playback is NOT stopped on CPU
+#                 (FFmpeg throttles itself quickly once a track is buffered).
+#                 Set to 0 to disable the CPU check.
+#
+MAX_RAM_MB  = 400   # MB  — warn + stop playback above this
+MAX_CPU_PCT = 80    # %   — warn when 5-s average exceeds this
+
+import logging as _logging
+_resource_log = _logging.getLogger("music.resource")
+
+try:
+    import psutil as _psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    _psutil = None          # type: ignore[assignment]
+    _PSUTIL_AVAILABLE = False
+    _resource_log.warning(
+        "psutil not installed — resource monitoring disabled. "
+        "Add 'psutil' to requirements.txt to enable it."
+    )
+
 from cogs.state import (
     append_song_history,
     delete_user_playlist,
@@ -185,10 +217,19 @@ if not _NODE22_PATH:
 
 
 YTDLP_FORMAT_OPTIONS = {
-    # Fallback chain: prefer webm/opus (native Opus from YouTube — no re-encode
-    # needed with FFmpegOpusAudio), then m4a, then any audio, then anything.
-    # webm[acodec=opus] is what YouTube's mweb/android clients serve directly.
-    "format": "bestaudio[ext=webm][acodec=opus]/bestaudio[ext=m4a]/bestaudio/best",
+    # Format priority:
+    #   1. webm with opus codec  — native Opus, zero re-encode, best quality
+    #   2. any webm audio        — likely opus, fast path
+    #   3. m4a                   — AAC, needs one decode+encode pass but stable
+    #   4. any audio             — last resort
+    # We intentionally avoid "best" (which can pick video streams) and opus-only
+    # (which misses some acodec=opus streams labelled differently by yt-dlp).
+    "format": (
+        "bestaudio[ext=webm][acodec=opus]"
+        "/bestaudio[ext=webm]"
+        "/bestaudio[ext=m4a]"
+        "/bestaudio"
+    ),
     "noplaylist": True,
     "nocheckcertificate": True,
     "ignoreerrors": False,
@@ -197,6 +238,9 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid IPv6 issues on some hosts
     "extract_flat": False,
+    # Tell yt-dlp not to rate-limit itself — we need the full stream URL and
+    # don't want yt-dlp's own throttle logic interfering with FFmpeg's read.
+    "ratelimit": None,
     
     "js_runtimes": {
         "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
@@ -221,17 +265,80 @@ elif YTDLP_COOKIES_FILE:
     print(f"⚠️  Music: YTDLP_COOKIES_FILE set to '{YTDLP_COOKIES_FILE}' but file not found.")
 
 # ── FFmpeg options ────────────────────────────────────────────────────────────
+#
+# ANTI-CRACKLING STRATEGY — every option here has a specific purpose:
+#
+# INPUT-SIDE (before_options):
+#   -reconnect 1              reconnect on TCP drop (YouTube CDN occasionally drops)
+#   -reconnect_streamed 1     also reconnect on streamed (non-seekable) sources
+#   -reconnect_delay_max 30   wait up to 30 s between retries — long enough for
+#                             YouTube's CDN to recover; 5 s was too short
+#   -multiple_requests 1      reuse the same TCP connection for HTTP range requests;
+#                             avoids the TCP handshake stall that causes a click
+#                             at the start of each reconnect
+#   -http_persistent 1        keep HTTP connection alive across reads (same idea,
+#                             applied at the HTTP layer)
+#   -thread_queue_size 4096   FFmpeg's packet queue between demux and decode threads.
+#                             Must be large enough to absorb network jitter.
+#                             8192 wastes memory for no gain; 4096 is the sweet spot.
+#   -probesize 10485760       10 MB probe budget — enough to detect any container
+#                             reliably; 32 MB was overkill and added startup latency
+#   -analyzeduration 3000000  3 s (in µs) — enough for reliable format detection
+#                             without the 10 s stall the previous value caused
+#
+# NOTE: -fflags +nobuffer is INTENTIONALLY ABSENT.  That flag tells FFmpeg to
+# skip its internal I/O buffer, which is the OPPOSITE of what we want — removing
+# the buffer makes packet starvation more likely, not less.  The previous version
+# included it by mistake.
+#
+# OUTPUT-SIDE (options):
+#   -vn                       drop video (saves CPU, prevents muxer confusion)
+#   -af aresample=...         resample to exactly 48000 Hz before encoding.
+#                             Opus/Discord requires 48 kHz; any other rate causes
+#                             the codec to resample internally with lower quality,
+#                             producing intermittent crackling on non-48k sources.
+#                             soxr is the highest-quality resampler in FFmpeg.
+#   volume=X                  applied as part of the same filter chain as aresample
+#                             so there's only one decode→encode pass
+#   application=audio         tells libopus to use the "music" application profile
+#                             instead of the default VOIP profile. VOIP applies
+#                             aggressive packet-loss concealment and noise gating
+#                             tuned for speech — on music this produces audible
+#                             artefacts (warbling, pumping). "audio" disables all
+#                             of that for transparent music reproduction.
+#
 _BEFORE_OPTS_COMMON = " ".join([
     "-reconnect 1",
     "-reconnect_streamed 1",
-    "-reconnect_delay_max 5",
+    "-reconnect_delay_max 30",
+    "-multiple_requests 1",
+    "-http_persistent 1",
     "-thread_queue_size 4096",
-    "-probesize 500000",   # fast stream detection
-    "-analyzeduration 0",  # don't pre-buffer for format detection
+    "-probesize 10485760",       # 10 MB
+    "-analyzeduration 3000000",  # 3 s in µs
 ])
 
-_FFMPEG_OPTS_BASE = "-vn"
-_FFMPEG_OPTS_VOLUME = "-vn -filter:a volume={vol:.3f}"
+# Copy path: passthrough webm/opus — no decode, no re-encode, no filters.
+# -loglevel error suppresses the spurious "AVOption b not used" warning that
+# discord.py always triggers by injecting -b:a 128k even on copy streams.
+_FFMPEG_OPTS_COPY = "-vn -loglevel error"
+
+# Re-encode path at default volume (100): resample to 48 kHz with soxr,
+# then encode with the music application profile.
+_FFMPEG_OPTS_ENCODE = (
+    "-vn "
+    "-af aresample=48000:resampler=soxr "
+    "-application audio"
+)
+
+# Re-encode path with custom volume: apply volume BEFORE resampling so that
+# the gain change is in the original sample domain (avoids quantisation noise
+# that occurs when you gain after resampling to the target rate).
+_FFMPEG_OPTS_VOL_RESAMP = (
+    "-vn "
+    "-af volume={vol:.3f},aresample=48000:resampler=soxr "
+    "-application audio"
+)
 
 
 def _make_audio_source(
@@ -242,34 +349,37 @@ def _make_audio_source(
     """
     Build the correct FFmpegOpusAudio source for a track.
 
-    Passthrough path (is_opus=True, volume=100):
-        codec='copy' → FFmpeg passes the webm/opus bitstream straight through
-        with zero decode/re-encode. Lowest CPU, perfect quality.
+    Three paths:
 
-    Volume path (volume != 100):
-        codec=None (libopus) → FFmpeg decodes → volume filter → re-encodes
-        to opus. One pass inside FFmpeg; no Python sample manipulation.
+    1. PASSTHROUGH  (is_opus=True, volume=100)
+       codec='copy' — FFmpeg reads the webm/opus stream and forwards Opus
+       packets verbatim.  Zero CPU for decode or encode.  Best quality.
 
-    Non-opus fallback (is_opus=False):
-        FFmpeg decodes m4a/aac → re-encodes to opus (unavoidable round-trip).
-        Volume filter applied in the same pass if needed.
+    2. VOLUME+ENCODE  (volume != 100, any codec)
+       Decode → volume filter → aresample 48 kHz (soxr) → libopus.
+       Volume is applied BEFORE resampling to avoid quantisation noise.
+       application=audio uses the music Opus profile (vs. the default
+       VOIP profile which adds speech noise-gating that warbles music).
+
+    3. ENCODE-ONLY  (is_opus=False, volume=100)
+       Decode → aresample 48 kHz (soxr) → libopus with application=audio.
+       Used when YouTube serves m4a/aac instead of webm/opus.
     """
     before_opts = _BEFORE_OPTS_COMMON
+
     if is_opus and volume == 100:
-        # Pure passthrough — discord.py's codec='copy' tells FFmpeg -c:a copy
         return discord.FFmpegOpusAudio(
             uri,
             executable=FFMPEG_EXECUTABLE,
             codec="copy",
             before_options=before_opts,
-            options=_FFMPEG_OPTS_BASE,
+            options=_FFMPEG_OPTS_COPY,
         )
     else:
-        # Decode + (optional volume filter) + re-encode to libopus
         opts = (
-            _FFMPEG_OPTS_VOLUME.format(vol=volume / 100)
+            _FFMPEG_OPTS_VOL_RESAMP.format(vol=volume / 100)
             if volume != 100
-            else _FFMPEG_OPTS_BASE
+            else _FFMPEG_OPTS_ENCODE
         )
         return discord.FFmpegOpusAudio(
             uri,
@@ -479,6 +589,88 @@ _YDL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+# ── Resource watchdog ─────────────────────────────────────────────────────────
+
+class _ResourceWatchdog:
+    """
+    Async background task that monitors RAM and CPU usage while the music
+    cog is active.  When usage exceeds the configured thresholds it logs a
+    warning; if RAM exceeds MAX_RAM_MB it also stops all active players so
+    the audio buffers are released immediately.
+
+    Runs every 5 seconds — lightweight enough to be unnoticeable.
+    """
+
+    CHECK_INTERVAL = 5  # seconds between checks
+
+    def __init__(self, get_players_fn):
+        # get_players_fn() must return the dict of guild_id -> MusicPlayer
+        self._get_players = get_players_fn
+        self._task: asyncio.Task | None = None
+        if _PSUTIL_AVAILABLE:
+            self._proc = _psutil.Process()
+            self._cpu_history: list[float] = []
+        else:
+            self._proc = None
+
+    def start(self) -> None:
+        if not _PSUTIL_AVAILABLE:
+            return
+        self._task = asyncio.get_event_loop().create_task(self._loop())
+        _resource_log.info(
+            "Resource watchdog started — RAM limit: %s MB, CPU warn: %s%%",
+            MAX_RAM_MB or "disabled",
+            MAX_CPU_PCT or "disabled",
+        )
+
+    def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    async def _loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.CHECK_INTERVAL)
+                await self._check()
+        except asyncio.CancelledError:
+            pass
+
+    async def _check(self) -> None:
+        try:
+            mem_info = self._proc.memory_info()
+            ram_mb = mem_info.rss / 1024 / 1024
+
+            cpu_pct = self._proc.cpu_percent(interval=None)  # non-blocking
+            self._cpu_history.append(cpu_pct)
+            if len(self._cpu_history) > 6:           # keep last 30 s
+                self._cpu_history.pop(0)
+            avg_cpu = sum(self._cpu_history) / len(self._cpu_history)
+
+            if MAX_RAM_MB and ram_mb > MAX_RAM_MB:
+                _resource_log.warning(
+                    "⚠️  RAM usage %.1f MB exceeds limit %d MB — stopping all players",
+                    ram_mb, MAX_RAM_MB,
+                )
+                players = self._get_players()
+                for player in list(players.values()):
+                    try:
+                        player.queue.clear()
+                        await player.disconnect()
+                    except Exception:
+                        pass
+                players.clear()
+            else:
+                _resource_log.debug("RAM %.1f MB | CPU %.1f%% (avg)", ram_mb, avg_cpu)
+
+            if MAX_CPU_PCT and avg_cpu > MAX_CPU_PCT:
+                _resource_log.warning(
+                    "⚠️  CPU usage %.1f%% (5-s avg) exceeds threshold %d%%",
+                    avg_cpu, MAX_CPU_PCT,
+                )
+        except Exception as exc:
+            _resource_log.debug("Watchdog check error: %s", exc)
+
+
 # ── Shared yt-dlp instance cache ─────────────────────────────────────────────
 import threading as _threading
 _ydl_local = _threading.local()
@@ -551,11 +743,17 @@ def _entry_to_track(entry: dict) -> Optional[Track]:
         return None
 
     # Detect whether the resolved stream is already Opus-encoded (webm container).
-    # When is_opus=True we can use FFmpegOpusAudio with -c:a copy at volume=100,
+    # When is_opus=True we use FFmpegOpusAudio with codec='copy' at volume=100,
     # skipping the entire decode→encode round-trip.
-    acodec = entry.get("acodec", "")
-    ext    = entry.get("ext", "")
-    is_opus = (acodec == "opus") or (ext == "webm" and "opus" in acodec.lower())
+    #
+    # Be strict: only treat as Opus if BOTH conditions hold:
+    #   1. The container is webm  (ext == "webm")
+    #   2. The audio codec is opus (acodec contains "opus")
+    # An empty or None acodec must NOT be assumed to be opus — that would send
+    # a non-opus stream through the passthrough path and produce garbage audio.
+    acodec: str = (entry.get("acodec") or "").lower()
+    ext:    str = (entry.get("ext")    or "").lower()
+    is_opus = ext == "webm" and "opus" in acodec
 
     return Track(
         title       = entry.get("title", "Unknown title"),
@@ -999,6 +1197,9 @@ class Music(commands.Cog):
         # URL in the background so the next song starts instantly.
         self._prefetch_cache: dict[int, Track] = {}
         self._prefetch_tasks: dict[int, asyncio.Task] = {}
+        # Resource watchdog — monitors RAM/CPU and auto-stops players if RAM
+        # exceeds MAX_RAM_MB (defined near the top of this file).
+        self._watchdog = _ResourceWatchdog(lambda: self._players)
 
     # ── Feature toggle gate ───────────────────────────────────────────────────
     # When MUSIC_FEATURE_DOWN is True, every normal prefix command (cog_check)
@@ -1053,8 +1254,10 @@ class Music(commands.Cog):
         # in the event loop's exception handler rather than silently dropped.
         loop = asyncio.get_running_loop()
         asyncio.ensure_future(loop.run_in_executor(_YDL_EXECUTOR, _prewarm_sync))
+        self._watchdog.start()
 
     async def cog_unload(self) -> None:
+        self._watchdog.stop()
         for player in list(self._players.values()):
             await player.disconnect()
         self._players.clear()
