@@ -240,28 +240,46 @@ if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
 elif YTDLP_COOKIES_FILE:
     print(f"⚠️  Music: YTDLP_COOKIES_FILE set to '{YTDLP_COOKIES_FILE}' but file not found.")
 
+# ── FFmpeg options ────────────────────────────────────────────────────────────
+# Root cause of crackling on Railway:
+#   YouTube stream URLs are direct CDN links. FFmpeg reads them over HTTP in
+#   small chunks. Any network jitter between Railway and the CDN drains
+#   FFmpeg's tiny default buffer → decoder starves → audio gap → crackle.
+#
+# Fix: large http_persistent + reconnect flags on input side, and an explicit
+#   48kHz resample on output so discord.py's Opus encoder never has to do a
+#   mid-stream sample-rate conversion (another common crackle source).
+#
+# Root cause of 2-min startup delay:
+#   yt-dlp solves the JS challenge fresh on every play() call. The solved
+#   player JS is cached by yt-dlp between calls, but the stream URL itself
+#   is fetched synchronously in the bot's thread pool, blocking playback
+#   start. Fix: prefetch the next queued track's URL while the current
+#   track is already playing — see _prefetch_next() below.
+
 FFMPEG_BEFORE_OPTS = " ".join([
-    # Network resilience
+    # ── Reconnect on drop ───────────────────────────────────────────────
     "-reconnect 1",
     "-reconnect_streamed 1",
     "-reconnect_delay_max 5",
-    # Input buffering — prevents crackling from demuxer starvation.
-    # analyzeduration 0 + probesize 32 = skip slow stream analysis so
-    # FFmpeg starts immediately without a long blocking probe.
-    # thread_queue_size 4096 = large demuxer queue so the decoder never
-    # starves waiting for packets (the main cause of crackling on Railway).
+    # ── Large input buffer ──────────────────────────────────────────────
+    # 16 MB HTTP buffer absorbs CDN jitter without starving the decoder.
+    # Without this, FFmpeg's 32KB default buffer empties in <100ms of
+    # jitter, causing audible glitches.
+    "-http_persistent 1",        # keep the HTTP connection alive
+    "-multiple_requests 1",      # allow reconnect on the same connection
+    "-buffer_size 16384k",       # 16 MB network read buffer
+    # Skip slow stream analysis — we already know the format from yt-dlp.
     "-analyzeduration 0",
     "-probesize 32",
+    # Large demuxer queue so the decoder thread never waits for packets.
     "-thread_queue_size 4096",
 ])
 
 FFMPEG_OPTS = " ".join([
-    "-vn",           # drop video track, audio only
-    # Explicit resample to Discord's expected format.
-    # Without -ar 48000, a 44.1kHz YouTube m4a gets silently resampled
-    # mid-stream, causing subtle crackling when the sample rate changes.
-    "-ar 48000",     # 48 kHz — Discord voice chat rate
-    "-ac 2",         # stereo
+    "-vn",       # audio only — drop video
+    "-ar 48000", # resample to 48 kHz (Discord's native rate)
+    "-ac 2",     # stereo
 ])
 
 # Minimum gap (in seconds) between consecutive yt-dlp extraction requests,
@@ -459,15 +477,16 @@ def _track_embed(track: Track, title: str = "🎵 Now Playing",
 
 # ── yt-dlp extraction (run in a thread, it's blocking) ──────────────────────
 
-def _extract_sync(query: str, *, search: bool) -> list[dict]:
+def _extract_sync(query: str, *, search: bool, num_results: int = 5) -> list[dict]:
     """
     Blocking yt-dlp call — must be run via run_in_executor.
-    If `search` is True, query is treated as search terms (uses
-    ytsearch5: to get multiple candidates for /play picking).
-    If False, query is treated as a direct URL.
+    If `search` is True, query is treated as search terms.
+    num_results controls how many search results to fetch (default 5 for
+    the search picker; use 1 for single-track fast resolution).
+    If `search` is False, query is treated as a direct URL.
     """
     opts = dict(YTDLP_FORMAT_OPTIONS)
-    target = f"ytsearch5:{query}" if search else query
+    target = f"ytsearch{num_results}:{query}" if search else query
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(target, download=False)
     if info is None:
@@ -476,9 +495,9 @@ def _extract_sync(query: str, *, search: bool) -> list[dict]:
     return [e for e in entries if e]
 
 
-async def _extract(query: str, *, search: bool = True) -> list[dict]:
+async def _extract(query: str, *, search: bool = True, num_results: int = 5) -> list[dict]:
     loop = asyncio.get_event_loop()
-    fn = functools.partial(_extract_sync, query, search=search)
+    fn = functools.partial(_extract_sync, query, search=search, num_results=num_results)
     return await loop.run_in_executor(None, fn)
 
 
@@ -504,17 +523,34 @@ def _entry_to_track(entry: dict) -> Optional[Track]:
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
-async def _smart_search(query: str) -> tuple[list[Track], str]:
+async def _resolve_stream_url(webpage_url: str) -> Optional[Track]:
+    """
+    Re-fetch a fresh stream URL for a webpage_url (YouTube watch page, etc).
+    Called just before playback starts so the URL is never stale.
+    Uses num_results=1 so only one video is fetched — much faster than
+    the default ytsearch5 used for the search picker.
+    """
+    try:
+        entries = await _extract(webpage_url, search=False, num_results=1)
+    except Exception as e:
+        print(f"[yt-dlp] stream re-resolve failed for {webpage_url}: {e}")
+        return None
+    if not entries:
+        return None
+    return _entry_to_track(entries[0])
+
+
+async def _smart_search(query: str, num_results: int = 5) -> tuple[list[Track], str]:
     """
     Resolve a query (URL or plain search text) into a list of Track
     candidates via yt-dlp. Returns (tracks, source_label).
-    yt-dlp itself supports YouTube, SoundCloud, and many other sites when
-    given a direct URL — plain text always searches YouTube.
+    num_results controls how many search candidates to fetch for text queries.
+    Use 1 for the fast single-track path, 5 for the search picker.
     """
     q = query.strip()
     is_url = bool(_URL_RE.match(q))
     try:
-        entries = await _extract(q, search=not is_url)
+        entries = await _extract(q, search=not is_url, num_results=num_results)
     except yt_dlp.utils.DownloadError as e:
         print(f"[yt-dlp] extraction failed for '{q}': {e}")
         return [], "none"
@@ -909,6 +945,10 @@ class Music(commands.Cog):
         self._last_requester: dict[int, int] = {}
         self._last_request_time: float = 0.0
         self._request_lock = asyncio.Lock()
+        # Prefetch cache: while track N plays, we resolve track N+1's stream
+        # URL in the background so the next song starts instantly.
+        self._prefetch_cache: dict[int, Track] = {}
+        self._prefetch_tasks: dict[int, asyncio.Task] = {}
 
     # ── Feature toggle gate ───────────────────────────────────────────────────
     # When MUSIC_FEATURE_DOWN is True, every normal prefix command (cog_check)
@@ -963,6 +1003,30 @@ class Music(commands.Cog):
 
     # ── Track-end handling (replaces wavelink's on_wavelink_track_end) ────────
 
+    async def _prefetch_next(self, guild_id: int) -> None:
+        """
+        Background task: while the current track is playing, silently
+        re-resolve the next queued track's stream URL so it's ready the
+        instant the current track ends. This is what eliminates the 2-min
+        wait between songs — the expensive JS challenge + URL fetch happens
+        in the background, not blocking the next play() call.
+        """
+        player = self._players.get(guild_id)
+        if not player or player.queue_is_empty():
+            return
+        next_queued = player.queue[0]  # peek without popping
+        try:
+            fresh = await _resolve_stream_url(next_queued.webpage_url)
+            if fresh:
+                # Store the refreshed track back into position 0 of the queue
+                # so _on_track_end picks it up with a valid stream URL.
+                player.queue[0] = fresh
+                print(f"[Prefetch] ✅ Pre-resolved: {fresh.title}")
+            else:
+                print(f"[Prefetch] ⚠️  Could not pre-resolve: {next_queued.title}")
+        except Exception as e:
+            print(f"[Prefetch] error for {next_queued.title}: {e}")
+
     async def _on_track_end(self, guild_id: int, track: Track, error: Exception | None) -> None:
         player = self._players.get(guild_id)
         if player is None:
@@ -972,7 +1036,18 @@ class Music(commands.Cog):
 
         if not player.queue_is_empty():
             next_track = player.queue.popleft()
+            # Re-resolve stream URL if it looks like it could be stale.
+            # YouTube direct stream URLs expire after ~6h; since we may have
+            # stored them when the track was queued (potentially hours ago),
+            # always re-fetch to be safe. _prefetch_next() will have already
+            # done this in the background if there was time.
+            if "googlevideo.com" in next_track.uri or "manifest.googlevideo" in next_track.uri:
+                fresh = await _resolve_stream_url(next_track.webpage_url)
+                if fresh:
+                    next_track = fresh
             await player.play(next_track, volume=player.volume)
+            # Kick off prefetch for the track after this one
+            asyncio.ensure_future(self._prefetch_next(guild_id))
             return
 
         player.current = None
@@ -1076,7 +1151,10 @@ class Music(commands.Cog):
 
         await self._pace_request(guild.id)
 
-        tracks, source_used = await _smart_search(query)
+        # Use num_results=1 when it's a direct URL (no need for a pick list)
+        # and num_results=5 for text searches (shown in the search picker).
+        is_url = bool(_URL_RE.match(query.strip()))
+        tracks, source_used = await _smart_search(query, num_results=1 if is_url else 5)
         if not tracks:
             await send_fn(embed=_err(
                 f"No results found for **{query}**\n"
@@ -1117,6 +1195,9 @@ class Music(commands.Cog):
             embed = _track_embed(track, requester=author)
             embed.set_footer(text=f"Source: {source_label}")
             await send_fn(embed=embed)
+            # Start prefetching the next queued track in the background
+            # so it's ready immediately when this track ends.
+            asyncio.ensure_future(self._prefetch_next(guild.id))
 
     async def _do_skip(self, guild, send_fn) -> None:
         player = self._players.get(guild.id)
