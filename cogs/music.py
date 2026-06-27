@@ -1,14 +1,7 @@
 """
-Music cog — VC music player using yt-dlp + FFmpeg (no Lavalink, no wavelink).
+Music cog — VC music player using wavelink + Lavalink (no yt-dlp, no cookies).
 
-The bot extracts a direct stream URL with yt-dlp and pipes it straight into
-the VC with discord.py's FFmpegOpusAudio. When YouTube serves a webm/opus
-stream (the common case), FFmpeg passes the bitstream through with -c:a copy —
-zero re-encoding, lowest CPU, best quality. Volume changes use FFmpeg's
--filter:a volume=X in the same pipeline instead of PCMVolumeTransformer.
-
-No external Lavalink node, no node-fallback/health-check logic — everything
-runs on the bot's own CPU/network.
+Uses a public Lavalink node so you don't need to host your own Java server.
 
 Commands (slash):
   /play   <query or URL>   Join VC and play (or queue) a song
@@ -25,57 +18,19 @@ Commands (prefix):
   !queue / !q  !np          !volume / !vol <0-100>
 
 Requirements:
-  pip install yt-dlp PyNaCl
-  FFmpeg must be installed and on PATH (or set FFMPEG_PATH env var).
+  pip install wavelink
+  (no FFmpeg, no yt-dlp, no PyNaCl needed)
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import functools
-import re
-import shutil
-from collections import deque
 from typing import Optional, cast
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-import yt_dlp
-
-# ── Resource limiting ─────────────────────────────────────────────────────────
-# Caps how much RAM and CPU the music cog (yt-dlp + FFmpeg) is allowed to use.
-# Adjust these two constants to tune the limits:
-#
-#   MAX_RAM_MB  — hard RSS limit for the entire bot process.
-#                 If RAM climbs above this the watchdog logs a warning and
-#                 auto-stops playback so memory is released.
-#                 Set to 0 to disable the RAM check.
-#
-#   MAX_CPU_PCT — sustained CPU% that triggers the watchdog.
-#                 If the 5-second rolling average exceeds this value the
-#                 watchdog logs a warning.  Playback is NOT stopped on CPU
-#                 (FFmpeg throttles itself quickly once a track is buffered).
-#                 Set to 0 to disable the CPU check.
-#
-MAX_RAM_MB  = 400   # MB  — warn + stop playback above this
-MAX_CPU_PCT = 80    # %   — warn when 5-s average exceeds this
-
-import logging as _logging
-_resource_log = _logging.getLogger("music.resource")
-
-try:
-    import psutil as _psutil
-    _PSUTIL_AVAILABLE = True
-except ImportError:
-    _psutil = None          # type: ignore[assignment]
-    _PSUTIL_AVAILABLE = False
-    _resource_log.warning(
-        "psutil not installed — resource monitoring disabled. "
-        "Add 'psutil' to requirements.txt to enable it."
-    )
-
+import wavelink
 from cogs.state import (
     append_song_history,
     delete_user_playlist,
@@ -97,7 +52,7 @@ ERROR_COLOR  = discord.Color.red()
 # ── Temporary feature toggle ────────────────────────────────────────────────
 # Set to True to make ALL music/VC commands respond with a "temporarily down"
 # message instead of running. Set back to False to restore normal behaviour.
-MUSIC_FEATURE_DOWN = True
+MUSIC_FEATURE_DOWN = False
 
 MUSIC_DOWN_EMBED = discord.Embed(
     title="🚧 Music is temporarily down",
@@ -108,728 +63,157 @@ MUSIC_DOWN_EMBED = discord.Embed(
     color=discord.Color.orange(),
 )
 
-# Path to the ffmpeg binary. Falls back to "ffmpeg" (PATH lookup) if not found
-# via shutil.which — set the FFMPEG_PATH env var if it lives somewhere custom.
-import os as _os
-import base64 as _base64
-import tempfile as _tempfile
-FFMPEG_EXECUTABLE = _os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg") or "ffmpeg"
-YTDLP_COOKIES_B64 = _os.environ.get("YTDLP_COOKIES_B64", "").strip()
-YTDLP_COOKIES_FILE = _os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+# Source prefixes for smart detection
+_SPOTIFY_PREFIXES    = ("https://open.spotify.com/", "spotify:")
+_DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
+_APPLE_PREFIXES      = ("https://music.apple.com/",)
+_SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
-if YTDLP_COOKIES_B64:
-    try:
-        decoded = _base64.b64decode(YTDLP_COOKIES_B64, validate=True)
-        preview = decoded[:200].decode("utf-8")
-        if not (preview.startswith("#") or "\t" in preview):
-            raise ValueError(
-                "decoded content doesn't look like a Netscape cookies.txt "
-                "file (expected a '#' comment or tab-separated fields). "
-                "Did you paste the file's raw text instead of its base64 "
-                "encoding?"
-            )
-        _tmp = _tempfile.NamedTemporaryFile(
-            mode="wb", suffix="_cookies.txt", delete=False
-        )
-        _tmp.write(decoded)
-        _tmp.close()
-        YTDLP_COOKIES_FILE = _tmp.name
-        print(f"✅ Music: decoded YTDLP_COOKIES_B64 to temp file {YTDLP_COOKIES_FILE}")
-    except Exception as e:
-        print(
-            f"⚠️  Music: failed to decode YTDLP_COOKIES_B64: {e}\n"
-            "   Make sure you pasted the OUTPUT of the base64 command "
-            "(a long string of letters/numbers), not the cookies.txt "
-            "file's own content."
-        )
+# ── Node identifiers ─────────────────────────────────────────────────────────
+# NODE_PUBLIC  : community node, used for YouTube (primary)
+# NODE_SC      : your self-hosted node, used as SoundCloud fallback when
+#                YouTube throws a login/access error
+NODE_PUBLIC = "public-yt"
+NODE_SC     = "self-sc"
 
-def _find_node22_path() -> str | None:
+# Public YT nodes tried in order — first working one is used, rest are fallback
+PUBLIC_YT_NODES = [
+    {"identifier": "public-yt-1", "host": "lavalink.jirayu.net",        "password": "youshallnotpass",               "secure": False, "port": 13592},
+    {"identifier": "public-yt-2", "host": "lavalinkv4.serenetia.com",   "password": "https://seretia.link/discord",  "secure": False, "port": 80},
+    {"identifier": "public-yt-3", "host": "lavalink.triniumhost.com",   "password": "kirito",                        "secure": False, "port": 2333},
+    {"identifier": "public-yt-4", "host": "lava2.kasawa.pro",           "password": "youshallnotpass",               "secure": False, "port": 2334},
+]
+
+LAVALINK_NODES = PUBLIC_YT_NODES + [
+    # Self-hosted node — SoundCloud fallback only
+    {
+        "identifier": NODE_SC,
+        "host":       "happy-joy-production-906e.up.railway.app",
+        "password":   "jarvisbot",
+        "secure":     True,
+        "port":       443,
+    },
+]
+
+
+# Minimum gap (in seconds) between consecutive track-load requests.
+MIN_TRACK_LOAD_GAP = 2.5
+
+
+def _detect_source(query: str) -> str:
     """
-    Find a Node.js binary that is version 22 or higher.
-
-    WHY this exists: yt-dlp-ejs requires Node >= 22 to solve YouTube's
-    sig/n-parameter challenges. Railway's nixpkgs installs nodejs_22, but
-    PATH ordering can put an older system Node (e.g. v18 from apt) first,
-    causing yt-dlp to find the wrong binary and log "node-18.x (unsupported)".
-
-    By scanning known paths and checking `node --version` directly, we can
-    pass the correct binary path explicitly via js_runtimes={'node': {'path':...}}
-    instead of relying on PATH order.
-
-    Returns the path to a Node >= 22 binary, or None if none is found.
+    Returns the best search prefix for a query.
+    - Direct URLs (Spotify, Deezer, Apple Music, SoundCloud) → passed as-is
+    - Plain text → tries YouTube first, falls back handled in _smart_search
     """
-    import subprocess as _sp
+    q = query.strip()
+    if q.startswith(_SPOTIFY_PREFIXES):
+        return "spotify"
+    if q.startswith(_DEEZER_PREFIXES):
+        return "deezer"
+    if q.startswith(_APPLE_PREFIXES):
+        return "applemusic"
+    if q.startswith(_SOUNDCLOUD_PREFIXES):
+        return "soundcloud"
+    # Plain text or YouTube URL
+    return "ytsearch"
 
-    candidates: list[tuple[int, str]] = []
-    seen: set[str] = set()
 
-    # Explicit paths to check in addition to PATH lookup
-    extra_paths = [
-        # nixpkgs nodejs_22 typical install locations on Railway/Nix
-        "/root/.nix-profile/bin/node",
-        "/nix/var/nix/profiles/default/bin/node",
-        # common system paths
-        "/usr/local/bin/node",
-        "/usr/bin/node",
-        "/bin/node",
-        "/opt/homebrew/bin/node",
-    ]
-    # Also check all 'node' and 'node22' entries on PATH
-    for name in ("node", "node22", "nodejs"):
-        found = shutil.which(name)
-        if found:
-            extra_paths.append(found)
+async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
+    """
+    Search with automatic source detection and fallback chain:
+      1. Detected source (Spotify/Apple/SC URL, or YouTube for plain text)
+      2. SoundCloud (if YouTube fails)
+    Returns (results, source_used_label).
+    """
+    q = query.strip()
+    source = _detect_source(q)
 
-    for path in extra_paths:
-        real = _os.path.realpath(path) if _os.path.exists(path) else None
-        key = real or path
-        if key in seen:
+    # Direct URL sources — pass straight through, no prefix needed
+    if source in ("spotify", "applemusic", "soundcloud"):
+        tracks = await wavelink.Playable.search(q)
+        if tracks:
+            return tracks, source
+        return None, source
+
+    # Plain text — try each public YT node; fall to SC on any error or empty result
+    for n in PUBLIC_YT_NODES:
+        node = wavelink.Pool.get_node(n["identifier"])
+        if node is None:
             continue
-        seen.add(key)
         try:
-            r = _sp.run(
-                [path, "--version"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if r.returncode == 0:
-                ver_str = r.stdout.strip().lstrip("v")
-                major = int(ver_str.split(".")[0])
-                if major >= 22:
-                    candidates.append((major, path))
-        except Exception:
-            continue
+            tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube, node=node)
+            if tracks:
+                return tracks, "youtube"
+        except Exception as e:
+            print(f"[YT] Node {n['identifier']} error: {e}")
 
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    chosen = candidates[0][1]
-    print(f"✅ Music: found Node.js {candidates[0][0]}.x at '{chosen}' for yt-dlp JS challenge solver")
-    return chosen
+    # All YT nodes failed → SoundCloud on self-hosted node
+    sc_node = wavelink.Pool.get_node(NODE_SC)
+    try:
+        sc_tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud, node=sc_node)
+        if sc_tracks:
+            return sc_tracks, "soundcloud"
+    except Exception as e:
+        print(f"[SC] Fallback node error: {e}")
 
-
-# Resolved at import time so the scan runs once at startup.
-_NODE22_PATH: str | None = _find_node22_path()
-if not _NODE22_PATH:
-    print(
-        "⚠️  Music: no Node.js >= 22 found — YouTube JS challenges will fail.\n"
-        "   Make sure nodejs_22 is in nixpacks.toml nixPkgs and yt-dlp-ejs is in requirements.txt."
-    )
-
-
-YTDLP_FORMAT_OPTIONS = {
-    # Format priority:
-    #   1. webm with opus codec  — native Opus, zero re-encode, best quality
-    #   2. any webm audio        — likely opus, fast path
-    #   3. m4a                   — AAC, needs one decode+encode pass but stable
-    #   4. any audio             — last resort
-    # We intentionally avoid "best" (which can pick video streams) and opus-only
-    # (which misses some acodec=opus streams labelled differently by yt-dlp).
-    "format": (
-        "bestaudio[ext=webm][acodec=opus]"
-        "/bestaudio[ext=webm]"
-        "/bestaudio[ext=m4a]"
-        "/bestaudio"
-    ),
-    "noplaylist": True,
-    "nocheckcertificate": True,
-    "ignoreerrors": False,
-    "quiet": True,
-    "no_warnings": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",  # avoid IPv6 issues on some hosts
-    "extract_flat": False,
-    # Tell yt-dlp not to rate-limit itself — we need the full stream URL and
-    # don't want yt-dlp's own throttle logic interfering with FFmpeg's read.
-    "ratelimit": None,
-    
-    "js_runtimes": {
-        "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
-        "deno": {},
-    },
-
-    "cachedir": _os.environ.get(
-        "YTDLP_CACHE_DIR",
-        _os.path.join(_tempfile.gettempdir(), ".ytdlp_cache"),
-    ),
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["default"],
-        }
-    },
-}
-
-if YTDLP_COOKIES_FILE and _os.path.isfile(YTDLP_COOKIES_FILE):
-    YTDLP_FORMAT_OPTIONS["cookiefile"] = YTDLP_COOKIES_FILE
-    print(f"✅ Music: using YouTube cookies from {YTDLP_COOKIES_FILE}")
-elif YTDLP_COOKIES_FILE:
-    print(f"⚠️  Music: YTDLP_COOKIES_FILE set to '{YTDLP_COOKIES_FILE}' but file not found.")
-
-# ── FFmpeg options ────────────────────────────────────────────────────────────
-#
-# ANTI-CRACKLING STRATEGY — every option here has a specific purpose:
-#
-# INPUT-SIDE (before_options):
-#   -reconnect 1              reconnect on TCP drop (YouTube CDN occasionally drops)
-#   -reconnect_streamed 1     also reconnect on streamed (non-seekable) sources
-#   -reconnect_delay_max 30   wait up to 30 s between retries — long enough for
-#                             YouTube's CDN to recover; 5 s was too short
-#   -multiple_requests 1      reuse the same TCP connection for HTTP range requests;
-#                             avoids the TCP handshake stall that causes a click
-#                             at the start of each reconnect
-#   -thread_queue_size 4096   FFmpeg's packet queue between demux and decode threads.
-#                             Must be large enough to absorb network jitter.
-#                             8192 wastes memory for no gain; 4096 is the sweet spot.
-#   -probesize 10485760       10 MB probe budget — enough to detect any container
-#                             reliably; 32 MB was overkill and added startup latency
-#   -analyzeduration 3000000  3 s (in µs) — enough for reliable format detection
-#                             without the 10 s stall the previous value caused
-#
-# NOTE: -fflags +nobuffer is INTENTIONALLY ABSENT.  That flag tells FFmpeg to
-# skip its internal I/O buffer, which is the OPPOSITE of what we want — removing
-# the buffer makes packet starvation more likely, not less.  The previous version
-# included it by mistake.
-#
-# OUTPUT-SIDE (options):
-#   -vn                       drop video (saves CPU, prevents muxer confusion)
-#   -af aresample=...         resample to exactly 48000 Hz before encoding.
-#                             Opus/Discord requires 48 kHz; any other rate causes
-#                             the codec to resample internally with lower quality,
-#                             producing intermittent crackling on non-48k sources.
-#                             soxr is the highest-quality resampler in FFmpeg.
-#   volume=X                  applied as part of the same filter chain as aresample
-#                             so there's only one decode→encode pass
-#   application=audio         tells libopus to use the "music" application profile
-#                             instead of the default VOIP profile. VOIP applies
-#                             aggressive packet-loss concealment and noise gating
-#                             tuned for speech — on music this produces audible
-#                             artefacts (warbling, pumping). "audio" disables all
-#                             of that for transparent music reproduction.
-#
-_BEFORE_OPTS_COMMON = " ".join([
-    "-reconnect 1",
-    "-reconnect_streamed 1",
-    "-reconnect_delay_max 30",
-    "-multiple_requests 1",
-    "-thread_queue_size 4096",
-    "-probesize 10485760",       # 10 MB
-    "-analyzeduration 3000000",  # 3 s in µs
-])
-
-# Copy path: passthrough webm/opus — no decode, no re-encode, no filters.
-# -loglevel error suppresses the spurious "AVOption b not used" warning that
-# discord.py always triggers by injecting -b:a 128k even on copy streams.
-_FFMPEG_OPTS_COPY = "-vn -loglevel error"
-
-# Re-encode path at default volume (100): resample to 48 kHz with soxr,
-# then encode with the music application profile.
-_FFMPEG_OPTS_ENCODE = (
-    "-vn "
-    "-af aresample=48000:resampler=soxr "
-    "-application audio"
-)
-
-# Re-encode path with custom volume: apply volume BEFORE resampling so that
-# the gain change is in the original sample domain (avoids quantisation noise
-# that occurs when you gain after resampling to the target rate).
-_FFMPEG_OPTS_VOL_RESAMP = (
-    "-vn "
-    "-af volume={vol:.3f},aresample=48000:resampler=soxr "
-    "-application audio"
-)
-
-
-def _make_audio_source(
-    uri: str,
-    volume: int,
-    is_opus: bool,
-) -> discord.FFmpegOpusAudio:
-    """
-    Build the correct FFmpegOpusAudio source for a track.
-
-    Three paths:
-
-    1. PASSTHROUGH  (is_opus=True, volume=100)
-       codec='copy' — FFmpeg reads the webm/opus stream and forwards Opus
-       packets verbatim.  Zero CPU for decode or encode.  Best quality.
-
-    2. VOLUME+ENCODE  (volume != 100, any codec)
-       Decode → volume filter → aresample 48 kHz (soxr) → libopus.
-       Volume is applied BEFORE resampling to avoid quantisation noise.
-       application=audio uses the music Opus profile (vs. the default
-       VOIP profile which adds speech noise-gating that warbles music).
-
-    3. ENCODE-ONLY  (is_opus=False, volume=100)
-       Decode → aresample 48 kHz (soxr) → libopus with application=audio.
-       Used when YouTube serves m4a/aac instead of webm/opus.
-    """
-    before_opts = _BEFORE_OPTS_COMMON
-
-    if is_opus and volume == 100:
-        return discord.FFmpegOpusAudio(
-            uri,
-            executable=FFMPEG_EXECUTABLE,
-            codec="copy",
-            before_options=before_opts,
-            options=_FFMPEG_OPTS_COPY,
-        )
-    else:
-        opts = (
-            _FFMPEG_OPTS_VOL_RESAMP.format(vol=volume / 100)
-            if volume != 100
-            else _FFMPEG_OPTS_ENCODE
-        )
-        return discord.FFmpegOpusAudio(
-            uri,
-            executable=FFMPEG_EXECUTABLE,
-            before_options=before_opts,
-            options=opts,
-        )
-
-
-MIN_TRACK_LOAD_GAP = 0.5
-
+    return None, "none"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _fmt_duration(seconds: int | float | None) -> str:
-    if not seconds:
-        return "?"
-    s = int(seconds)
+def _fmt_duration(ms: int) -> str:
+    s = ms // 1000
     h, r = divmod(s, 3600)
     m, s = divmod(r, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _track_embed(track: wavelink.Playable, title: str = "🎵 Now Playing",
+                 requester: discord.Member | discord.User | None = None) -> discord.Embed:
+    embed = discord.Embed(
+        title       = title,
+        description = f"**[{track.title}]({track.uri})**",
+        color       = MUSIC_COLOR,
+    )
+    embed.add_field(name="Duration", value=_fmt_duration(track.length), inline=True)
+    embed.add_field(name="Author",   value=track.author or "?",         inline=True)
+    if requester:
+        embed.add_field(name="Requested by", value=requester.mention,   inline=True)
+    if track.artwork:
+        embed.set_thumbnail(url=track.artwork)
+    return embed
 
 
 def _err(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
 
 
-_OPUS_CANDIDATES = (
-    "opus",            # generic name, works if a dev-symlink exists
-    "libopus.so.0",    # common Debian/Ubuntu runtime name
-    "libopus.so",
-    "libopus.0.dylib", # macOS (Homebrew)
-    "libopus.dylib",
-)
-
-_OPUS_SEARCH_DIRS = (
-    "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
-    "/usr/local/lib", "/lib", "/lib/x86_64-linux-gnu",
-    "/nix/store", "/opt/homebrew/lib",
-)
-
-
-def _find_libopus_on_disk() -> str | None:
-    """
-    Fallback for containers (Nix/Railway) where ctypes' default search
-    (which relies on the dynamic linker cache) can't resolve the library
-    by name even though the file is present on disk. Walks a few common
-    library directories looking for any libopus* file.
-    """
-    import glob
-    for root in _OPUS_SEARCH_DIRS:
-        if not _os.path.isdir(root):
-            continue
-        # /nix/store has thousands of subdirs — only descend one extra
-        # level for libopus*/lib rather than a full recursive walk.
-        patterns = (
-            [f"{root}/libopus.so*", f"{root}/libopus*.dylib"]
-            if root != "/nix/store"
-            else [f"{root}/*/lib/libopus.so*"]
-        )
-        for pattern in patterns:
-            matches = glob.glob(pattern)
-            if matches:
-                return matches[0]
-    return None
-
-
-def _ensure_opus_loaded() -> None:
-    """
-    discord.py needs the native libopus library loaded before any audio can
-    be encoded for voice. On Windows, discord.opus.load_default() finds the
-    bundled DLL automatically — but on Linux/Mac there's no auto-detection,
-    so VoiceClient.play() raises a bare `OpusNotLoaded()` (which prints as
-    an EMPTY string, e.g. "[Play] Playback error: ") if nothing loads it
-    first. We try a few common library names, then fall back to scanning
-    disk directly for containers where the linker cache isn't populated.
-    """
-    if discord.opus.is_loaded():
-        return
-
-    tried: list[str] = []
-    for name in _OPUS_CANDIDATES:
-        tried.append(name)
-        try:
-            discord.opus.load_opus(name)
-            print(f"✅ Music: loaded libopus via '{name}'")
-            return
-        except OSError:
-            continue
-
-    found_path = _find_libopus_on_disk()
-    if found_path:
-        tried.append(found_path)
-        try:
-            discord.opus.load_opus(found_path)
-            print(f"✅ Music: loaded libopus via disk scan: '{found_path}'")
-            return
-        except OSError as e:
-            print(f"⚠️  Music: found '{found_path}' on disk but ctypes failed to load it: {e}")
-
-    print(
-        "⚠️  Music: could not auto-load libopus — voice playback will fail "
-        "with a blank 'OpusNotLoaded' error.\n"
-        f"   Tried: {tried}\n"
-        "   Install it via your package manager (e.g. `apt install libopus0` "
-        "/ `brew install opus`), or set a custom path with "
-        "discord.opus.load_opus('<path-to-lib>')."
-    )
-
-
-def _ensure_node_available() -> None:
-    """
-    yt-dlp's JS challenge solver needs two things to work:
-      1. A `node` binary on PATH (Node.js v22+)
-      2. The `yt-dlp-ejs` pip package (the actual solver scripts)
-
-    Without BOTH, yt-dlp reports all JS runtimes as "(unavailable)" and
-    many videos fail with "Requested format is not available" — even if
-    Node.js is installed, yt-dlp-ejs is what makes node "available" to
-    yt-dlp. Make sure `yt-dlp-ejs` is in requirements.txt.
-
-    This function handles a Debian/Ubuntu naming quirk where apt installs
-    the binary as `nodejs` instead of `node`. It creates a `node` symlink
-    in a temp dir so yt-dlp can find it.
-    """
-    if shutil.which("node"):
-        return
-    nodejs_path = shutil.which("nodejs")
-    if not nodejs_path:
-        return  # neither exists — nothing we can do here, just no JS runtime
-
-    try:
-        bin_dir = _os.path.join(_tempfile.gettempdir(), "music_cog_bin")
-        _os.makedirs(bin_dir, exist_ok=True)
-        link_path = _os.path.join(bin_dir, "node")
-        if not _os.path.exists(link_path):
-            _os.symlink(nodejs_path, link_path)
-        _os.environ["PATH"] = bin_dir + _os.pathsep + _os.environ.get("PATH", "")
-        print(f"✅ Music: 'node' not found but 'nodejs' was — symlinked {link_path} -> {nodejs_path}")
-    except OSError as e:
-        print(f"⚠️  Music: found 'nodejs' but failed to create 'node' symlink: {e}")
-
-
-class Track:
-    """
-    Lightweight stand-in for wavelink.Playable — holds metadata plus the
-    resolved stream URL needed to hand off to FFmpegOpusAudio. `length` is
-    kept in SECONDS (unlike the old wavelink-ms convention) since that's
-    what yt-dlp reports natively.
-    """
-
-    __slots__ = ("title", "uri", "webpage_url", "author", "length", "artwork", "is_opus")
-
-    def __init__(
-        self,
-        title: str,
-        uri: str,
-        webpage_url: str,
-        author: str | None,
-        length: float | None,
-        artwork: str | None,
-        is_opus: bool = False,
-    ) -> None:
-        self.title = title
-        self.uri = uri                  # direct/stream URL fed to FFmpeg
-        self.webpage_url = webpage_url   # human-facing link (YouTube page etc.)
-        self.author = author
-        self.length = length or 0
-        self.artwork = artwork
-        self.is_opus = is_opus          # True when the stream is already Opus (webm)
-
-
-def _track_info(track: Track) -> dict[str, object]:
+def _track_info(track: wavelink.Playable) -> dict[str, object]:
     return {
         "title":  track.title,
-        "uri":    track.webpage_url,
+        "uri":    track.uri,
         "author": track.author or "",
         "length": track.length,
     }
 
 
-def _track_embed(track: Track, title: str = "🎵 Now Playing",
-                  requester: discord.Member | discord.User | None = None) -> discord.Embed:
-    embed = discord.Embed(
-        title       = title,
-        description = f"**[{track.title}]({track.webpage_url})**",
-        color       = MUSIC_COLOR,
-    )
-    embed.add_field(name="Duration", value=_fmt_duration(track.length), inline=True)
-    embed.add_field(name="Author",   value=track.author or "?",        inline=True)
-    if requester:
-        embed.add_field(name="Requested by", value=requester.mention,  inline=True)
-    if track.artwork:
-        embed.set_thumbnail(url=track.artwork)
-    return embed
-
-
-# ── Dedicated thread pool for yt-dlp extractions ─────────────────────────────
-# Using the default run_in_executor pool (shared with everything else in the
-# bot) means a slow yt-dlp call can delay other bot coroutines. A dedicated
-# pool isolates music extraction so other features stay responsive.
-# 3 workers = enough for prefetch + active + one queued call without queuing up.
-_YDL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=3, thread_name_prefix="yt-dlp"
-)
-
-
-# ── Resource watchdog ─────────────────────────────────────────────────────────
-
-class _ResourceWatchdog:
-    """
-    Async background task that monitors RAM and CPU usage while the music
-    cog is active.  When usage exceeds the configured thresholds it logs a
-    warning; if RAM exceeds MAX_RAM_MB it also stops all active players so
-    the audio buffers are released immediately.
-
-    Runs every 5 seconds — lightweight enough to be unnoticeable.
-    """
-
-    CHECK_INTERVAL = 5  # seconds between checks
-
-    def __init__(self, get_players_fn):
-        # get_players_fn() must return the dict of guild_id -> MusicPlayer
-        self._get_players = get_players_fn
-        self._task: asyncio.Task | None = None
-        if _PSUTIL_AVAILABLE:
-            self._proc = _psutil.Process()
-            self._cpu_history: list[float] = []
-        else:
-            self._proc = None
-
-    def start(self) -> None:
-        if not _PSUTIL_AVAILABLE:
-            return
-        self._task = asyncio.get_event_loop().create_task(self._loop())
-        _resource_log.info(
-            "Resource watchdog started — RAM limit: %s MB, CPU warn: %s%%",
-            MAX_RAM_MB or "disabled",
-            MAX_CPU_PCT or "disabled",
-        )
-
-    def stop(self) -> None:
-        if self._task and not self._task.done():
-            self._task.cancel()
-
-    async def _loop(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(self.CHECK_INTERVAL)
-                await self._check()
-        except asyncio.CancelledError:
-            pass
-
-    async def _check(self) -> None:
-        try:
-            mem_info = self._proc.memory_info()
-            ram_mb = mem_info.rss / 1024 / 1024
-
-            cpu_pct = self._proc.cpu_percent(interval=None)  # non-blocking
-            self._cpu_history.append(cpu_pct)
-            if len(self._cpu_history) > 6:           # keep last 30 s
-                self._cpu_history.pop(0)
-            avg_cpu = sum(self._cpu_history) / len(self._cpu_history)
-
-            if MAX_RAM_MB and ram_mb > MAX_RAM_MB:
-                _resource_log.warning(
-                    "⚠️  RAM usage %.1f MB exceeds limit %d MB — stopping all players",
-                    ram_mb, MAX_RAM_MB,
-                )
-                players = self._get_players()
-                for player in list(players.values()):
-                    try:
-                        player.queue.clear()
-                        await player.disconnect()
-                    except Exception:
-                        pass
-                players.clear()
-            else:
-                _resource_log.debug("RAM %.1f MB | CPU %.1f%% (avg)", ram_mb, avg_cpu)
-
-            if MAX_CPU_PCT and avg_cpu > MAX_CPU_PCT:
-                _resource_log.warning(
-                    "⚠️  CPU usage %.1f%% (5-s avg) exceeds threshold %d%%",
-                    avg_cpu, MAX_CPU_PCT,
-                )
-        except Exception as exc:
-            _resource_log.debug("Watchdog check error: %s", exc)
-
-
-# ── Shared yt-dlp instance cache ─────────────────────────────────────────────
-import threading as _threading
-_ydl_local = _threading.local()
-
-
-def _get_ydl() -> yt_dlp.YoutubeDL:
-    """Return a per-thread cached YoutubeDL instance, creating if needed."""
-    ydl = getattr(_ydl_local, "ydl", None)
-    if ydl is None:
-        ydl = yt_dlp.YoutubeDL(YTDLP_FORMAT_OPTIONS)
-        _ydl_local.ydl = ydl
-    return ydl
-
-
-# ── yt-dlp extraction (run in a thread, it's blocking) ──────────────────────
-
-def _extract_sync(query: str, *, search: bool, num_results: int = 5) -> list[dict]:
-    """
-    Blocking yt-dlp call — must be run via run_in_executor.
-    If `search` is True, query is treated as search terms.
-    num_results controls how many search results to fetch (default 5 for
-    the search picker; use 1 for single-track fast resolution).
-    If `search` is False, query is treated as a direct URL.
-    Uses a per-thread cached YoutubeDL instance to avoid re-init overhead.
-    """
-    target = f"ytsearch{num_results}:{query}" if search else query
-    ydl = _get_ydl()
-    info = ydl.extract_info(target, download=False)
-    if info is None:
-        return []
-    entries = info.get("entries") if "entries" in info else [info]
-    return [e for e in entries if e]
-
-
-async def _extract(query: str, *, search: bool = True, num_results: int = 5) -> list[dict]:
-    loop = asyncio.get_running_loop()
-    fn = functools.partial(_extract_sync, query, search=search, num_results=num_results)
-    return await loop.run_in_executor(_YDL_EXECUTOR, fn)
-
-
-def _prewarm_sync() -> None:
-    """
-    Blocking: resolve a YouTube URL to force the JS challenge solver to run
-    and cache its result on disk. Called at startup inside _YDL_EXECUTOR so
-    it also primes this thread's cached YoutubeDL instance (_ydl_local.ydl).
-    By the time the first user types !play, the JS cache is hot and the YDL
-    instance is already initialised — both cold-start costs are eliminated.
-
-    We use Rick Astley's "Never Gonna Give You Up" — always available.
-    """
-    try:
-        ydl = _get_ydl()  # prime the per-thread cached instance
-        ydl.extract_info(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            download=False,
-        )
-        print("✅ Music: YDL pre-warm complete — JS challenge cached, first song will be fast")
-    except Exception as e:
-        print(f"⚠️  Music: YDL pre-warm failed (first song may be slow): {e}")
-
-
-def _entry_to_track(entry: dict) -> Optional[Track]:
-    stream_url = entry.get("url")
-    if not stream_url:
-        # Some extractors nest formats; fall back to best format's url.
-        formats = entry.get("formats") or []
-        if formats:
-            stream_url = formats[-1].get("url")
-    if not stream_url:
-        return None
-
-    # Detect whether the resolved stream is already Opus-encoded (webm container).
-    # When is_opus=True we use FFmpegOpusAudio with codec='copy' at volume=100,
-    # skipping the entire decode→encode round-trip.
-    #
-    # Be strict: only treat as Opus if BOTH conditions hold:
-    #   1. The container is webm  (ext == "webm")
-    #   2. The audio codec is opus (acodec contains "opus")
-    # An empty or None acodec must NOT be assumed to be opus — that would send
-    # a non-opus stream through the passthrough path and produce garbage audio.
-    acodec: str = (entry.get("acodec") or "").lower()
-    ext:    str = (entry.get("ext")    or "").lower()
-    is_opus = ext == "webm" and "opus" in acodec
-
-    return Track(
-        title       = entry.get("title", "Unknown title"),
-        uri         = stream_url,
-        webpage_url = entry.get("webpage_url") or entry.get("original_url") or stream_url,
-        author      = entry.get("uploader") or entry.get("channel"),
-        length      = entry.get("duration"),
-        artwork     = entry.get("thumbnail"),
-        is_opus     = is_opus,
-    )
-
-
-_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-
-
-async def _resolve_stream_url(webpage_url: str) -> Optional[Track]:
-    """
-    Re-fetch a fresh stream URL for a webpage_url (YouTube watch page, etc).
-    Called just before playback starts so the URL is never stale.
-    Uses num_results=1 so only one video is fetched — much faster than
-    the default ytsearch5 used for the search picker.
-    """
-    try:
-        entries = await _extract(webpage_url, search=False, num_results=1)
-    except Exception as e:
-        print(f"[yt-dlp] stream re-resolve failed for {webpage_url}: {e}")
-        return None
-    if not entries:
-        return None
-    return _entry_to_track(entries[0])
-
-
-async def _smart_search(query: str, num_results: int = 5) -> tuple[list[Track], str]:
-    """
-    Resolve a query (URL or plain search text) into a list of Track
-    candidates via yt-dlp. Returns (tracks, source_label).
-    num_results controls how many search candidates to fetch for text queries.
-    Use 1 for the fast single-track path, 5 for the search picker.
-    """
-    q = query.strip()
-    is_url = bool(_URL_RE.match(q))
-    try:
-        entries = await _extract(q, search=not is_url, num_results=num_results)
-    except yt_dlp.utils.DownloadError as e:
-        print(f"[yt-dlp] extraction failed for '{q}': {e}")
-        return [], "none"
-    except Exception as e:
-        print(f"[yt-dlp] unexpected error for '{q}': {e}")
-        return [], "none"
-
-    tracks = [t for e in entries if (t := _entry_to_track(e)) is not None]
-    if not tracks:
-        return [], "none"
-
-    if is_url:
-        host = q.split("//", 1)[-1].split("/", 1)[0]
-        if "soundcloud" in host:
-            source = "soundcloud"
-        elif "youtube" in host or "youtu.be" in host:
-            source = "youtube"
-        else:
-            source = host
-    else:
-        source = "youtube"
-    return tracks, source
-
-
-async def _resolve_saved_track(info: dict[str, object]) -> Optional[Track]:
+async def _resolve_saved_track(info: dict[str, object]) -> Optional[wavelink.Playable]:
     uri = info.get("uri")
     title = info.get("title", "")
     author = info.get("author", "")
-    query = uri or f"{author} {title}".strip()
-    if not query:
+    if not uri and not title:
         return None
-    tracks, _ = await _smart_search(str(query))
-    return tracks[0] if tracks else None
+    # Try by URI first, then fall back to title+author search
+    query = uri or f"{author} {title}".strip()
+    tracks, _ = await _smart_search(query)
+    if not tracks:
+        return None
+    return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
 
 
-async def _find_similar_track(history: list[dict[str, object]]) -> Optional[Track]:
+async def _find_similar_track(history: list[dict[str, object]]) -> Optional[wavelink.Playable]:
     if not history:
         return None
     last = history[-1]
@@ -842,129 +226,10 @@ async def _find_similar_track(history: list[dict[str, object]]) -> Optional[Trac
     else:
         return None
     tracks, _ = await _smart_search(query)
-    return tracks[0] if tracks else None
+    if not tracks:
+        return None
+    return tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Guild player — wraps an FFmpegOpusAudio source + queue
-# ══════════════════════════════════════════════════════════════════════════════
-
-class GuildPlayer:
-    """
-    Per-guild playback state. Mirrors the bits of wavelink.Player that the
-    rest of this cog relies on: .current, .queue, .playing, .paused,
-    .volume, .voice_client, play()/skip()/stop()/pause()/set_volume().
-    """
-
-    def __init__(self, voice_client: discord.VoiceClient, cog: "Music", guild_id: int) -> None:
-        self.voice_client = voice_client
-        self.cog = cog
-        self.guild_id = guild_id
-        self.queue: deque[Track] = deque()
-        self.current: Optional[Track] = None
-        self.volume: int = 100
-        self._skip_requested = False
-        self._stopped = False
-
-    @property
-    def channel(self):
-        return self.voice_client.channel
-
-    @property
-    def connected(self) -> bool:
-        return self.voice_client.is_connected()
-
-    @property
-    def playing(self) -> bool:
-        return self.voice_client.is_playing()
-
-    @property
-    def paused(self) -> bool:
-        return self.voice_client.is_paused()
-
-    def queue_is_empty(self) -> bool:
-        return len(self.queue) == 0
-
-    def queue_put(self, track: Track) -> None:
-        self.queue.append(track)
-
-    def queue_list(self) -> list[Track]:
-        return list(self.queue)
-
-    async def play(self, track: Track, *, volume: int | None = None) -> None:
-        if volume is not None:
-            self.volume = volume
-        self.current = track
-        self._stopped = False
-
-        loop = asyncio.get_running_loop()
-
-        def _after(error: Exception | None) -> None:
-            if error:
-                detail = str(error) or error.__class__.__name__
-                print(f"[Player] Playback error for '{track.title}' ({error.__class__.__name__}): {detail}")
-            fut = asyncio.run_coroutine_threadsafe(
-                self.cog._on_track_end(self.guild_id, track, error), loop
-            )
-            try:
-                fut.result()
-            except Exception as e:
-                print(f"[Player] on_track_end handler raised: {e}")
-
-        try:
-            audio_source = _make_audio_source(track.uri, self.volume, track.is_opus)
-        except Exception as e:
-            print(f"[Player] Failed to build audio source: {e}")
-            await self.cog._on_track_end(self.guild_id, track, e)
-            return
-
-        self.voice_client.play(audio_source, after=_after)
-
-    async def skip(self) -> None:
-        self._skip_requested = True
-        if self.voice_client.is_playing() or self.voice_client.is_paused():
-            self.voice_client.stop()  # triggers `after`, which advances the queue
-
-    async def stop(self) -> None:
-        self._stopped = True
-        self.queue.clear()
-        if self.voice_client.is_playing() or self.voice_client.is_paused():
-            self.voice_client.stop()
-
-    async def pause(self, pause: bool) -> None:
-        if pause and self.voice_client.is_playing():
-            self.voice_client.pause()
-        elif not pause and self.voice_client.is_paused():
-            self.voice_client.resume()
-
-    async def set_volume(self, vol: int) -> None:
-        self.volume = vol
-        # With FFmpegOpusAudio+volume filter there's no live transformer to
-        # tweak in-place. We restart the current track's FFmpeg process with
-        # the new volume baked into the -filter:a argument. The gap is
-        # imperceptible (~1 FFmpeg startup frame, <50 ms).
-        if self.current and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-            was_paused = self.voice_client.is_paused()
-            self.voice_client.stop()          # triggers _after → _on_track_end
-            # Re-inject current track at the front of the queue so _on_track_end
-            # picks it up again immediately with the new volume.
-            self.queue.appendleft(self.current)
-            # _on_track_end will pop it and call play() → new FFmpegOpusAudio
-            # with updated volume. Pause state is lost on restart; restore it.
-            if was_paused:
-                # Brief async yield so play() has time to issue voice_client.play()
-                async def _re_pause():
-                    await asyncio.sleep(0.3)
-                    if self.voice_client.is_playing():
-                        self.voice_client.pause()
-                asyncio.ensure_future(_re_pause())
-
-    async def disconnect(self) -> None:
-        self._stopped = True
-        try:
-            await self.voice_client.disconnect(force=True)
-        except Exception:
-            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -979,7 +244,7 @@ class SearchResultsView(discord.ui.View):
         cog:     "Music",
         guild:   discord.Guild,
         author:  discord.Member | discord.User,
-        tracks:  list[Track],
+        tracks:  list[wavelink.Playable],
     ) -> None:
         super().__init__(timeout=60)
         self.cog    = cog
@@ -1019,15 +284,15 @@ class SearchResultsView(discord.ui.View):
             return
 
         if player.playing or player.paused:
-            player.queue_put(track)
+            player.queue.put(track)
             embed = discord.Embed(
                 title       = "➕ Added to Queue",
-                description = f"**[{track.title}]({track.webpage_url})**\n"
+                description = f"**[{track.title}]({track.uri})**"
                               f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
                 color       = MUSIC_COLOR,
             )
         else:
-            await player.play(track, volume=player.volume)
+            await player.play(track, volume=100)
             embed = _track_embed(track)
 
         if track.artwork:
@@ -1063,7 +328,7 @@ class SearchModal(discord.ui.Modal, title="🔍 Search for a Song"):
             await interaction.followup.send(embed=_err(f"No results found for **{query}**"))
             return
 
-        track_list = tracks[:5]
+        track_list = tracks[:5] if isinstance(tracks, list) else list(tracks.tracks)[:5]
         embed = discord.Embed(
             title       = f"🔍 Search results for: {query}",
             description = "\n".join(
@@ -1092,8 +357,9 @@ class MusicControlsView(discord.ui.View):
     def _guild(self) -> discord.Guild | None:
         return self.bot.get_guild(self.guild_id)
 
-    def _player(self) -> Optional["GuildPlayer"]:
-        return self.cog._players.get(self.guild_id)
+    def _player(self) -> wavelink.Player | None:
+        guild = self._guild()
+        return guild.voice_client if guild else None
 
     async def _refresh(self, interaction: discord.Interaction) -> None:
         player = self._player()
@@ -1102,7 +368,7 @@ class MusicControlsView(discord.ui.View):
         self._update_buttons(player)
         await interaction.response.edit_message(embed=embed, view=self)
 
-    def _update_buttons(self, player: Optional["GuildPlayer"]) -> None:
+    def _update_buttons(self, player: wavelink.Player | None) -> None:
         playing = bool(player and (player.playing or player.paused))
         paused  = bool(player and player.paused)
         self.btn_pause.label    = "▶ Resume" if paused else "⏸ Pause"
@@ -1147,16 +413,16 @@ class MusicControlsView(discord.ui.View):
     @discord.ui.button(label="🎶 Queue", style=discord.ButtonStyle.secondary, row=1)
     async def btn_queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         player = self._player()
-        if not player or (not player.current and player.queue_is_empty()):
+        if not player or (not player.current and player.queue.is_empty):
             await interaction.response.send_message("📭 The queue is empty.", ephemeral=True)
             return
         lines: list[str] = []
         if player.current:
             t = player.current
-            lines.append(f"**Now playing:** [{t.title}]({t.webpage_url}) [{_fmt_duration(t.length)}]")
-        if not player.queue_is_empty():
+            lines.append(f"**Now playing:** [{t.title}]({t.uri}) [{_fmt_duration(t.length)}]")
+        if not player.queue.is_empty:
             lines.append("\n**Up next:**")
-            for i, t in enumerate(player.queue_list()[:10], 1):
+            for i, t in enumerate(list(player.queue)[:10], 1):
                 lines.append(f"`{i}.` **{t.title}** [{_fmt_duration(t.length)}]")
             if len(player.queue) > 10:
                 lines.append(f"… and {len(player.queue) - 10} more")
@@ -1182,21 +448,18 @@ class MusicControlsView(discord.ui.View):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class Music(commands.Cog):
-    """Voice channel music player powered by yt-dlp + FFmpeg."""
+    """Voice channel music player powered by Lavalink via wavelink."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._players: dict[int, GuildPlayer] = {}
         self._last_requester: dict[int, int] = {}
         self._last_request_time: float = 0.0
         self._request_lock = asyncio.Lock()
-        # Prefetch cache: while track N plays, we resolve track N+1's stream
-        # URL in the background so the next song starts instantly.
-        self._prefetch_cache: dict[int, Track] = {}
-        self._prefetch_tasks: dict[int, asyncio.Task] = {}
-        # Resource watchdog — monitors RAM/CPU and auto-stops players if RAM
-        # exceeds MAX_RAM_MB (defined near the top of this file).
-        self._watchdog = _ResourceWatchdog(lambda: self._players)
+
+    # ── Feature toggle gate ───────────────────────────────────────────────────
+    # When MUSIC_FEATURE_DOWN is True, every prefix command (cog_check) and
+    # every slash command (interaction_check) in this cog responds with the
+    # "temporarily down" message instead of running the actual command.
 
     # ── Feature toggle gate ───────────────────────────────────────────────────
     # When MUSIC_FEATURE_DOWN is True, every normal prefix command (cog_check)
@@ -1209,7 +472,6 @@ class Music(commands.Cog):
     _FORCE_COMMAND_NAMES = {
         "forcejoin", "forceplay", "forcestop", "forcepause", "forceresume",
         "forceskip", "forcequeue", "forcenp", "forcevolume", "forcecontrols",
-        "ytdebug",
     }
 
     async def cog_check(self, ctx: commands.Context) -> bool:
@@ -1232,112 +494,99 @@ class Music(commands.Cog):
             return False
         return True
 
-    # ── Setup / teardown ──────────────────────────────────────────────────────
+    # ── Lavalink node setup ───────────────────────────────────────────────────
 
     async def cog_load(self) -> None:
-        if shutil.which("ffmpeg") is None and not _os.environ.get("FFMPEG_PATH"):
-            print(
-                "⚠️  Music: ffmpeg not found on PATH and FFMPEG_PATH is not set. "
-                "Install ffmpeg (e.g. `apt install ffmpeg`) or set FFMPEG_PATH."
+        self.bot.loop.create_task(self._connect_lavalink())
+
+    async def _connect_lavalink(self) -> None:
+        await self.bot.wait_until_ready()
+        await asyncio.sleep(2)
+        nodes = [
+            wavelink.Node(
+                identifier=n["identifier"],
+                uri=f"{'https' if n.get('secure', False) else 'http'}://{n['host']}:{n['port']}",
+                password=n["password"],
             )
-        _ensure_node_available()
-        _ensure_opus_loaded()
-        print("✅ Music: yt-dlp/FFmpeg backend ready (no Lavalink needed)")
+            for n in LAVALINK_NODES
+        ]
+        await wavelink.Pool.connect(nodes=nodes, client=self.bot, cache_capacity=100)
+        print("✅ Music: connected to Lavalink!")
+    
 
-        # Pre-warm: run the JS challenge solver once at startup so the cache
-        # is hot before anyone types !play. This makes the very first song
-        # start in seconds instead of the 2-minute cold-solve delay.
-        # ensure_future wraps the executor future so exceptions are surfaced
-        # in the event loop's exception handler rather than silently dropped.
-        loop = asyncio.get_running_loop()
-        asyncio.ensure_future(loop.run_in_executor(_YDL_EXECUTOR, _prewarm_sync))
-        self._watchdog.start()
+    # ── wavelink events ───────────────────────────────────────────────────────
 
-    async def cog_unload(self) -> None:
-        self._watchdog.stop()
-        for player in list(self._players.values()):
-            await player.disconnect()
-        self._players.clear()
-
-    # ── Track-end handling (replaces wavelink's on_wavelink_track_end) ────────
-
-    async def _prefetch_next(self, guild_id: int, depth: int = 3) -> None:
-        """
-        Background task: while the current track is playing, silently
-        re-resolve the next `depth` queued tracks' stream URLs so they're
-        ready the instant each track ends. This is what eliminates the 2-min
-        wait between songs — the expensive JS challenge + URL fetch happens
-        in the background, not blocking the next play() call.
-
-        depth=3 means we look ahead up to 3 tracks. For playlists this keeps
-        a rolling buffer of pre-resolved URLs so even fast-skippers never wait.
-        """
-        player = self._players.get(guild_id)
-        if not player or player.queue_is_empty():
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload) -> None:
+        player: wavelink.Player = payload.player
+        if not player.queue.is_empty:
+            await player.play(player.queue.get(), volume=100)
             return
 
-        queue_list = list(player.queue)
-        to_prefetch = queue_list[:depth]
-
-        for i, next_queued in enumerate(to_prefetch):
-            # Only prefetch if this slot still looks like it needs resolving
-            # (i.e. hasn't been freshly resolved by a prior prefetch pass).
-            try:
-                fresh = await _resolve_stream_url(next_queued.webpage_url)
-                if fresh:
-                    # Mark as prefetch-fresh so _on_track_end skips re-resolve.
-                    fresh._prefetched = True  # type: ignore[attr-defined]
-                    # Write the refreshed track back into the queue at position i.
-                    if i < len(player.queue):
-                        player.queue[i] = fresh
-                        print(f"[Prefetch] ✅ Pre-resolved [{i+1}/{len(to_prefetch)}]: {fresh.title}")
-                else:
-                    print(f"[Prefetch] ⚠️  Could not pre-resolve [{i+1}]: {next_queued.title}")
-            except Exception as e:
-                print(f"[Prefetch] error for {next_queued.title}: {e}")
-                break  # Don't hammer YouTube if one resolve fails
-
-    async def _on_track_end(self, guild_id: int, track: Track, error: Exception | None) -> None:
-        player = self._players.get(guild_id)
-        if player is None:
-            return
-        if player._stopped:
-            return
-
-        if not player.queue_is_empty():
-            next_track = player.queue.popleft()
-            # Re-resolve stream URL only if prefetch hasn't already done it.
-            # _prefetch_next() writes fresh Track objects back into queue slots
-            # and marks them with _prefetched=True. If that flag is set the URL
-            # is guaranteed fresh (resolved seconds/minutes ago while the
-            # previous track played). Only fall back to a live re-resolve if
-            # prefetch didn't run in time or failed.
-            if not getattr(next_track, "_prefetched", False) and (
-                "googlevideo.com" in next_track.uri
-                or "manifest.googlevideo" in next_track.uri
-            ):
-                fresh = await _resolve_stream_url(next_track.webpage_url)
-                if fresh:
-                    next_track = fresh
-            await player.play(next_track, volume=player.volume)
-            # Kick off prefetch for the tracks after this one
-            asyncio.ensure_future(self._prefetch_next(guild_id))
-            return
-
-        player.current = None
-
-        autoplay = bool(get_setting(f"autoplay_channel_{guild_id}", False))
+        autoplay = bool(get_setting(f"autoplay_channel_{player.guild.id}", False))
         if not autoplay:
             return
 
-        user_id = self._last_requester.get(guild_id)
+        user_id = self._last_requester.get(player.guild.id)
         if not user_id:
             return
 
         history = get_song_history(user_id)
         similar = await _find_similar_track(history)
         if similar:
-            await player.play(similar, volume=player.volume)
+            await player.play(similar, volume=100)
+
+    @commands.Cog.listener()
+    async def on_wavelink_node_ready(self, payload: wavelink.NodeReadyEventPayload) -> None:
+        print(f"✅ Lavalink node ready: {payload.node.uri}  (resumed={payload.resumed})")
+
+    @commands.Cog.listener()
+    async def on_wavelink_track_exception(
+        self, payload: wavelink.TrackExceptionEventPayload
+    ) -> None:
+        """
+        Fires when Lavalink throws a TrackException during playback.
+        If the error is a YouTube login/access block, we silently retry
+        the same song on the self-hosted SoundCloud node instead.
+        """
+        player: wavelink.Player = payload.player
+        track  = payload.track
+
+        # Only handle YouTube login / access errors
+        msg = str(getattr(payload.exception, "message", payload.exception)).lower()
+        is_yt_block = any(k in msg for k in ("login", "not available", "sign in", "403", "blocked"))
+        if not is_yt_block:
+            return  # some other error — let it bubble up normally
+
+        print(
+            f"⚠️  YouTube blocked '{track.title}' "
+            f"(node={payload.node.identifier}) — retrying on SoundCloud node..."
+        )
+
+        # Grab your self-hosted SC node specifically
+        sc_node: wavelink.Node | None = wavelink.Pool.get_node(NODE_SC)
+        if sc_node is None:
+            print("❌  SC fallback node not connected, cannot retry.")
+            return
+
+        # Search SoundCloud on the SC node
+        query   = f"{track.author} {track.title}".strip() if track.author else track.title
+        results = await wavelink.Playable.search(
+            query, source=wavelink.TrackSource.SoundCloud, node=sc_node
+        )
+        if not results:
+            print(f"❌  No SoundCloud result found for '{query}'")
+            return
+
+        fallback: wavelink.Playable = (
+            results[0] if isinstance(results, list) else results.tracks[0]
+        )
+        fallback.extras = track.extras  # preserve requester metadata if any
+
+        # Assign the player to use the SC node for this track
+        player.node = sc_node
+        await player.play(fallback, volume=player.volume)
+        print(f"✅  Now playing SoundCloud fallback: {fallback.title}")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -1348,9 +597,11 @@ class Music(commands.Cog):
         send_fn,
         *,
         connect: bool = True,
-    ) -> Optional[GuildPlayer]:
-        """Return (or create) a GuildPlayer for this guild. Joins VC if needed."""
-        player = self._players.get(guild.id)
+    ) -> wavelink.Player | None:
+        """Return (or create) a Player for this guild. Joins VC if needed."""
+        player: wavelink.Player | None = cast(
+            wavelink.Player | None, guild.voice_client
+        )
 
         if not connect:
             return player
@@ -1361,16 +612,14 @@ class Music(commands.Cog):
 
         channel = author.voice.channel
 
-        if player is None or not player.connected:
+        if player is None:
             try:
-                voice_client = await channel.connect(self_deaf=True)
+                player = await channel.connect(cls=wavelink.Player, self_deaf=True)
             except Exception as e:
                 await send_fn(embed=_err(f"Couldn't connect to VC: {e}"))
                 return None
-            player = GuildPlayer(voice_client, self, guild.id)
-            self._players[guild.id] = player
         elif player.channel != channel:
-            await player.voice_client.move_to(channel)
+            await player.move_to(channel)
 
         return player
 
@@ -1378,7 +627,8 @@ class Music(commands.Cog):
 
     def _controls_embed(self, guild: discord.Guild) -> discord.Embed:
         """Build the now-playing embed for the controls panel."""
-        player = self._players.get(guild.id)
+        player: wavelink.Player | None = guild.voice_client
+        print(f"[Controls] guild={guild.id} player={player} current={getattr(player, 'current', None)} playing={getattr(player, 'playing', None)}")
         if not player or not player.current:
             embed = discord.Embed(
                 title       = "🎵 Music Controls",
@@ -1390,7 +640,7 @@ class Music(commands.Cog):
         status = "⏸ Paused" if player.paused else "▶ Playing"
         embed = discord.Embed(
             title       = "🎵 Music Controls",
-            description = f"**[{t.title}]({t.webpage_url})**",
+            description = f"**[{t.title}]({t.uri})**",
             color       = MUSIC_COLOR,
         )
         embed.add_field(name="Status",   value=status,                    inline=True)
@@ -1407,18 +657,18 @@ class Music(commands.Cog):
 
     async def _pace_request(self, guild_id: int = 0) -> None:
         """
-        Sleep just enough so consecutive user-triggered yt-dlp extraction
-        calls are spaced at least MIN_TRACK_LOAD_GAP seconds apart — avoids
-        hammering YouTube with rapid-fire !play commands across guilds.
-        Background prefetch calls bypass this; they use the dedicated executor.
+        Sleep just enough so consecutive track-load requests sent to Lavalink
+        are spaced at least MIN_TRACK_LOAD_GAP seconds apart — GLOBALLY,
+        across all guilds/users, since they all share the same Lavalink node.
+        Uses a lock so concurrent requests queue up and wait their turn
+        instead of all checking the timestamp simultaneously.
         """
         async with self._request_lock:
-            loop = asyncio.get_running_loop()
-            now = loop.time()
+            now = asyncio.get_event_loop().time()
             wait = MIN_TRACK_LOAD_GAP - (now - self._last_request_time)
             if wait > 0:
                 await asyncio.sleep(wait)
-            self._last_request_time = asyncio.get_running_loop().time()
+            self._last_request_time = asyncio.get_event_loop().time()
 
     async def _do_play(self, guild, author, query: str, send_fn) -> None:
         player = await self._get_player(guild, author, send_fn)
@@ -1427,29 +677,29 @@ class Music(commands.Cog):
 
         await self._pace_request(guild.id)
 
-        # Always use num_results=1 here — _do_play only ever uses tracks[0].
-        # The search picker (/search command) uses num_results=5 separately.
-        # This alone cuts extraction time by ~60% for text queries.
-        tracks, source_used = await _smart_search(query, num_results=1)
+        tracks, source_used = await _smart_search(query)
         if not tracks:
             await send_fn(embed=_err(
                 f"No results found for **{query}**\n"
-                "Try a direct YouTube/SoundCloud link, or a different search term."
+                "Try a Spotify/Deezer/SoundCloud link, or a different search term."
             ))
             return
 
-        track: Track = tracks[0]
+        track: wavelink.Playable = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
 
+        # Source label for user feedback
         source_labels = {
-            "youtube": "YouTube", "soundcloud": "SoundCloud", "none": "Unknown"
+            "youtube": "YouTube", "soundcloud": "SoundCloud",
+            "deezer": "Deezer", "spotify": "Spotify",
+            "applemusic": "Apple Music", "none": "Unknown"
         }
         source_label = source_labels.get(source_used, source_used.title())
 
         if player.playing or player.paused:
-            player.queue_put(track)
+            player.queue.put(track)
             embed = discord.Embed(
                 title       = "➕ Added to Queue",
-                description = f"**[{track.title}]({track.webpage_url})**\n"
+                description = f"**[{track.title}]({track.uri})**\n"
                               f"Position: `#{len(player.queue)}`  |  {_fmt_duration(track.length)}",
                 color       = MUSIC_COLOR,
             )
@@ -1458,43 +708,33 @@ class Music(commands.Cog):
                 embed.set_thumbnail(url=track.artwork)
             await send_fn(embed=embed)
         else:
-            try:
-                await player.play(track, volume=player.volume)
-            except Exception as e:
-                detail = str(e) or e.__class__.__name__
-                print(f"[Play] Playback error ({e.__class__.__name__}): {detail}")
-                await send_fn(embed=_err(f"Playback failed: `{detail}`"))
-                return
-
-            self._last_requester[guild.id] = author.id
+            await player.play(track, volume=100)
+            self._last_requester[player.guild.id] = author.id
             append_song_history(author.id, _track_info(track))
             embed = _track_embed(track, requester=author)
             embed.set_footer(text=f"Source: {source_label}")
             await send_fn(embed=embed)
-            # Start prefetching the next queued track in the background
-            # so it's ready immediately when this track ends.
-            asyncio.ensure_future(self._prefetch_next(guild.id))
 
     async def _do_skip(self, guild, send_fn) -> None:
-        player = self._players.get(guild.id)
+        player: wavelink.Player | None = guild.voice_client
         if not player or not (player.playing or player.paused):
             await send_fn(embed=_err("Nothing is playing right now."))
             return
-        await player.skip()
+        await player.skip(force=True)
         await send_fn("⏭️ Skipped!")
 
     async def _do_stop(self, guild, send_fn) -> None:
-        player = self._players.get(guild.id)
+        player: wavelink.Player | None = guild.voice_client
         if not player:
             await send_fn(embed=_err("I'm not in a voice channel."))
             return
+        player.queue.clear()
         await player.stop()
         await player.disconnect()
-        self._players.pop(guild.id, None)
         await send_fn("⏹️ Stopped and disconnected.")
 
     async def _do_pause(self, guild, send_fn) -> None:
-        player = self._players.get(guild.id)
+        player: wavelink.Player | None = guild.voice_client
         if not player or not player.playing:
             await send_fn(embed=_err("Nothing is playing."))
             return
@@ -1502,18 +742,18 @@ class Music(commands.Cog):
         await send_fn("⏸️ Paused." if player.paused else "▶️ Resumed.")
 
     async def _do_queue(self, guild, send_fn) -> None:
-        player = self._players.get(guild.id)
-        if not player or (not player.current and player.queue_is_empty()):
+        player: wavelink.Player | None = guild.voice_client
+        if not player or (not player.current and player.queue.is_empty):
             await send_fn("📭 The queue is empty.")
             return
 
         lines: list[str] = []
         if player.current:
             t = player.current
-            lines.append(f"**Now playing:** [{t.title}]({t.webpage_url}) [{_fmt_duration(t.length)}]")
-        if not player.queue_is_empty():
+            lines.append(f"**Now playing:** [{t.title}]({t.uri}) [{_fmt_duration(t.length)}]")
+        if not player.queue.is_empty:
             lines.append("\n**Up next:**")
-            for i, t in enumerate(player.queue_list()[:10], 1):
+            for i, t in enumerate(list(player.queue)[:10], 1):
                 lines.append(f"`{i}.` **{t.title}** [{_fmt_duration(t.length)}]")
             if len(player.queue) > 10:
                 lines.append(f"… and {len(player.queue) - 10} more")
@@ -1522,7 +762,7 @@ class Music(commands.Cog):
         await send_fn(embed=embed)
 
     async def _do_np(self, guild, send_fn) -> None:
-        player = self._players.get(guild.id)
+        player: wavelink.Player | None = guild.voice_client
         if not player or not player.current:
             await send_fn(embed=_err("Nothing is playing right now."))
             return
@@ -1532,7 +772,7 @@ class Music(commands.Cog):
         if not (0 <= vol <= 100):
             await send_fn(embed=_err("Volume must be between 0 and 100."))
             return
-        player = self._players.get(guild.id)
+        player: wavelink.Player | None = guild.voice_client
         if not player:
             await send_fn(embed=_err("I'm not in a voice channel."))
             return
@@ -1543,7 +783,7 @@ class Music(commands.Cog):
 
     async def _send_controls(self, guild, send_fn) -> None:
         view   = MusicControlsView(cog=self, guild=guild)
-        player = self._players.get(guild.id)
+        player = guild.voice_client
         view._update_buttons(player)
         embed  = self._controls_embed(guild)
         await send_fn(embed=embed, view=view)
@@ -1621,7 +861,7 @@ class Music(commands.Cog):
 
     @commands.command(name="resume")
     async def prefix_resume(self, ctx: commands.Context) -> None:
-        player = self._players.get(ctx.guild.id)
+        player: wavelink.Player | None = ctx.guild.voice_client
         if not player or not player.paused:
             await ctx.reply(embed=_err("Nothing is paused."))
             return
@@ -1639,7 +879,7 @@ class Music(commands.Cog):
     @commands.command(name="volume", aliases=["vol"])
     async def prefix_volume(self, ctx: commands.Context, level: int = -1) -> None:
         if level == -1:
-            player = self._players.get(ctx.guild.id)
+            player: wavelink.Player | None = ctx.guild.voice_client
             vol = player.volume if player else 100
             await ctx.reply(f"🔊 Current volume: **{vol}%**")
             return
@@ -1694,15 +934,12 @@ class Music(commands.Cog):
         if not player:
             return
 
-        # Resolve all playlist tracks in parallel — gathering them concurrently
-        # is far faster than the old sequential loop (N tracks × ~2s each).
-        # _resolve_saved_track is async and uses the YDL executor internally,
-        # so gather just overlaps the executor waits, not the GIL.
-        resolved_results = await asyncio.gather(
-            *[_resolve_saved_track(info) for info in tracks],
-            return_exceptions=False,
-        )
-        playable_tracks: list[Track] = [t for t in resolved_results if t is not None]
+        playable_tracks: list[wavelink.Playable] = []
+        for info in tracks:
+            await self._pace_request(ctx.guild.id)
+            resolved = await _resolve_saved_track(info)
+            if resolved:
+                playable_tracks.append(resolved)
 
         if not playable_tracks:
             await ctx.reply("❌ Could not load any songs from that playlist.")
@@ -1710,14 +947,14 @@ class Music(commands.Cog):
 
         if player.playing or player.paused:
             for track in playable_tracks:
-                player.queue_put(track)
+                player.queue.put(track)
             await ctx.reply(f"✅ Added **{len(playable_tracks)}** songs from `{key}` to the queue.")
         else:
-            await player.play(playable_tracks[0], volume=player.volume)
+            await player.play(playable_tracks[0], volume=100)
             self._last_requester[ctx.guild.id] = ctx.author.id
             append_song_history(ctx.author.id, _track_info(playable_tracks[0]))
             for track in playable_tracks[1:]:
-                player.queue_put(track)
+                player.queue.put(track)
             await ctx.reply(embed=_track_embed(playable_tracks[0], requester=ctx.author))
 
     @prefix_playlist.command(name="add")
@@ -1726,7 +963,7 @@ class Music(commands.Cog):
         if not tracks:
             await ctx.reply(f"❌ No results found for **{query}**")
             return
-        track = tracks[0]
+        track = tracks[0] if isinstance(tracks, list) else tracks.tracks[0]
         playlist = get_user_playlists(ctx.author.id)
         key = next((k for k in playlist if k.lower() == name.lower()), name)
         tracks_data = playlist.get(key, [])
@@ -1760,128 +997,6 @@ class Music(commands.Cog):
     # These bypass MUSIC_FEATURE_DOWN entirely (cog_check already allows the
     # bot owner through), so you can test the VC/music backend even while it
     # shows "temporarily down" to everyone else.
-
-    @commands.command(name="ytdebug")
-    @commands.is_owner()
-    async def prefix_ytdebug(self, ctx: commands.Context, *, query: str = "") -> None:
-        """
-        Owner-only diagnostic: dumps yt-dlp's raw format list + any
-        warnings/errors for a URL or search query, straight to Discord.
-
-        Also shows JS runtime availability and which player clients succeeded,
-        so you can tell at a glance whether the no-JS-runtime fix is working.
-        """
-        if not query:
-            await ctx.reply(
-                "**Usage:** `!ytdebug <YouTube URL or search terms>`\n"
-                "This dumps format availability, JS runtime status, and "
-                "per-client results so you can diagnose playback failures."
-            )
-            return
-
-        await ctx.reply(f"🔍 Running yt-dlp diagnostics for: `{query}` …")
-
-        def _run_debug() -> str:
-            import io
-            import contextlib
-
-            buf = io.StringIO()
-
-            # ── 1. JS runtime availability ───────────────────────────────
-            buf.write("=== JS Runtime Check ===\n")
-            for rt in ("node", "nodejs", "deno", "bun"):
-                path = shutil.which(rt)
-                if path:
-                    try:
-                        import subprocess as _sp
-                        r = _sp.run([path, "--version"], capture_output=True, text=True, timeout=5)
-                        ver = r.stdout.strip()
-                        buf.write(f"  {rt:8s}: ✅ {path} ({ver})\n")
-                    except Exception:
-                        buf.write(f"  {rt:8s}: ✅ {path} (version check failed)\n")
-                else:
-                    buf.write(f"  {rt:8s}: ❌ not found\n")
-            buf.write(f"\n  Detected Node22+ path for yt-dlp: {_NODE22_PATH or '❌ NONE FOUND'}\n")
-
-            # ── 2. Active player_client setting ─────────────────────────
-            clients = (
-                YTDLP_FORMAT_OPTIONS.get("extractor_args", {})
-                .get("youtube", {})
-                .get("player_client", ["(auto)"])
-            )
-            buf.write(f"\n=== Player clients in use: {clients} ===\n")
-
-            # ── 3. Format extraction ─────────────────────────────────────
-            buf.write("\n=== yt-dlp extraction ===\n")
-            opts = dict(YTDLP_FORMAT_OPTIONS)
-            opts["quiet"] = False
-            opts["no_warnings"] = False
-            opts["verbose"] = True
-            opts["logger"] = None
-            opts["js_runtimes"] = {
-                "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
-                "deno": {},
-            }
-            is_url = bool(_URL_RE.match(query.strip()))
-            target = query.strip() if is_url else f"ytsearch1:{query.strip()}"
-
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(target, download=False)
-                    if info:
-                        entries = (
-                            info.get("entries", [info])
-                            if "entries" in info
-                            else [info]
-                        )
-                        for e in entries:
-                            if not e:
-                                continue
-                            fmts = e.get("formats") or []
-                            audio_fmts = [
-                                f for f in fmts
-                                if f.get("acodec") not in (None, "none")
-                                and f.get("url")
-                            ]
-                            buf.write(
-                                f"\n--- {e.get('title')} ({e.get('id')}) ---\n"
-                                f"Total formats: {len(fmts)}  |  "
-                                f"Audio-bearing with URL: {len(audio_fmts)}\n"
-                            )
-                            if not audio_fmts:
-                                buf.write(
-                                    "  ⚠️  NO usable audio formats — "
-                                    "this is why playback fails!\n"
-                                )
-                            for f in fmts[:30]:
-                                has_url = bool(f.get("url"))
-                                acodec = f.get("acodec") or "none"
-                                vcodec = f.get("vcodec") or "none"
-                                marker = "🔊" if (has_url and acodec != "none") else "  "
-                                buf.write(
-                                    f"  {marker} id={f.get('format_id')!s:>6} "
-                                    f"ext={f.get('ext')!s:>5} "
-                                    f"acodec={acodec!s:>10} "
-                                    f"vcodec={vcodec!s:>10} "
-                                    f"proto={f.get('protocol')!s:>10} "
-                                    f"url={'✅' if has_url else '❌'} "
-                                    f"client={f.get('format_note', '')}\n"
-                                )
-                except Exception as e:
-                    buf.write(f"\nEXCEPTION: {e.__class__.__name__}: {e}\n")
-            return buf.getvalue()
-
-        loop = asyncio.get_running_loop()
-        output = await loop.run_in_executor(_YDL_EXECUTOR, _run_debug)
-
-        chunk_size = 1900
-        if not output.strip():
-            await ctx.send("(no output captured)")
-            return
-        for i in range(0, len(output), chunk_size):
-            chunk = output[i:i + chunk_size]
-            await ctx.send(f"```\n{chunk}\n```")
 
     @commands.command(name="forcejoin", aliases=["fjoin"])
     @commands.is_owner()
@@ -1954,7 +1069,7 @@ class Music(commands.Cog):
     @commands.is_owner()
     async def prefix_forceresume(self, ctx: commands.Context) -> None:
         """Owner-only: force resume playback, bypassing feature-down."""
-        player = self._players.get(ctx.guild.id)
+        player: wavelink.Player | None = ctx.guild.voice_client
         if not player or not player.paused:
             await ctx.reply(embed=_err("Nothing is paused."))
             return
@@ -2027,7 +1142,7 @@ class Music(commands.Cog):
     ) -> None:
         if member.bot:
             return
-        player = self._players.get(member.guild.id)
+        player: wavelink.Player | None = member.guild.voice_client
         if not player:
             return
         if before.channel == player.channel and len(player.channel.members) == 1:
@@ -2035,7 +1150,6 @@ class Music(commands.Cog):
             if player.channel and len(player.channel.members) == 1:
                 player.queue.clear()
                 await player.disconnect()
-                self._players.pop(member.guild.id, None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2044,4 +1158,4 @@ class Music(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Music(bot))
-    print("✅ Music cog loaded (yt-dlp + FFmpeg backend)")
+    print("✅ Music cog loaded")
