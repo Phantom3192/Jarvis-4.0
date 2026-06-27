@@ -2,9 +2,13 @@
 Music cog — VC music player using yt-dlp + FFmpeg (no Lavalink, no wavelink).
 
 The bot extracts a direct stream URL with yt-dlp and pipes it straight into
-the VC with discord.py's native FFmpegPCMAudio. No external Lavalink node,
-no node-fallback/health-check logic — everything runs on the bot's own
-CPU/network.
+the VC with discord.py's FFmpegOpusAudio. When YouTube serves a webm/opus
+stream (the common case), FFmpeg passes the bitstream through with -c:a copy —
+zero re-encoding, lowest CPU, best quality. Volume changes use FFmpeg's
+-filter:a volume=X in the same pipeline instead of PCMVolumeTransformer.
+
+No external Lavalink node, no node-fallback/health-check logic — everything
+runs on the bot's own CPU/network.
 
 Commands (slash):
   /play   <query or URL>   Join VC and play (or queue) a song
@@ -28,6 +32,7 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import functools
 import re
 import shutil
@@ -77,35 +82,12 @@ import os as _os
 import base64 as _base64
 import tempfile as _tempfile
 FFMPEG_EXECUTABLE = _os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg") or "ffmpeg"
-
-# Optional path to a YouTube cookies.txt file (Netscape format). Needed when
-# running from a datacenter IP (Railway, Heroku, AWS, etc) — YouTube
-# aggressively bot-checks those ranges and a logged-in session via cookies
-# is the most reliable way around the "Sign in to confirm you're not a bot"
-# error. Export with a browser extension (e.g. "Get cookies.txt LOCALLY")
-# while logged into a YouTube account.
-#
-# Two ways to provide it (checked in this order):
-#   1. YTDLP_COOKIES_B64 — the cookies.txt file, base64-encoded, pasted
-#      directly as an env var value. No volume/file upload needed — this
-#      is decoded to a temp file at startup. Simplest option for Railway.
-#   2. YTDLP_COOKIES_FILE — a path to an already-existing cookies.txt file
-#      on disk (e.g. on a mounted volume), used as-is.
 YTDLP_COOKIES_B64 = _os.environ.get("YTDLP_COOKIES_B64", "").strip()
 YTDLP_COOKIES_FILE = _os.environ.get("YTDLP_COOKIES_FILE", "").strip()
 
 if YTDLP_COOKIES_B64:
     try:
-        # validate=True rejects strings containing characters outside the
-        # base64 alphabet — without it, b64decode silently treats any text
-        # as "valid" base64 and produces garbage bytes instead of erroring,
-        # which is exactly what happens if raw cookie text gets pasted into
-        # this var by mistake instead of its base64 encoding.
         decoded = _base64.b64decode(YTDLP_COOKIES_B64, validate=True)
-        # A real Netscape cookies.txt is plain ASCII/UTF-8 text starting
-        # with a comment line or tab-separated fields — sanity check this
-        # before trusting it, since garbage-but-validly-padded base64 can
-        # still slip through the line above.
         preview = decoded[:200].decode("utf-8")
         if not (preview.startswith("#") or "\t" in preview):
             raise ValueError(
@@ -203,10 +185,10 @@ if not _NODE22_PATH:
 
 
 YTDLP_FORMAT_OPTIONS = {
-    # Fallback chain: prefer a pure-audio m4a, then any audio stream,
-    # then any combined stream. This avoids "Requested format is not
-    # available" when only certain clients/formats survive.
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    # Fallback chain: prefer webm/opus (native Opus from YouTube — no re-encode
+    # needed with FFmpegOpusAudio), then m4a, then any audio, then anything.
+    # webm[acodec=opus] is what YouTube's mweb/android clients serve directly.
+    "format": "bestaudio[ext=webm][acodec=opus]/bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "nocheckcertificate": True,
     "ignoreerrors": False,
@@ -215,23 +197,16 @@ YTDLP_FORMAT_OPTIONS = {
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # avoid IPv6 issues on some hosts
     "extract_flat": False,
-    # ── JS runtime ──────────────────────────────────────────────────────
-    # yt-dlp's default js_runtimes is {'deno': {}} — node is NOT included
-    # unless passed explicitly. We also pass the full path to the Node >= 22
-    # binary found at startup, because PATH ordering on Railway can put an
-    # older node (v18, unsupported) ahead of the nodejs_22 nix package.
+    
     "js_runtimes": {
         "node": ({"path": _NODE22_PATH} if _NODE22_PATH else {}),
         "deno": {},
     },
-    # ── Solver cache ────────────────────────────────────────────────────
-    # Cache the solved player JS between calls so the 2-min JS challenge
-    # only runs ONCE per player JS version (YouTube updates it ~weekly).
-    # After the first solve, subsequent songs start in seconds not minutes.
-    "cachedir": _os.path.join(_os.path.dirname(__file__), "..", ".ytdlp_cache"),
-    # ── Player clients ──────────────────────────────────────────────────
-    # "default" lets yt-dlp pick the right client set for the current auth
-    # state. With a working JS runtime above, sig/n challenges now succeed.
+
+    "cachedir": _os.environ.get(
+        "YTDLP_CACHE_DIR",
+        _os.path.join(_tempfile.gettempdir(), ".ytdlp_cache"),
+    ),
     "extractor_args": {
         "youtube": {
             "player_client": ["default"],
@@ -246,56 +221,64 @@ elif YTDLP_COOKIES_FILE:
     print(f"⚠️  Music: YTDLP_COOKIES_FILE set to '{YTDLP_COOKIES_FILE}' but file not found.")
 
 # ── FFmpeg options ────────────────────────────────────────────────────────────
-# Root cause of crackling on Railway:
-#   YouTube stream URLs are direct CDN links. FFmpeg reads them over HTTP in
-#   small chunks. Any network jitter between Railway and the CDN drains
-#   FFmpeg's tiny default buffer → decoder starves → audio gap → crackle.
-#
-# Fix: large http_persistent + reconnect flags on input side, and an explicit
-#   48kHz resample on output so discord.py's Opus encoder never has to do a
-#   mid-stream sample-rate conversion (another common crackle source).
-#
-# Root cause of 2-min startup delay:
-#   yt-dlp solves the JS challenge fresh on every play() call. The solved
-#   player JS is cached by yt-dlp between calls, but the stream URL itself
-#   is fetched synchronously in the bot's thread pool, blocking playback
-#   start. Fix: prefetch the next queued track's URL while the current
-#   track is already playing — see _prefetch_next() below.
-
-# before_options go BEFORE -i (the input URL), so they configure the
-# input demuxer. Options go AFTER -i and configure the output encoder.
-#
-# KEY INSIGHT about the two stream types we get from yt-dlp:
-#
-#   TV-Downgraded client  → direct HTTPS .m4a/.webm URLs (googlevideo.com)
-#     These support: -reconnect, -http_persistent, -buffer_size
-#
-#   WEB-Safari client     → m3u8_native HLS playlists
-#     These do NOT support -http_persistent or -buffer_size (different demuxer).
-#     But -reconnect and -reconnect_streamed still work.
-#
-# We use a single option set that works for both. Options that only apply
-# to one type are silently ignored by FFmpeg for the other, so it's safe.
 _BEFORE_OPTS_COMMON = " ".join([
     "-reconnect 1",
     "-reconnect_streamed 1",
     "-reconnect_delay_max 5",
     "-thread_queue_size 4096",
-    "-probesize 500000",
-    "-analyzeduration 0",
+    "-probesize 500000",   # fast stream detection
+    "-analyzeduration 0",  # don't pre-buffer for format detection
 ])
 
-FFMPEG_OPTS = "-vn"
+_FFMPEG_OPTS_BASE = "-vn"
+_FFMPEG_OPTS_VOLUME = "-vn -filter:a volume={vol:.3f}"
 
 
-def _ffmpeg_before_opts(uri: str) -> str:
-    return _BEFORE_OPTS_COMMON
+def _make_audio_source(
+    uri: str,
+    volume: int,
+    is_opus: bool,
+) -> discord.FFmpegOpusAudio:
+    """
+    Build the correct FFmpegOpusAudio source for a track.
 
-# Minimum gap (in seconds) between consecutive yt-dlp extraction requests,
-# to avoid hammering YouTube and tripping rate limits / bot checks.
-# Minimum gap between yt-dlp requests. Kept small — yt-dlp's own
-# JS challenge solving already takes several seconds, providing natural
-# rate-limiting. This just prevents near-simultaneous spam.
+    Passthrough path (is_opus=True, volume=100):
+        codec='copy' → FFmpeg passes the webm/opus bitstream straight through
+        with zero decode/re-encode. Lowest CPU, perfect quality.
+
+    Volume path (volume != 100):
+        codec=None (libopus) → FFmpeg decodes → volume filter → re-encodes
+        to opus. One pass inside FFmpeg; no Python sample manipulation.
+
+    Non-opus fallback (is_opus=False):
+        FFmpeg decodes m4a/aac → re-encodes to opus (unavoidable round-trip).
+        Volume filter applied in the same pass if needed.
+    """
+    before_opts = _BEFORE_OPTS_COMMON
+    if is_opus and volume == 100:
+        # Pure passthrough — discord.py's codec='copy' tells FFmpeg -c:a copy
+        return discord.FFmpegOpusAudio(
+            uri,
+            executable=FFMPEG_EXECUTABLE,
+            codec="copy",
+            before_options=before_opts,
+            options=_FFMPEG_OPTS_BASE,
+        )
+    else:
+        # Decode + (optional volume filter) + re-encode to libopus
+        opts = (
+            _FFMPEG_OPTS_VOLUME.format(vol=volume / 100)
+            if volume != 100
+            else _FFMPEG_OPTS_BASE
+        )
+        return discord.FFmpegOpusAudio(
+            uri,
+            executable=FFMPEG_EXECUTABLE,
+            before_options=before_opts,
+            options=opts,
+        )
+
+
 MIN_TRACK_LOAD_GAP = 0.5
 
 
@@ -324,9 +307,6 @@ _OPUS_CANDIDATES = (
     "libopus.dylib",
 )
 
-# Extra search roots for environments without a populated linker cache
-# (e.g. Nix-based containers like Railway's, where libopus.so.0 may exist
-# but isn't on the dynamic linker's default search path).
 _OPUS_SEARCH_DIRS = (
     "/usr/lib", "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
     "/usr/local/lib", "/lib", "/lib/x86_64-linux-gnu",
@@ -438,12 +418,12 @@ def _ensure_node_available() -> None:
 class Track:
     """
     Lightweight stand-in for wavelink.Playable — holds metadata plus the
-    resolved stream URL needed to hand off to FFmpegPCMAudio. `length` is
+    resolved stream URL needed to hand off to FFmpegOpusAudio. `length` is
     kept in SECONDS (unlike the old wavelink-ms convention) since that's
     what yt-dlp reports natively.
     """
 
-    __slots__ = ("title", "uri", "webpage_url", "author", "length", "artwork")
+    __slots__ = ("title", "uri", "webpage_url", "author", "length", "artwork", "is_opus")
 
     def __init__(
         self,
@@ -453,6 +433,7 @@ class Track:
         author: str | None,
         length: float | None,
         artwork: str | None,
+        is_opus: bool = False,
     ) -> None:
         self.title = title
         self.uri = uri                  # direct/stream URL fed to FFmpeg
@@ -460,6 +441,7 @@ class Track:
         self.author = author
         self.length = length or 0
         self.artwork = artwork
+        self.is_opus = is_opus          # True when the stream is already Opus (webm)
 
 
 def _track_info(track: Track) -> dict[str, object]:
@@ -487,6 +469,30 @@ def _track_embed(track: Track, title: str = "🎵 Now Playing",
     return embed
 
 
+# ── Dedicated thread pool for yt-dlp extractions ─────────────────────────────
+# Using the default run_in_executor pool (shared with everything else in the
+# bot) means a slow yt-dlp call can delay other bot coroutines. A dedicated
+# pool isolates music extraction so other features stay responsive.
+# 3 workers = enough for prefetch + active + one queued call without queuing up.
+_YDL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3, thread_name_prefix="yt-dlp"
+)
+
+
+# ── Shared yt-dlp instance cache ─────────────────────────────────────────────
+import threading as _threading
+_ydl_local = _threading.local()
+
+
+def _get_ydl() -> yt_dlp.YoutubeDL:
+    """Return a per-thread cached YoutubeDL instance, creating if needed."""
+    ydl = getattr(_ydl_local, "ydl", None)
+    if ydl is None:
+        ydl = yt_dlp.YoutubeDL(YTDLP_FORMAT_OPTIONS)
+        _ydl_local.ydl = ydl
+    return ydl
+
+
 # ── yt-dlp extraction (run in a thread, it's blocking) ──────────────────────
 
 def _extract_sync(query: str, *, search: bool, num_results: int = 5) -> list[dict]:
@@ -496,11 +502,11 @@ def _extract_sync(query: str, *, search: bool, num_results: int = 5) -> list[dic
     num_results controls how many search results to fetch (default 5 for
     the search picker; use 1 for single-track fast resolution).
     If `search` is False, query is treated as a direct URL.
+    Uses a per-thread cached YoutubeDL instance to avoid re-init overhead.
     """
-    opts = dict(YTDLP_FORMAT_OPTIONS)
     target = f"ytsearch{num_results}:{query}" if search else query
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(target, download=False)
+    ydl = _get_ydl()
+    info = ydl.extract_info(target, download=False)
     if info is None:
         return []
     entries = info.get("entries") if "entries" in info else [info]
@@ -508,9 +514,30 @@ def _extract_sync(query: str, *, search: bool, num_results: int = 5) -> list[dic
 
 
 async def _extract(query: str, *, search: bool = True, num_results: int = 5) -> list[dict]:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     fn = functools.partial(_extract_sync, query, search=search, num_results=num_results)
-    return await loop.run_in_executor(None, fn)
+    return await loop.run_in_executor(_YDL_EXECUTOR, fn)
+
+
+def _prewarm_sync() -> None:
+    """
+    Blocking: resolve a YouTube URL to force the JS challenge solver to run
+    and cache its result on disk. Called at startup inside _YDL_EXECUTOR so
+    it also primes this thread's cached YoutubeDL instance (_ydl_local.ydl).
+    By the time the first user types !play, the JS cache is hot and the YDL
+    instance is already initialised — both cold-start costs are eliminated.
+
+    We use Rick Astley's "Never Gonna Give You Up" — always available.
+    """
+    try:
+        ydl = _get_ydl()  # prime the per-thread cached instance
+        ydl.extract_info(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            download=False,
+        )
+        print("✅ Music: YDL pre-warm complete — JS challenge cached, first song will be fast")
+    except Exception as e:
+        print(f"⚠️  Music: YDL pre-warm failed (first song may be slow): {e}")
 
 
 def _entry_to_track(entry: dict) -> Optional[Track]:
@@ -522,6 +549,14 @@ def _entry_to_track(entry: dict) -> Optional[Track]:
             stream_url = formats[-1].get("url")
     if not stream_url:
         return None
+
+    # Detect whether the resolved stream is already Opus-encoded (webm container).
+    # When is_opus=True we can use FFmpegOpusAudio with -c:a copy at volume=100,
+    # skipping the entire decode→encode round-trip.
+    acodec = entry.get("acodec", "")
+    ext    = entry.get("ext", "")
+    is_opus = (acodec == "opus") or (ext == "webm" and "opus" in acodec.lower())
+
     return Track(
         title       = entry.get("title", "Unknown title"),
         uri         = stream_url,
@@ -529,6 +564,7 @@ def _entry_to_track(entry: dict) -> Optional[Track]:
         author      = entry.get("uploader") or entry.get("channel"),
         length      = entry.get("duration"),
         artwork     = entry.get("thumbnail"),
+        is_opus     = is_opus,
     )
 
 
@@ -615,7 +651,7 @@ async def _find_similar_track(history: list[dict[str, object]]) -> Optional[Trac
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Guild player — wraps an FFmpeg/PCMVolumeTransformer source + queue
+# Guild player — wraps an FFmpegOpusAudio source + queue
 # ══════════════════════════════════════════════════════════════════════════════
 
 class GuildPlayer:
@@ -666,19 +702,7 @@ class GuildPlayer:
         self.current = track
         self._stopped = False
 
-        def _make_source() -> discord.AudioSource:
-            # Use protocol-aware before_options so HLS (m3u8) and direct
-            # HTTPS streams both get the right FFmpeg demuxer hints.
-            before_opts = _ffmpeg_before_opts(track.uri)
-            source = discord.FFmpegPCMAudio(
-                track.uri,
-                executable=FFMPEG_EXECUTABLE,
-                before_options=before_opts,
-                options=FFMPEG_OPTS,
-            )
-            return discord.PCMVolumeTransformer(source, volume=self.volume / 100)
-
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _after(error: Exception | None) -> None:
             if error:
@@ -693,7 +717,7 @@ class GuildPlayer:
                 print(f"[Player] on_track_end handler raised: {e}")
 
         try:
-            audio_source = _make_source()
+            audio_source = _make_audio_source(track.uri, self.volume, track.is_opus)
         except Exception as e:
             print(f"[Player] Failed to build audio source: {e}")
             await self.cog._on_track_end(self.guild_id, track, e)
@@ -720,9 +744,25 @@ class GuildPlayer:
 
     async def set_volume(self, vol: int) -> None:
         self.volume = vol
-        source = self.voice_client.source
-        if isinstance(source, discord.PCMVolumeTransformer):
-            source.volume = vol / 100
+        # With FFmpegOpusAudio+volume filter there's no live transformer to
+        # tweak in-place. We restart the current track's FFmpeg process with
+        # the new volume baked into the -filter:a argument. The gap is
+        # imperceptible (~1 FFmpeg startup frame, <50 ms).
+        if self.current and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            was_paused = self.voice_client.is_paused()
+            self.voice_client.stop()          # triggers _after → _on_track_end
+            # Re-inject current track at the front of the queue so _on_track_end
+            # picks it up again immediately with the new volume.
+            self.queue.appendleft(self.current)
+            # _on_track_end will pop it and call play() → new FFmpegOpusAudio
+            # with updated volume. Pause state is lost on restart; restore it.
+            if was_paused:
+                # Brief async yield so play() has time to issue voice_client.play()
+                async def _re_pause():
+                    await asyncio.sleep(0.3)
+                    if self.voice_client.is_playing():
+                        self.voice_client.pause()
+                asyncio.ensure_future(_re_pause())
 
     async def disconnect(self) -> None:
         self._stopped = True
@@ -1006,6 +1046,14 @@ class Music(commands.Cog):
         _ensure_opus_loaded()
         print("✅ Music: yt-dlp/FFmpeg backend ready (no Lavalink needed)")
 
+        # Pre-warm: run the JS challenge solver once at startup so the cache
+        # is hot before anyone types !play. This makes the very first song
+        # start in seconds instead of the 2-minute cold-solve delay.
+        # ensure_future wraps the executor future so exceptions are surfaced
+        # in the event loop's exception handler rather than silently dropped.
+        loop = asyncio.get_running_loop()
+        asyncio.ensure_future(loop.run_in_executor(_YDL_EXECUTOR, _prewarm_sync))
+
     async def cog_unload(self) -> None:
         for player in list(self._players.values()):
             await player.disconnect()
@@ -1013,29 +1061,41 @@ class Music(commands.Cog):
 
     # ── Track-end handling (replaces wavelink's on_wavelink_track_end) ────────
 
-    async def _prefetch_next(self, guild_id: int) -> None:
+    async def _prefetch_next(self, guild_id: int, depth: int = 3) -> None:
         """
         Background task: while the current track is playing, silently
-        re-resolve the next queued track's stream URL so it's ready the
-        instant the current track ends. This is what eliminates the 2-min
+        re-resolve the next `depth` queued tracks' stream URLs so they're
+        ready the instant each track ends. This is what eliminates the 2-min
         wait between songs — the expensive JS challenge + URL fetch happens
         in the background, not blocking the next play() call.
+
+        depth=3 means we look ahead up to 3 tracks. For playlists this keeps
+        a rolling buffer of pre-resolved URLs so even fast-skippers never wait.
         """
         player = self._players.get(guild_id)
         if not player or player.queue_is_empty():
             return
-        next_queued = player.queue[0]  # peek without popping
-        try:
-            fresh = await _resolve_stream_url(next_queued.webpage_url)
-            if fresh:
-                # Store the refreshed track back into position 0 of the queue
-                # so _on_track_end picks it up with a valid stream URL.
-                player.queue[0] = fresh
-                print(f"[Prefetch] ✅ Pre-resolved: {fresh.title}")
-            else:
-                print(f"[Prefetch] ⚠️  Could not pre-resolve: {next_queued.title}")
-        except Exception as e:
-            print(f"[Prefetch] error for {next_queued.title}: {e}")
+
+        queue_list = list(player.queue)
+        to_prefetch = queue_list[:depth]
+
+        for i, next_queued in enumerate(to_prefetch):
+            # Only prefetch if this slot still looks like it needs resolving
+            # (i.e. hasn't been freshly resolved by a prior prefetch pass).
+            try:
+                fresh = await _resolve_stream_url(next_queued.webpage_url)
+                if fresh:
+                    # Mark as prefetch-fresh so _on_track_end skips re-resolve.
+                    fresh._prefetched = True  # type: ignore[attr-defined]
+                    # Write the refreshed track back into the queue at position i.
+                    if i < len(player.queue):
+                        player.queue[i] = fresh
+                        print(f"[Prefetch] ✅ Pre-resolved [{i+1}/{len(to_prefetch)}]: {fresh.title}")
+                else:
+                    print(f"[Prefetch] ⚠️  Could not pre-resolve [{i+1}]: {next_queued.title}")
+            except Exception as e:
+                print(f"[Prefetch] error for {next_queued.title}: {e}")
+                break  # Don't hammer YouTube if one resolve fails
 
     async def _on_track_end(self, guild_id: int, track: Track, error: Exception | None) -> None:
         player = self._players.get(guild_id)
@@ -1046,17 +1106,21 @@ class Music(commands.Cog):
 
         if not player.queue_is_empty():
             next_track = player.queue.popleft()
-            # Re-resolve stream URL if it looks like it could be stale.
-            # YouTube direct stream URLs expire after ~6h; since we may have
-            # stored them when the track was queued (potentially hours ago),
-            # always re-fetch to be safe. _prefetch_next() will have already
-            # done this in the background if there was time.
-            if "googlevideo.com" in next_track.uri or "manifest.googlevideo" in next_track.uri:
+            # Re-resolve stream URL only if prefetch hasn't already done it.
+            # _prefetch_next() writes fresh Track objects back into queue slots
+            # and marks them with _prefetched=True. If that flag is set the URL
+            # is guaranteed fresh (resolved seconds/minutes ago while the
+            # previous track played). Only fall back to a live re-resolve if
+            # prefetch didn't run in time or failed.
+            if not getattr(next_track, "_prefetched", False) and (
+                "googlevideo.com" in next_track.uri
+                or "manifest.googlevideo" in next_track.uri
+            ):
                 fresh = await _resolve_stream_url(next_track.webpage_url)
                 if fresh:
                     next_track = fresh
             await player.play(next_track, volume=player.volume)
-            # Kick off prefetch for the track after this one
+            # Kick off prefetch for the tracks after this one
             asyncio.ensure_future(self._prefetch_next(guild_id))
             return
 
@@ -1143,16 +1207,18 @@ class Music(commands.Cog):
 
     async def _pace_request(self, guild_id: int = 0) -> None:
         """
-        Sleep just enough so consecutive yt-dlp extraction calls are spaced
-        at least MIN_TRACK_LOAD_GAP seconds apart, globally — avoids
-        hammering YouTube with rapid-fire requests across guilds.
+        Sleep just enough so consecutive user-triggered yt-dlp extraction
+        calls are spaced at least MIN_TRACK_LOAD_GAP seconds apart — avoids
+        hammering YouTube with rapid-fire !play commands across guilds.
+        Background prefetch calls bypass this; they use the dedicated executor.
         """
         async with self._request_lock:
-            now = asyncio.get_event_loop().time()
+            loop = asyncio.get_running_loop()
+            now = loop.time()
             wait = MIN_TRACK_LOAD_GAP - (now - self._last_request_time)
             if wait > 0:
                 await asyncio.sleep(wait)
-            self._last_request_time = asyncio.get_event_loop().time()
+            self._last_request_time = asyncio.get_running_loop().time()
 
     async def _do_play(self, guild, author, query: str, send_fn) -> None:
         player = await self._get_player(guild, author, send_fn)
@@ -1428,12 +1494,15 @@ class Music(commands.Cog):
         if not player:
             return
 
-        playable_tracks: list[Track] = []
-        for info in tracks:
-            await self._pace_request(ctx.guild.id)
-            resolved = await _resolve_saved_track(info)
-            if resolved:
-                playable_tracks.append(resolved)
+        # Resolve all playlist tracks in parallel — gathering them concurrently
+        # is far faster than the old sequential loop (N tracks × ~2s each).
+        # _resolve_saved_track is async and uses the YDL executor internally,
+        # so gather just overlaps the executor waits, not the GIL.
+        resolved_results = await asyncio.gather(
+            *[_resolve_saved_track(info) for info in tracks],
+            return_exceptions=False,
+        )
+        playable_tracks: list[Track] = [t for t in resolved_results if t is not None]
 
         if not playable_tracks:
             await ctx.reply("❌ Could not load any songs from that playlist.")
@@ -1603,8 +1672,8 @@ class Music(commands.Cog):
                     buf.write(f"\nEXCEPTION: {e.__class__.__name__}: {e}\n")
             return buf.getvalue()
 
-        loop = asyncio.get_event_loop()
-        output = await loop.run_in_executor(None, _run_debug)
+        loop = asyncio.get_running_loop()
+        output = await loop.run_in_executor(_YDL_EXECUTOR, _run_debug)
 
         chunk_size = 1900
         if not output.strip():

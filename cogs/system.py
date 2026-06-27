@@ -40,11 +40,16 @@ COGS = [
     "cogs.bugreport",
     "cogs.errorhandler",
     "cogs.help",
-    "cogs.fun",
-    "cogs.imagine",
+    "cogs.game",
     "cogs.system",
+    "cogs.image_search",
+    "cogs.summary",
+    "cogs.presence",
+    "cogs.youtube",
+    "cogs.music",
+    "cogs.economy",
+    "cogs.status",
 ]
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
