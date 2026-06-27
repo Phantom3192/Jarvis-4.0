@@ -77,10 +77,10 @@ NODE_SELF = "jarvis-lavalink"
 LAVALINK_NODES = [
     {
         "identifier": NODE_SELF,
-        "host":       "jarvislavalink-production.up.railway.app",
+        "host":       "reseau.proxy.rlwy.net",
         "password":   "jarvisbot",
         "secure":     True,
-        "port":       443,
+        "port":       34023,
     },
 ]
 
@@ -493,7 +493,8 @@ class Music(commands.Cog):
         nodes = [
             wavelink.Node(
                 identifier=n["identifier"],
-                uri=f"{'https' if n.get('secure', False) else 'http'}://{n['host']}:{n['port']}",
+                # uri=f"{'https' if n.get('secure', False) else 'http'}://{n['host']}:{n['port']}",
+                uri=f"{'ws' if n.get('secure', False) else 'ws'}://{n['host']}:{n['port']}",
                 password=n["password"],
             )
             for n in LAVALINK_NODES
