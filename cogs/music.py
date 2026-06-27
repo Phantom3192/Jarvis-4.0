@@ -69,26 +69,15 @@ _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
 _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
 
-# ── Node identifiers ─────────────────────────────────────────────────────────
-# NODE_PUBLIC  : community node, used for YouTube (primary)
-# NODE_SC      : your self-hosted node, used as SoundCloud fallback when
-#                YouTube throws a login/access error
-NODE_PUBLIC = "public-yt"
-NODE_SC     = "self-sc"
+# ── Node config — single self-hosted node ────────────────────────────────────
+# All YouTube + SoundCloud traffic goes through your own Lavalink on Railway.
+# No public nodes — you control quality, uptime, and cookies.
+NODE_SELF = "jarvis-lavalink"
 
-# Public YT nodes tried in order — first working one is used, rest are fallback
-PUBLIC_YT_NODES = [
-    {"identifier": "public-yt-1", "host": "lavalink.jirayu.net",        "password": "youshallnotpass",               "secure": False, "port": 13592},
-    {"identifier": "public-yt-2", "host": "lavalinkv4.serenetia.com",   "password": "https://seretia.link/discord",  "secure": False, "port": 80},
-    {"identifier": "public-yt-3", "host": "lavalink.triniumhost.com",   "password": "kirito",                        "secure": False, "port": 2333},
-    {"identifier": "public-yt-4", "host": "lava2.kasawa.pro",           "password": "youshallnotpass",               "secure": False, "port": 2334},
-]
-
-LAVALINK_NODES = PUBLIC_YT_NODES + [
-    # Self-hosted node — SoundCloud fallback only
+LAVALINK_NODES = [
     {
-        "identifier": NODE_SC,
-        "host":       "happy-joy-production-906e.up.railway.app",
+        "identifier": NODE_SELF,
+        "host":       "jarvislavalink-production.up.railway.app",
         "password":   "jarvisbot",
         "secure":     True,
         "port":       443,
@@ -121,41 +110,41 @@ def _detect_source(query: str) -> str:
 
 async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
     """
-    Search with automatic source detection and fallback chain:
-      1. Detected source (Spotify/Apple/SC URL, or YouTube for plain text)
-      2. SoundCloud (if YouTube fails)
-    Returns (results, source_used_label).
+    Search using the self-hosted Lavalink node for all sources.
+    Automatic source detection:
+      - Spotify / Apple Music / SoundCloud URLs → passed directly
+      - Plain text or YouTube URL → YouTube search on self-hosted node
+      - Falls back to SoundCloud on the same node if YouTube fails
     """
     q = query.strip()
     source = _detect_source(q)
+    node = wavelink.Pool.get_node(NODE_SELF)
 
-    # Direct URL sources — pass straight through, no prefix needed
+    # Direct URL sources — pass straight through
     if source in ("spotify", "applemusic", "soundcloud"):
-        tracks = await wavelink.Playable.search(q)
-        if tracks:
-            return tracks, source
+        try:
+            tracks = await wavelink.Playable.search(q, node=node)
+            if tracks:
+                return tracks, source
+        except Exception as e:
+            print(f"[Search] {source} error: {e}")
         return None, source
 
-    # Plain text — try each public YT node; fall to SC on any error or empty result
-    for n in PUBLIC_YT_NODES:
-        node = wavelink.Pool.get_node(n["identifier"])
-        if node is None:
-            continue
-        try:
-            tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube, node=node)
-            if tracks:
-                return tracks, "youtube"
-        except Exception as e:
-            print(f"[YT] Node {n['identifier']} error: {e}")
-
-    # All YT nodes failed → SoundCloud on self-hosted node
-    sc_node = wavelink.Pool.get_node(NODE_SC)
+    # YouTube (plain text or YT URL)
     try:
-        sc_tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud, node=sc_node)
+        tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube, node=node)
+        if tracks:
+            return tracks, "youtube"
+    except Exception as e:
+        print(f"[Search] YouTube error: {e}")
+
+    # YouTube failed → try SoundCloud on same node as fallback
+    try:
+        sc_tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud, node=node)
         if sc_tracks:
             return sc_tracks, "soundcloud"
     except Exception as e:
-        print(f"[SC] Fallback node error: {e}")
+        print(f"[Search] SoundCloud fallback error: {e}")
 
     return None, "none"
 
@@ -546,8 +535,9 @@ class Music(commands.Cog):
     ) -> None:
         """
         Fires when Lavalink throws a TrackException during playback.
-        If the error is a YouTube login/access block, we silently retry
-        the same song on the self-hosted SoundCloud node instead.
+        If the error is a YouTube login/access block, retries on SoundCloud
+        using the same self-hosted node (cookies should prevent this, but
+        SoundCloud is kept as a last-resort fallback).
         """
         player: wavelink.Player = payload.player
         track  = payload.track
@@ -556,37 +546,29 @@ class Music(commands.Cog):
         msg = str(getattr(payload.exception, "message", payload.exception)).lower()
         is_yt_block = any(k in msg for k in ("login", "not available", "sign in", "403", "blocked"))
         if not is_yt_block:
-            return  # some other error — let it bubble up normally
-
-        print(
-            f"⚠️  YouTube blocked '{track.title}' "
-            f"(node={payload.node.identifier}) — retrying on SoundCloud node..."
-        )
-
-        # Grab your self-hosted SC node specifically
-        sc_node: wavelink.Node | None = wavelink.Pool.get_node(NODE_SC)
-        if sc_node is None:
-            print("❌  SC fallback node not connected, cannot retry.")
             return
 
-        # Search SoundCloud on the SC node
+        print(f"⚠️  YouTube blocked '{track.title}' — retrying on SoundCloud...")
+
+        node = wavelink.Pool.get_node(NODE_SELF)
+        if node is None:
+            print("❌ Self-hosted node not connected, cannot retry.")
+            return
+
         query   = f"{track.author} {track.title}".strip() if track.author else track.title
         results = await wavelink.Playable.search(
-            query, source=wavelink.TrackSource.SoundCloud, node=sc_node
+            query, source=wavelink.TrackSource.SoundCloud, node=node
         )
         if not results:
-            print(f"❌  No SoundCloud result found for '{query}'")
+            print(f"❌ No SoundCloud fallback found for '{query}'")
             return
 
         fallback: wavelink.Playable = (
             results[0] if isinstance(results, list) else results.tracks[0]
         )
-        fallback.extras = track.extras  # preserve requester metadata if any
-
-        # Assign the player to use the SC node for this track
-        player.node = sc_node
+        fallback.extras = track.extras
         await player.play(fallback, volume=player.volume)
-        print(f"✅  Now playing SoundCloud fallback: {fallback.title}")
+        print(f"✅ SoundCloud fallback playing: {fallback.title}")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -613,11 +595,32 @@ class Music(commands.Cog):
         channel = author.voice.channel
 
         if player is None:
-            try:
-                player = await channel.connect(cls=wavelink.Player, self_deaf=True)
-            except Exception as e:
-                await send_fn(embed=_err(f"Couldn't connect to VC: {e}"))
+            # Retry up to 3 times — Discord's VOICE_SERVER_UPDATE can be slow
+            # on the first connect, especially when the bot just started or the
+            # guild's voice region switches. Each attempt uses a longer timeout.
+            last_err: Exception | None = None
+            for attempt, timeout in enumerate((20.0, 40.0, 60.0), start=1):
+                try:
+                    player = await channel.connect(
+                        cls=wavelink.Player,
+                        self_deaf=True,
+                        timeout=timeout,
+                    )
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"[VC] Connect attempt {attempt}/3 failed (timeout={timeout}s): {e}")
+                    if attempt < 3:
+                        await asyncio.sleep(2)
+
+            if last_err is not None:
+                await send_fn(embed=_err(
+                    "Couldn't connect to your voice channel after 3 attempts. "
+                    "Try again in a moment, or kick the bot and re-invite it."
+                ))
                 return None
+
         elif player.channel != channel:
             await player.move_to(channel)
 
