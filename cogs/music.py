@@ -77,7 +77,7 @@ NODE_SELF = "jarvis-lavalink"
 LAVALINK_NODES = [
     {
         "identifier": NODE_SELF,
-        "host":       "2db830cc-6351-4584-bc10-421d57e7b846-00-2yigqhz2anami.pike.replit.dev",
+        "host":       "jarvislavalink-production.up.railway.app",
         "password":   "jarvisbot",
         "secure":     True,
         "port":       443,
