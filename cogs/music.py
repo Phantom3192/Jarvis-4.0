@@ -276,8 +276,6 @@ elif YTDLP_COOKIES_FILE:
 #   -multiple_requests 1      reuse the same TCP connection for HTTP range requests;
 #                             avoids the TCP handshake stall that causes a click
 #                             at the start of each reconnect
-#   -http_persistent 1        keep HTTP connection alive across reads (same idea,
-#                             applied at the HTTP layer)
 #   -thread_queue_size 4096   FFmpeg's packet queue between demux and decode threads.
 #                             Must be large enough to absorb network jitter.
 #                             8192 wastes memory for no gain; 4096 is the sweet spot.
@@ -312,7 +310,6 @@ _BEFORE_OPTS_COMMON = " ".join([
     "-reconnect_streamed 1",
     "-reconnect_delay_max 30",
     "-multiple_requests 1",
-    "-http_persistent 1",
     "-thread_queue_size 4096",
     "-probesize 10485760",       # 10 MB
     "-analyzeduration 3000000",  # 3 s in µs
