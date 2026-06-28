@@ -52,7 +52,7 @@ ERROR_COLOR  = discord.Color.red()
 # ── Temporary feature toggle ────────────────────────────────────────────────
 # Set to True to make ALL music/VC commands respond with a "temporarily down"
 # message instead of running. Set back to False to restore normal behaviour.
-MUSIC_FEATURE_DOWN = False
+MUSIC_FEATURE_DOWN = True
 
 MUSIC_DOWN_EMBED = discord.Embed(
     title="🚧 Music is temporarily down",
