@@ -131,10 +131,18 @@ def _cooldown_embed(remaining: float, user: discord.User | discord.Member) -> di
     return embed
 
 
-async def _search_images(query: str) -> list[dict] | None:
+def _is_nsfw_channel(channel) -> bool:
+    """Return True if the channel is marked as NSFW (or is a DM)."""
+    if isinstance(channel, discord.DMChannel):
+        return False  # DMs are not NSFW by default
+    return getattr(channel, "nsfw", False)
+
+
+async def _search_images(query: str, safe: bool = True) -> list[dict] | None:
     """
     Call Serper.dev image search and return a list of result dicts, or None on failure.
     Each result dict has at least: title, imageUrl, link, source.
+    Pass safe=True to enable safe search (for non-NSFW channels).
     """
     key = _next_key()
     if not key:
@@ -145,7 +153,7 @@ async def _search_images(query: str) -> list[dict] | None:
         "X-API-KEY":    key,
         "Content-Type": "application/json",
     }
-    payload = {"q": query, "num": MAX_RESULTS}
+    payload = {"q": query, "num": MAX_RESULTS, "safe": "active" if safe else "off"}
 
     try:
         async with session.post(
@@ -235,7 +243,12 @@ class ImageSearch(commands.Cog):
         user:     discord.User | discord.Member,
         reply_fn,
         error_fn,
+        channel=None,
     ) -> None:
+        # Determine if safe search should be applied
+        nsfw = _is_nsfw_channel(channel) if channel is not None else False
+        safe_search = not nsfw
+
         if not _KEY_POOL:
             await error_fn(
                 embed=_error_embed(
@@ -257,7 +270,7 @@ class ImageSearch(commands.Cog):
                     await interaction.response.edit_message(
                         content="🔍 Searching…", embed=None, view=None
                     )
-                    results = await _search_images(query)
+                    results = await _search_images(query, safe=safe_search)
                     if not results:
                         await interaction.edit_original_response(
                             content=None,
@@ -295,7 +308,7 @@ class ImageSearch(commands.Cog):
                 await error_fn(embed=_cooldown_embed(remaining, user))
             return
 
-        results = await _search_images(query)
+        results = await _search_images(query, safe=safe_search)
 
         if results is None:
             await error_fn(
@@ -321,6 +334,7 @@ class ImageSearch(commands.Cog):
             user     = message.author,
             reply_fn = lambda **kw: message.reply(**kw),
             error_fn = lambda **kw: message.reply(**kw),
+            channel  = message.channel,
         )
 
     # ── Prefix command: !image <query> [--index <n>] ──────────────────────────
@@ -369,6 +383,7 @@ class ImageSearch(commands.Cog):
                 user     = ctx.author,
                 reply_fn = lambda **kw: ctx.reply(**kw),
                 error_fn = lambda **kw: ctx.reply(**kw),
+                channel  = ctx.channel,
             )
 
     # ── Slash command: /image ─────────────────────────────────────────────────
@@ -391,6 +406,7 @@ class ImageSearch(commands.Cog):
             user     = interaction.user,
             reply_fn = lambda **kw: interaction.followup.send(**kw),
             error_fn = lambda **kw: interaction.followup.send(**kw),
+            channel  = interaction.channel,
         )
 
 
