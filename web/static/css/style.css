@@ -144,11 +144,13 @@ h1, h2, h3 {
 
 .hero {
   padding: 88px 0 72px;
+  border-bottom: 1px solid var(--line);
+}
+.hero-grid {
   display: grid;
   grid-template-columns: 1.1fr 0.9fr;
   gap: 48px;
   align-items: center;
-  border-bottom: 1px solid var(--line);
 }
 .hero h1 {
   font-size: clamp(40px, 5vw, 60px);
@@ -198,6 +200,12 @@ h1, h2, h3 {
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 50%;
+  background-image:
+    radial-gradient(circle, rgba(9,12,16,0.97) 0%, rgba(9,12,16,0.88) 38%, rgba(9,12,16,0.45) 62%, rgba(9,12,16,0.05) 80%),
+    url('/static/img/core-emblem.png');
+  background-size: cover, cover;
+  background-position: center, center;
 }
 .core svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .core-ring { fill: none; stroke: var(--line-bright); stroke-width: 1; }
@@ -406,7 +414,8 @@ footer .wrap {
 /* ── Responsive ──────────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  .hero { grid-template-columns: 1fr; padding: 56px 0 48px; }
+  .hero { padding: 56px 0 48px; }
+  .hero-grid { grid-template-columns: 1fr; }
   .core { max-width: 260px; margin-top: 12px; }
   .grid { grid-template-columns: 1fr 1fr; }
   .docs-layout { grid-template-columns: 1fr; }
