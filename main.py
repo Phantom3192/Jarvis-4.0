@@ -10,6 +10,8 @@ from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, ch
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
+import uvicorn
+from web.app import create_app
 
 load_dotenv()
 install_stdout_error_forwarding()   # forward ❌/error-looking print() lines to the webhook too
@@ -163,6 +165,21 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
 
+async def run_web_server() -> None:
+    """Run the Jarvis website (landing/stats/docs) in this same process.
+
+    Sharing the process means the website's /api/stats route can read
+    bot.guilds / seen_users directly — no network hop, no second deployment.
+    Failure here should never take the bot down, so errors are caught and logged.
+    """
+    try:
+        app = create_app(bot)
+        port = int(os.getenv("PORT", "8000"))
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+    except Exception as e:
+        print(f"❌ Web server failed to start: {e}")
 
 async def main():
     # Validate token early for a clear error message
@@ -196,8 +213,16 @@ async def main():
                     except Exception as e:
                         print(f"❌ Failed to load cog '{cog}': {e}")
 
+                # try:
+                #     await bot.start(TOKEN)
+                # finally:
+                #     await http_session.close_session()
+                
                 try:
-                    await bot.start(TOKEN)
+                    await asyncio.gather(
+                        bot.start(TOKEN),
+                        run_web_server(),
+                    )
                 finally:
                     await http_session.close_session()
 

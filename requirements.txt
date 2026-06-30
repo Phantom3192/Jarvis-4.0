@@ -10,3 +10,7 @@ Pillow
 chess
 wavelink
 yt_dlp 
+fastapi==0.115.0
+starlette==0.38.6
+uvicorn[standard]==0.30.6
+jinja2==3.1.4

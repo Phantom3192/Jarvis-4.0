@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ bot_name }} — Your AI assistant for Discord</title>
+<meta name="description" content="{{ bot_name }} is an AI assistant for Discord — chat, memory, reminders, games, music, and a server economy, all in one bot.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap">
+    <a href="#top" class="nav-brand"><span class="dot"></span>{{ bot_name }}</a>
+    <div class="nav-links">
+      <a href="#capabilities">Capabilities</a>
+      <a href="#status">Status</a>
+      <a href="#docs">Commands</a>
+    </div>
+    <a class="nav-cta" href="{{ invite_url }}">Add to Discord</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap" style="display:contents">
+    <div>
+      <p class="eyebrow">System online</p>
+      <h1>Meet <span class="accent">{{ bot_name }}</span>,<br>your server's AI.</h1>
+      <p class="lede">Chat, remember, play, and run on Jarvis Credits — one bot that handles AI conversation, games, music, and moderation so your server doesn't need five different bots.</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="{{ invite_url }}">+ Add to Discord</a>
+        <a class="btn btn-ghost" href="#docs">View commands</a>
+      </div>
+    </div>
+
+    <div class="core">
+      <svg viewBox="0 0 200 200" aria-hidden="true">
+        <defs>
+          <linearGradient id="sweepGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#5ee7ff" stop-opacity="0"/>
+            <stop offset="100%" stop-color="#5ee7ff" stop-opacity="0.9"/>
+          </linearGradient>
+        </defs>
+        <circle class="core-ring" cx="100" cy="100" r="96"/>
+        <circle class="core-ring core-ring--active" cx="100" cy="100" r="86"/>
+        <circle class="core-ring core-ring--active rev" cx="100" cy="100" r="74"/>
+        <circle class="core-sweep" cx="100" cy="100" r="60"/>
+      </svg>
+      <div class="core-readout">
+        <p class="core-status"><span class="status-dot"></span><span id="core-online-label">Connecting…</span></p>
+        <div class="core-stats">
+          <div>
+            <div class="core-stat-value" id="core-guilds">—</div>
+            <div class="core-stat-label">Servers</div>
+          </div>
+          <div>
+            <div class="core-stat-value" id="core-users">—</div>
+            <div class="core-stat-label">Users seen</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="telemetry" id="status">
+  <div class="wrap">
+    <div class="telemetry-item">
+      <div class="telemetry-label">Status</div>
+      <div class="telemetry-value dim" id="t-status">checking…</div>
+    </div>
+    <div class="telemetry-item">
+      <div class="telemetry-label">Servers</div>
+      <div class="telemetry-value" id="t-guilds">—</div>
+    </div>
+    <div class="telemetry-item">
+      <div class="telemetry-label">Users seen</div>
+      <div class="telemetry-value" id="t-users">—</div>
+    </div>
+    <div class="telemetry-item">
+      <div class="telemetry-label">Uptime</div>
+      <div class="telemetry-value dim" id="t-uptime">—</div>
+    </div>
+    <div class="telemetry-item">
+      <div class="telemetry-label">Latency</div>
+      <div class="telemetry-value dim" id="t-latency">—</div>
+    </div>
+  </div>
+</div>
+
+<section id="capabilities">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Capabilities</p>
+      <h2>One bot, the full set.</h2>
+      <p>A sample of what {{ bot_name }} runs — the full command reference is below.</p>
+    </div>
+    <div class="grid">
+      {% for cat, data in highlights.items() %}
+      <div class="card">
+        <span class="card-icon">{{ cat.split(' ')[0] }}</span>
+        <h3>{{ cat.split(' ', 1)[1] if ' ' in cat else cat }}</h3>
+        <p>{{ data.description }}</p>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="eyebrow">Command reference</p>
+      <h2>Everything {{ bot_name }} can do.</h2>
+      <p>Both <code>!prefix</code> and <code>/slash</code> versions are supported for most commands.</p>
+    </div>
+
+    <div class="docs-layout">
+      <nav class="docs-nav">
+        {% for cat, data in categories.items() %}
+        <a class="docs-nav-item" href="#cat-{{ loop.index }}" data-idx="{{ loop.index }}">{{ cat }}</a>
+        {% endfor %}
+      </nav>
+
+      <div class="docs-content">
+        {% for cat, data in categories.items() %}
+        <div class="docs-cat" id="cat-{{ loop.index }}">
+          <div class="docs-cat-head">
+            <div>
+              <h3>{{ cat }}</h3>
+              <p>{{ data.description }}</p>
+            </div>
+          </div>
+          <table class="docs-cmd-table">
+            {% for cmd, desc in data.commands %}
+              {% if cmd == "" and desc == "" %}
+              <tr class="spacer"><td colspan="2"></td></tr>
+              {% elif desc.startswith('━') %}
+              <tr class="divider"><td colspan="2">{{ cmd | md_bold | safe }}</td></tr>
+              {% else %}
+              <tr>
+                <td>{{ cmd }}</td>
+                <td>{{ desc | md_bold | safe }}</td>
+              </tr>
+              {% endif %}
+            {% endfor %}
+          </table>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="footer-brand">{{ bot_name }} — system console</div>
+    <div class="footer-links">
+      <a href="{{ invite_url }}">Add to Discord</a>
+      <a href="#status">Status</a>
+      <a href="#docs">Commands</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/static/js/main.js"></script>
+</body>
+</html>
