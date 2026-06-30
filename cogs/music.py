@@ -68,6 +68,7 @@ _SPOTIFY_PREFIXES    = ("https://open.spotify.com/", "spotify:")
 _DEEZER_PREFIXES     = ("https://www.deezer.com/", "https://deezer.com/")
 _APPLE_PREFIXES      = ("https://music.apple.com/",)
 _SOUNDCLOUD_PREFIXES = ("https://soundcloud.com/", "https://on.soundcloud.com/")
+_JIOSAAVN_PREFIXES   = ("https://www.jiosaavn.com/", "https://jiosaavn.com/")
 
 # ── Node config — single self-hosted node ────────────────────────────────────
 # All YouTube + SoundCloud traffic goes through your own Lavalink on Railway.
@@ -103,6 +104,8 @@ def _detect_source(query: str) -> str:
         return "applemusic"
     if q.startswith(_SOUNDCLOUD_PREFIXES):
         return "soundcloud"
+    if q.startswith(_JIOSAAVN_PREFIXES):
+        return "jiosaavn"
     # Plain text or YouTube URL
     return "ytsearch"
 
@@ -112,8 +115,8 @@ async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
     Search using the self-hosted Lavalink node for all sources.
     Automatic source detection:
       - Spotify / Apple Music / SoundCloud URLs → passed directly
-      - Plain text or YouTube URL → YouTube search on self-hosted node
-      - Falls back to SoundCloud on the same node if YouTube fails
+      - Plain text or YouTube URL → JioSaavn search first, then YouTube,
+        then SoundCloud as a final fallback (all on the self-hosted node)
     """
     q = query.strip()
     source = _detect_source(q)
@@ -129,7 +132,26 @@ async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
             print(f"[Search] {source} error: {e}")
         return None, source
 
-    # YouTube (plain text or YT URL)
+    # Direct JioSaavn URL — pass straight through, fall back to YT search on failure
+    if source == "jiosaavn":
+        try:
+            tracks = await wavelink.Playable.search(q, node=node)
+            if tracks:
+                return tracks, source
+        except Exception as e:
+            print(f"[Search] jiosaavn error: {e}")
+        # fall through to YouTube below using the raw URL as a search query
+
+    # 1) JioSaavn first (plain text queries only — it doesn't understand YT URLs)
+    if source == "ytsearch" and not q.lower().startswith(("http://", "https://")):
+        try:
+            js_tracks = await wavelink.Playable.search(f"jssearch:{q}", node=node)
+            if js_tracks:
+                return js_tracks, "jiosaavn"
+        except Exception as e:
+            print(f"[Search] JioSaavn error: {e}")
+
+    # 2) YouTube (plain text or YT URL)
     try:
         tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.YouTube, node=node)
         if tracks:
@@ -137,7 +159,7 @@ async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
     except Exception as e:
         print(f"[Search] YouTube error: {e}")
 
-    # YouTube failed → try SoundCloud on same node as fallback
+    # 3) YouTube failed → try SoundCloud on same node as final fallback
     try:
         sc_tracks = await wavelink.Playable.search(q, source=wavelink.TrackSource.SoundCloud, node=node)
         if sc_tracks:

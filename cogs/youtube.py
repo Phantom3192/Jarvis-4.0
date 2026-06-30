@@ -51,6 +51,7 @@ VIEW_TIMEOUT       = 600        # seconds before result nav view expires
 
 # LRU-like search cache: query → (timestamp, entries_list)
 _search_cache: dict[str, tuple[float, list[dict]]] = {}
+_shorts_cache: dict[str, tuple[float, list[dict]]] = {}
 CACHE_TTL     = 300             # 5 minutes
 
 # Trending category search terms
@@ -187,6 +188,63 @@ async def _search(query: str) -> list[dict]:
     return entries
 
 
+async def _search_shorts(query: str) -> list[dict]:
+    """
+    Search YouTube Shorts for `query` and return up to RESULT_COUNT entry dicts.
+    Biases the search toward actual /shorts/ uploads and keeps only entries
+    with a known duration <= 60s (true Shorts are capped at 60s on YouTube;
+    we don't use the 3-min cap since that also matches regular short videos).
+    """
+    cache_key = f"shorts:{query}"
+    cached = _shorts_cache.get(cache_key)
+    if cached:
+        ts, entries = cached
+        if time.time() - ts < CACHE_TTL:
+            return entries
+
+    loop = asyncio.get_event_loop()
+
+    def _run() -> list[dict]:
+        # Over-fetch since we filter down to short-duration videos afterward.
+        # "shorts" prefix (vs trailing #shorts) biases YouTube's search ranking
+        # more reliably toward actual /shorts/ uploads.
+        opts = {**_SEARCH_OPTS, "playlist_items": "1:30"}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            r = ydl.extract_info(f"ytsearch30:shorts {query}", download=False)
+            return [e for e in (r.get("entries") or []) if e]
+
+    try:
+        raw_entries = await loop.run_in_executor(None, _run)
+    except Exception as exc:
+        print(f"[YouTube] Shorts search error for {query!r}: {exc}")
+        return []
+
+    # Keep only short-form, non-live videos (Shorts are capped at 3 min by YouTube).
+    # IMPORTANT: a missing/None duration (common for live streams in flat
+    # extraction) must NOT be treated as 0 — that would wrongly pass the filter
+    # and let live streams through. Require a real, known duration <= 180s,
+    # and explicitly exclude anything flagged as live/upcoming. flat extraction
+    # doesn't always populate is_live/live_status reliably, so we also check
+    # for "LIVE" view-count strings as a backup signal.
+    def _looks_live(e: dict) -> bool:
+        if e.get("is_live") or e.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+            return True
+        vc = e.get("view_count")
+        if isinstance(vc, str) and "live" in vc.lower():
+            return True
+        return False
+
+    entries = [
+        e for e in raw_entries
+        if e.get("duration") is not None
+        and 0 < e.get("duration") <= 60
+        and not _looks_live(e)
+    ][:RESULT_COUNT]
+
+    _shorts_cache[cache_key] = (time.time(), entries)
+    return entries
+
+
 async def _fetch_video_info(video_id: str) -> dict | None:
     """
     Fetch full metadata for a single video (no download).
@@ -208,6 +266,37 @@ async def _fetch_video_info(video_id: str) -> dict | None:
 # ══════════════════════════════════════════════════════════════════════════════
 # Embed builders
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _shorts_search_embed(query: str, entries: list[dict]) -> discord.Embed:
+    """List-style embed for Shorts results, shown before the user picks one."""
+    embed = discord.Embed(
+        title       = f"📱 YouTube Shorts  ›  {query[:80]}",
+        description = (
+            f"Found **{len(entries)}** short(s). Pick one from the dropdown below.\n"
+            "Discord will embed a preview so you can watch it right here."
+        ),
+        color = YT_RED,
+    )
+    for i, e in enumerate(entries, 1):
+        dur  = _fmt_duration(e.get("duration"))
+        ch   = e.get("uploader") or e.get("channel") or "Unknown"
+        views = _fmt_views(e.get("view_count"))
+        embed.add_field(
+            name   = f"{i}. {(e.get('title') or 'Untitled')[:70]}",
+            value  = f"`{ch}`  •  ⏱ `{dur}`  •  👁 `{views}`",
+            inline = False,
+        )
+    embed.set_footer(text="Results cached for 5 min  •  Dropdown expires in 5 min")
+    return embed
+
+
+def _no_shorts_embed(query: str) -> discord.Embed:
+    return discord.Embed(
+        title       = "❌ No Shorts found",
+        description = f"Couldn't find any YouTube Shorts for **{query}**. Try a different search term.",
+        color       = YT_DARK_RED,
+    )
+
 
 def _search_embed(query: str, entries: list[dict]) -> discord.Embed:
     """List-style embed shown before the user picks a result."""
@@ -618,6 +707,24 @@ class YouTube(commands.Cog):
         view  = SearchView(entries, user)
         await send_fn(embed=embed, view=view)
 
+    async def _do_search_shorts(
+        self,
+        query:    str,
+        user:     discord.User | discord.Member,
+        send_fn,
+        ephemeral_fn,
+    ) -> None:
+        """Core Shorts search logic shared by slash and prefix handlers."""
+        entries = await _search_shorts(query)
+
+        if not entries:
+            await send_fn(embed=_no_shorts_embed(query))
+            return
+
+        embed = _shorts_search_embed(query, entries)
+        view  = SearchView(entries, user)
+        await send_fn(embed=embed, view=view)
+
     async def _do_info(
         self,
         target:   str,
@@ -667,12 +774,28 @@ class YouTube(commands.Cog):
             ephemeral_fn = lambda **kw: interaction.followup.send(ephemeral=True, **kw),
         )
 
-    # ── /yttrend ─────────────────────────────────────────────────────────────
+    # ── /reel ─────────────────────────────────────────────────────────────────
 
     @app_commands.command(
-        name        = "yttrend",
-        description = "Browse trending YouTube videos by category 🔥",
+        name        = "reel",
+        description = "Search YouTube Shorts and play one directly in Discord 📱",
     )
+    @app_commands.describe(query="What do you want to search for?")
+    async def slash_reel(
+        self,
+        interaction: discord.Interaction,
+        query:       str,
+    ) -> None:
+        """Slash command: search YouTube Shorts and present a dropdown of results."""
+        await interaction.response.defer(thinking=True)
+        await self._do_search_shorts(
+            query        = query.strip(),
+            user         = interaction.user,
+            send_fn      = interaction.followup.send,
+            ephemeral_fn = lambda **kw: interaction.followup.send(ephemeral=True, **kw),
+        )
+
+    # ── /yttrend ─────────────────────────────────────────────────────────────
     async def slash_yttrend(self, interaction: discord.Interaction) -> None:
         """Slash command: pick a trending category, then pick a video."""
         embed = discord.Embed(
@@ -729,6 +852,33 @@ class YouTube(commands.Cog):
                 user         = ctx.author,
                 send_fn      = ctx.reply,
                 ephemeral_fn = ctx.reply,  # prefix can't be ephemeral; just reply
+            )
+
+    # ── !reel ─────────────────────────────────────────────────────────────────
+
+    @commands.command(name="reel", aliases=["shorts", "reels"])
+    async def prefix_reel(
+        self,
+        ctx:   commands.Context,
+        *,
+        query: str = "",
+    ) -> None:
+        """Prefix command: search YouTube Shorts. Usage: `!reel <query>`"""
+        if not query.strip():
+            await ctx.reply(
+                "**Usage:** `!reel <query>`\n"
+                "**Example:** `!reel funny cat fails`\n"
+                "**Aliases:** `!shorts`, `!reels`\n"
+                "**Tip:** Use `/reel` for the slash-command version with the same features."
+            )
+            return
+
+        async with ctx.typing():
+            await self._do_search_shorts(
+                query        = query.strip(),
+                user         = ctx.author,
+                send_fn      = ctx.reply,
+                ephemeral_fn = ctx.reply,
             )
 
     # ── !yttrend ──────────────────────────────────────────────────────────────

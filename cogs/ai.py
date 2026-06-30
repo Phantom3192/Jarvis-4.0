@@ -752,6 +752,12 @@ _INTENT_YT_SEARCH = re.compile(
     r"(?:youtube|yt)\s+(?:video|videos?)\s+(?:of|for|about)\s+\S)\b",
     re.IGNORECASE,
 )
+_INTENT_REEL_SEARCH = re.compile(
+    r"\b(?:(?:send|show|find|get|search(?:\s+for)?)\s+(?:me\s+)?(?:an?\s+)?(?:reel|short|shorts)\s+(?:of|for|about)\s+\S"
+    r"|(?:can\s+you\s+)?(?:send|show)\s+(?:me\s+)?(?:a|an)\s+(?:reel|short)\s+(?:of|about)\s+\S"
+    r"|search\s+(?:youtube\s+)?shorts\s+(?:for\s+)?\S)\b",
+    re.IGNORECASE,
+)
 _INTENT_YT_TREND = re.compile(
     r"\b(?:what\'?s?\s+trending\s+on\s+(?:youtube|yt)|(?:youtube|yt)\s+trending|"
     r"show\s+(?:me\s+)?(?:youtube|yt)\s+trends?|top\s+(?:youtube|yt)\s+videos?\s+(?:today|now|right\s+now))\b",
@@ -989,6 +995,30 @@ async def _try_intent_intercept(
                 return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._send_controls(message.guild, send_fn)
+            return True
+
+    # ── reel/shorts search ────────────────────────────────────────────────────
+    if _INTENT_REEL_SEARCH.search(user_text):
+        yt_cog = bot.cogs.get("YouTube")
+        if yt_cog:
+            query = re.sub(
+                r".*?\b(reel|short|shorts)\s+(of|for|about)\s*",
+                "", user_text, count=1, flags=re.IGNORECASE
+            ).strip(" ,:-")
+            if not query:
+                query = re.sub(
+                    r"^\s*(send\s+(me\s+)?(an?\s+)?(reel|short|shorts)|show\s+(me\s+)?(an?\s+)?(reel|short|shorts)|search\s+(youtube\s+)?shorts)\s*(for)?\s*",
+                    "", user_text, flags=re.IGNORECASE
+                ).strip(" ,:-")
+            if not query:
+                await safe_reply(message, "\U0001f4f1 What would you like me to search a reel for?")
+                return True
+            await yt_cog._do_search_shorts(
+                query        = query,
+                user         = message.author,
+                send_fn      = lambda **kw: safe_reply(message, **kw),
+                ephemeral_fn = lambda **kw: safe_reply(message, **kw),
+            )
             return True
 
     # ── youtube: search ───────────────────────────────────────────────────────
