@@ -13,10 +13,6 @@ async function refreshStats() {
     if (!res.ok) throw new Error("bad response");
     const data = await res.json();
 
-    document.getElementById("core-guilds").textContent = fmtNumber(data.guilds);
-    document.getElementById("core-users").textContent = fmtNumber(data.users);
-    document.getElementById("core-online-label").textContent = data.online ? "Online" : "Reconnecting";
-
     document.getElementById("t-status").textContent = data.online ? "Online" : "Reconnecting";
     document.getElementById("t-guilds").textContent = fmtNumber(data.guilds);
     document.getElementById("t-users").textContent = fmtNumber(data.users);
@@ -25,7 +21,6 @@ async function refreshStats() {
       data.latency_ms !== null && data.latency_ms !== undefined ? `${data.latency_ms} ms` : "—";
   } catch (err) {
     document.getElementById("t-status").textContent = "Unreachable";
-    document.getElementById("core-online-label").textContent = "Unreachable";
   }
 }
 
