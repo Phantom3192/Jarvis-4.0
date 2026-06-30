@@ -38,16 +38,31 @@
 
     <div class="core">
       <svg viewBox="0 0 200 200" aria-hidden="true">
-        <defs>
-          <linearGradient id="sweepGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stop-color="#5ee7ff" stop-opacity="0"/>
-            <stop offset="100%" stop-color="#5ee7ff" stop-opacity="0.9"/>
-          </linearGradient>
-        </defs>
         <circle class="core-ring" cx="100" cy="100" r="96"/>
-        <circle class="core-ring core-ring--active" cx="100" cy="100" r="86"/>
-        <circle class="core-ring core-ring--active rev" cx="100" cy="100" r="74"/>
-        <circle class="core-sweep" cx="100" cy="100" r="60"/>
+
+        <g class="orbit orbit-a">
+          <ellipse class="orbit-path" cx="100" cy="100" rx="80" ry="32"/>
+          <circle class="orbit-electron" r="3.4">
+            <animateMotion dur="5s" repeatCount="indefinite"
+              path="M 180,100 A 80,32 0 1,1 20,100 A 80,32 0 1,1 180,100"/>
+          </circle>
+        </g>
+
+        <g class="orbit orbit-b">
+          <ellipse class="orbit-path" cx="100" cy="100" rx="80" ry="32"/>
+          <circle class="orbit-electron" r="3.4">
+            <animateMotion dur="7s" repeatCount="indefinite"
+              path="M 180,100 A 80,32 0 1,1 20,100 A 80,32 0 1,1 180,100"/>
+          </circle>
+        </g>
+
+        <g class="orbit orbit-c">
+          <ellipse class="orbit-path" cx="100" cy="100" rx="80" ry="32"/>
+          <circle class="orbit-electron" r="3.4">
+            <animateMotion dur="9s" repeatCount="indefinite"
+              path="M 180,100 A 80,32 0 1,1 20,100 A 80,32 0 1,1 180,100"/>
+          </circle>
+        </g>
       </svg>
       <div class="core-readout">
         <p class="core-status"><span class="status-dot"></span><span id="core-online-label">Connecting…</span></p>

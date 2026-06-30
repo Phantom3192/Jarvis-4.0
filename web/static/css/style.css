@@ -223,21 +223,26 @@ h1, h2, h3 {
 }
 .core svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .core-ring { fill: none; stroke: var(--line-bright); stroke-width: 1; }
-.core-ring--active {
-  stroke: var(--cyan);
-  stroke-dasharray: 4 10;
-  animation: spin 38s linear infinite;
-  opacity: 0.55;
-}
-.core-ring--active.rev { animation-direction: reverse; animation-duration: 52s; opacity: 0.35; }
-.core-sweep {
-  stroke: url(#sweepGradient);
-  stroke-width: 2;
+
+.orbit { transform-box: fill-box; transform-origin: 50% 50%; }
+.orbit-path {
   fill: none;
-  transform-origin: center;
-  animation: spin 6s linear infinite;
+  stroke: var(--cyan);
+  stroke-width: 1;
+  opacity: 0.4;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
+.orbit-electron {
+  fill: var(--cyan);
+  filter: drop-shadow(0 0 4px var(--cyan));
+}
+
+.orbit-a { animation: orbit-spin-a 16s linear infinite; }
+.orbit-b { transform: rotate(60deg); animation: orbit-spin-b 21s linear infinite reverse; }
+.orbit-c { transform: rotate(120deg); animation: orbit-spin-c 26s linear infinite; }
+
+@keyframes orbit-spin-a { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes orbit-spin-b { from { transform: rotate(60deg); } to { transform: rotate(420deg); } }
+@keyframes orbit-spin-c { from { transform: rotate(120deg); } to { transform: rotate(480deg); } }
 
 .core-readout {
   position: relative;
