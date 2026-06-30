@@ -199,7 +199,7 @@ async def main():
                 await init_history()
                 await init_memory()
 
-                # Restore persisted session histories into in-memory store
+                # Restore persisted session histories into in-memory store 
                 from cogs.ai import private_history
                 restored = await load_all_histories()
                 for uid, msgs in restored.items():
