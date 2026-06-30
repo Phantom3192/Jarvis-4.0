@@ -35,6 +35,34 @@
         <a class="btn btn-ghost" href="#docs">View commands</a>
       </div>
     </div>
+
+    <div class="core">
+      <svg viewBox="0 0 200 200" aria-hidden="true">
+        <defs>
+          <linearGradient id="sweepGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#5ee7ff" stop-opacity="0"/>
+            <stop offset="100%" stop-color="#5ee7ff" stop-opacity="0.9"/>
+          </linearGradient>
+        </defs>
+        <circle class="core-ring" cx="100" cy="100" r="96"/>
+        <circle class="core-ring core-ring--active" cx="100" cy="100" r="86"/>
+        <circle class="core-ring core-ring--active rev" cx="100" cy="100" r="74"/>
+        <circle class="core-sweep" cx="100" cy="100" r="60"/>
+      </svg>
+      <div class="core-readout">
+        <p class="core-status"><span class="status-dot"></span><span id="core-online-label">Connecting…</span></p>
+        <div class="core-stats">
+          <div>
+            <div class="core-stat-value" id="core-guilds">—</div>
+            <div class="core-stat-label">Servers</div>
+          </div>
+          <div>
+            <div class="core-stat-value" id="core-users">—</div>
+            <div class="core-stat-label">Users seen</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </header>
 
