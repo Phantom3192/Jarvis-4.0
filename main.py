@@ -166,11 +166,13 @@ async def on_ready():
         print(f"❌ Failed to sync commands: {e}")
 
 async def run_web_server() -> None:
-    """Run the Jarvis website (landing/stats/docs) in this same process.
+    """Run the Jarvis stats/categories API in this same process.
 
-    Sharing the process means the website's /api/stats route can read
+    Sharing the process means the API's /api/stats route can read
     bot.guilds / seen_users directly — no network hop, no second deployment.
-    Failure here should never take the bot down, so errors are caught and logged.
+    The actual website (HTML/CSS/JS) is a SEPARATE project deployed on its
+    own — it polls this API over HTTP. Failure here should never take the
+    bot down, so errors are caught and logged.
     """
     try:
         app = create_app(bot)
@@ -260,4 +262,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

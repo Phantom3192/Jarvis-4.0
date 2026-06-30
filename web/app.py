@@ -1,36 +1,31 @@
 """
-Jarvis website — landing page, live stats API, and auto-generated docs.
+Jarvis bot API — a tiny public JSON API exposing live stats and the docs
+category list, nothing else.
 
-Runs INSIDE the same process as the bot (see main.py), started as a second
-asyncio task alongside bot.start(). Because it shares the process, route
-handlers can read bot.guilds / seen_users / _START_TIME directly — no
-database round-trip, no second deployment.
+This runs INSIDE the bot process (see main.py), started as a second asyncio
+task alongside bot.start(). Because it shares the process, route handlers
+can read bot.guilds / seen_users / _START_TIME directly — no database
+round-trip needed.
 
-Docs content is NOT duplicated here. It's imported straight from
-cogs/help.py's CATEGORIES dict, so the Discord !help menu and the website
-docs page can never drift out of sync — one source of truth.
+The actual landing page (HTML/CSS/JS) lives in a SEPARATE project/repo and
+is deployed as its own Railway service. That website polls the two routes
+below over plain HTTP:
+
+    GET /api/stats       -> live guild/user/uptime/latency numbers
+    GET /api/categories  -> the !help category data (single source of
+                             truth — imported straight from cogs/help.py,
+                             so the Discord !help menu and the website docs
+                             page can never drift out of sync)
+
+Keeping this split means the bot and the website can be deployed,
+scaled, and restarted completely independently.
 """
 import os
-import re
 import time
-from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-
-WEB_DIR = Path(__file__).parent
-
-# Bot client ID used to build the OAuth2 "Add to Server" invite link.
-# Set DISCORD_CLIENT_ID in your .env / Railway variables.
-DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
-INVITE_PERMISSIONS = "414531833920"  # send/embed/history/react/connect/speak/manage messages
-INVITE_URL = (
-    f"https://discord.com/oauth2/authorize?client_id={DISCORD_CLIENT_ID}"
-    f"&permissions={INVITE_PERMISSIONS}&scope=bot%20applications.commands"
-    if DISCORD_CLIENT_ID else "#"
-)
 
 
 def _fmt_uptime(seconds: float) -> str:
@@ -48,17 +43,24 @@ def _fmt_uptime(seconds: float) -> str:
 
 
 def create_app(bot) -> FastAPI:
-    app = FastAPI(title="Jarvis", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Jarvis API", docs_url=None, redoc_url=None)
 
-    app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
-    templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
-    templates.env.filters["md_bold"] = lambda s: re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s or "")
-
-    # Curated subset shown in the hero feature grid — full list lives in the docs section.
-    HIGHLIGHT_KEYS = ["🤖 AI", "🧠 Memory", "♟️ Games", "🎵 Music", "🪙 Jarvis Credits", "⏰ Reminders"]
+    # The website is a separate domain/project, so the browser-facing fetch
+    # calls it makes need CORS. Lock this down to your website's real domain
+    # in production via the ALLOWED_ORIGIN env var (comma-separated if you
+    # ever run more than one frontend) — defaults to "*" so things work
+    # out of the box.
+    allowed_origins = os.getenv("ALLOWED_ORIGIN", "*")
+    origins = [o.strip() for o in allowed_origins.split(",")] if allowed_origins != "*" else ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_methods=["GET"],
+        allow_headers=["*"],
+    )
 
     # Lazy imports — avoids circular import issues at module load time,
-    # and lets the site still boot even if a cog fails to load.
+    # and lets the API still boot even if a cog fails to load.
     def _get_categories():
         from cogs.help import CATEGORIES
         return CATEGORIES
@@ -71,20 +73,16 @@ def create_app(bot) -> FastAPI:
         from cogs.system import _START_TIME
         return _START_TIME
 
-    @app.get("/", response_class=None)
-    async def home(request: Request):
-        categories = _get_categories()
-        highlights = {k: categories[k] for k in HIGHLIGHT_KEYS if k in categories}
-        return templates.TemplateResponse(
-            "index.html",
-            {
-                "request": request,
-                "categories": categories,
-                "highlights": highlights,
-                "invite_url": INVITE_URL,
-                "bot_name": bot.user.name if bot.user else "Jarvis",
-            },
-        )
+    @app.get("/api/categories")
+    async def api_categories():
+        try:
+            categories = _get_categories()
+        except Exception:
+            categories = {}
+        return JSONResponse({
+            "bot_name": bot.user.name if bot.user else "Jarvis",
+            "categories": categories,
+        })
 
     @app.get("/api/stats")
     async def api_stats():
@@ -112,6 +110,7 @@ def create_app(bot) -> FastAPI:
             "uptime_human": _fmt_uptime(uptime_seconds),
             "latency_ms": latency_ms,
             "online": bot.is_ready() if hasattr(bot, "is_ready") else True,
+            "bot_name": bot.user.name if bot.user else "Jarvis",
         })
 
     @app.get("/healthz")
