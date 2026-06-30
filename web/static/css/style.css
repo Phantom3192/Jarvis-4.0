@@ -143,10 +143,28 @@ h1, h2, h3 {
 /* ── Hero ────────────────────────────────────────────────── */
 
 .hero {
+  position: relative;
   padding: 88px 0 72px;
   border-bottom: 1px solid var(--line);
+  background-image:
+    linear-gradient(180deg, rgba(9,12,16,0.88) 0%, rgba(9,12,16,0.80) 45%, var(--bg) 100%),
+    url('/static/img/hero-bg.png');
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+  isolation: isolate;
+}
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 900px 500px at 50% 30%, rgba(9,12,16,0) 0%, var(--bg) 92%);
+  pointer-events: none;
+  z-index: 0;
 }
 .hero-grid {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: 1.1fr 0.9fr;
   gap: 48px;
