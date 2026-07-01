@@ -64,7 +64,7 @@ GROQ_API_KEYS: list[str] = _load_groq_keys()
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
 
-GROQ_MODEL_TEXT    = "llama-3.3-70b-versatile"
+GROQ_MODEL_TEXT    = "openai/gpt-oss-120b"
 GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
@@ -83,11 +83,11 @@ GROQ_RETRIES     = 1    # one retry max; second timeout just backs off the key a
 MODELS: dict[str, dict] = {
     "auto": {
         "label":           "🔄 Auto (default)",
-        "desc":            "Tries Groq Llama first, falls back to Gemini automatically.",
+        "desc":            "Tries Groq GPT-OSS first, falls back to Gemini automatically.",
         "supports_vision": True,
     },
     "groq": {
-        "label":           "⚡ Groq — Llama 3.3 70B",
+        "label":           "⚡ Groq — GPT-OSS 120B",
         "desc":            "Fast. Best for quick questions and conversation.",
         "supports_vision": False,
     },
