@@ -71,8 +71,8 @@ GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
 HISTORY_LIMIT    = 2    # Keep the prompt very short for faster responses
 MAX_TOKENS       = 180  # Shorter responses are much faster to generate
-PROVIDER_TIMEOUT = 2.0  # Aggressively fast failover keeps the user experience snappy
-GROQ_RETRIES     = 0    # No retries — fastest path, fewer round-trips
+PROVIDER_TIMEOUT = 2.0  # Fast failover keeps the user experience snappy
+GROQ_RETRIES     = 1    # One quick retry helps avoid false timeouts
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
@@ -132,7 +132,7 @@ DEFAULT_SYSTEM_PROMPT = (
 
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 MAX_IMAGE_BYTES       = 20 * 1024 * 1024
-AI_UNAVAILABLE_MSG    = "⚠️ AI providers are currently unavailable. Please try again in a few minutes."
+AI_UNAVAILABLE_MSG    = "⏳ The AI provider is taking longer than expected. Please try again in a moment."
 
 DAILY_LIMIT_MSG = (
     "⏳ **You've reached your daily Jarvis AI limit!**\n\n"
