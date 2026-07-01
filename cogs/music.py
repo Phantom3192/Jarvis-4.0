@@ -75,15 +75,19 @@ _JIOSAAVN_PREFIXES   = ("https://www.jiosaavn.com/", "https://jiosaavn.com/")
 # No public nodes — you control quality, uptime, and cookies.
 NODE_SELF = "jarvis-lavalink"
 
-LAVALINK_NODES = [
-    {
-        "identifier": NODE_SELF,
-        "host":       "reseau.proxy.rlwy.net",
-        "password":   "jarvisbot",
-        "secure":     True,
-        "port":       34023,
-    },
-]
+# Leave this empty to disable Lavalink entirely.
+LAVALINK_NODES: list[dict[str, object]] = []
+
+# Example:
+# LAVALINK_NODES = [
+#     {
+#         "identifier": NODE_SELF,
+#         "host":       "reseau.proxy.rlwy.net",
+#         "password":   "jarvisbot",
+#         "secure":     True,
+#         "port":       34023,
+#     },
+# ]
 
 # Minimum gap (in seconds) between consecutive track-load requests.
 MIN_TRACK_LOAD_GAP = 2.5
@@ -119,6 +123,10 @@ async def _smart_search(query: str) -> tuple[wavelink.Search | None, str]:
         then SoundCloud as a final fallback (all on the self-hosted node)
     """
     q = query.strip()
+    if not LAVALINK_NODES:
+        print("[Search] No Lavalink nodes configured; skipping search.")
+        return None, "none"
+
     source = _detect_source(q)
     node = wavelink.Pool.get_node(NODE_SELF)
 
@@ -512,6 +520,10 @@ class Music(commands.Cog):
     async def _connect_lavalink(self) -> None:
         await self.bot.wait_until_ready()
         await asyncio.sleep(2)
+        if not LAVALINK_NODES:
+            print("⚠️ Music: no Lavalink nodes configured; skipping connection.")
+            return
+
         nodes = [
             wavelink.Node(
                 identifier=n["identifier"],
