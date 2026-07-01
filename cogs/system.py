@@ -372,7 +372,7 @@ class System(commands.Cog):
         await interaction.followup.send(result)
 
 
-    # ── !guildinfo ────────────────────────────────────────────────────────────
+    # ── !guildinfo ───────────────────────────────────────────────────────────
 
     @commands.command(name="guildinfo")
     async def prefix_guildinfo(self, ctx: commands.Context, guild_id: int = None):
