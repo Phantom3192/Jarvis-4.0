@@ -38,6 +38,16 @@ if _PSUTIL:
     _PROC.cpu_percent(interval=None)
     psutil.cpu_percent(interval=None)
 
+# Railway (and most container platforms) don't expose a per-service disk
+# *quota* anywhere the app can read it — psutil.disk_usage("/") just reports
+# the shared host node's total disk, which is meaningless here. Instead we
+# measure the bot's OWN footprint (its project folder — code, logs, caches,
+# downloaded files, etc.) against a limit YOU set to match your actual plan.
+# Check your real limit in the Railway dashboard (Settings → Usage / plan
+# page) and override it with the RAILWAY_DISK_LIMIT_GB env var if it's not 5.
+_BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
+_DISK_LIMIT_BYTES = float(os.environ.get("RAILWAY_DISK_LIMIT_GB", "5")) * 1_073_741_824
+
 # Must stay in sync with COGS in main.py
 COGS = [
     "cogs.ai",
@@ -105,6 +115,24 @@ def _container_memory() -> tuple[int, int] | None:
     return None
 
 
+def _bot_storage_used() -> int:
+    """
+    Total size of the bot's own project directory (code, logs, caches,
+    downloads, etc.) — this is what's actually consuming your disk
+    allotment, as opposed to the shared host's total disk.
+    """
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(_BASE_DIR):
+        # Skip .git — it's not part of the running app's footprint.
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for f in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                pass
+    return total
+
+
 def _ping_colour(ms: float) -> discord.Color:
     if ms < 100:
         return discord.Color.green()
@@ -131,7 +159,6 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
         proc    = _PROC
         cpu_pct = psutil.cpu_percent(interval=None)
         vm      = psutil.virtual_memory()
-        disk    = psutil.disk_usage("/")
 
         cgroup = _container_memory()
         if cgroup:
@@ -148,13 +175,15 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
             value=f"`{_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)}` ({ram_pct:.1f}%)",
             inline=True,
         )
-        # NOTE: there's no cgroup-level disk *quota* the way there is for
-        # memory, so this reflects the shared host node's disk, not a
-        # per-app allocation. Labelled "Host Disk" so it isn't mistaken
-        # for the bot's own storage footprint.
+        # NOTE: Railway doesn't expose a per-service disk quota to the app,
+        # so this measures the bot's own project folder against a limit set
+        # via RAILWAY_DISK_LIMIT_GB (defaults to 5 GB — update to match your
+        # actual Railway plan, found in the dashboard's Usage/plan page).
+        storage_used = _bot_storage_used()
+        storage_pct  = storage_used / _DISK_LIMIT_BYTES * 100
         embed.add_field(
-            name="💿 Host Disk",
-            value=f"`{_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}` ({disk.percent:.1f}%)",
+            name="💿 Bot Storage",
+            value=f"`{_fmt_bytes(storage_used)} / {_fmt_bytes(int(_DISK_LIMIT_BYTES))}` ({storage_pct:.1f}%)",
             inline=True,
         )
 
@@ -372,7 +401,7 @@ class System(commands.Cog):
         await interaction.followup.send(result)
 
 
-    # ── !guildinfo ───────────────────────────────────────────────────────────
+    # ── !guildinfo ────────────────────────────────────────────────────────────
 
     @commands.command(name="guildinfo")
     async def prefix_guildinfo(self, ctx: commands.Context, guild_id: int = None):
