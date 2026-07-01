@@ -28,6 +28,16 @@ from cogs.state import seen_users
 # Set once at import — survives cog reloads because the module stays in sys.modules
 _START_TIME = time.monotonic()
 
+# psutil.cpu_percent()/Process.cpu_percent() need a "warm-up" call before they
+# return meaningful numbers — the first call on a given object just establishes
+# a baseline and returns 0.0. Keep ONE persistent Process instance at module
+# level (instead of creating a fresh psutil.Process() on every command
+# invocation) and prime both here, so real deltas are available afterward.
+if _PSUTIL:
+    _PROC = psutil.Process(os.getpid())
+    _PROC.cpu_percent(interval=None)
+    psutil.cpu_percent(interval=None)
+
 # Must stay in sync with COGS in main.py
 COGS = [
     "cogs.ai",
@@ -115,7 +125,10 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     embed.add_field(name="👤 Seen Users", value=f"`{len(seen_users):,}`",   inline=True)
 
     if _PSUTIL:
-        proc    = psutil.Process(os.getpid())
+        # Reuse the single module-level Process instance (primed at import
+        # time) instead of psutil.Process(os.getpid()) here — a fresh
+        # instance has no CPU baseline and would always report 0.0%.
+        proc    = _PROC
         cpu_pct = psutil.cpu_percent(interval=None)
         vm      = psutil.virtual_memory()
         disk    = psutil.disk_usage("/")
@@ -135,8 +148,12 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
             value=f"`{_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)}` ({ram_pct:.1f}%)",
             inline=True,
         )
+        # NOTE: there's no cgroup-level disk *quota* the way there is for
+        # memory, so this reflects the shared host node's disk, not a
+        # per-app allocation. Labelled "Host Disk" so it isn't mistaken
+        # for the bot's own storage footprint.
         embed.add_field(
-            name="💿 Disk",
+            name="💿 Host Disk",
             value=f"`{_fmt_bytes(disk.used)} / {_fmt_bytes(disk.total)}` ({disk.percent:.1f}%)",
             inline=True,
         )
