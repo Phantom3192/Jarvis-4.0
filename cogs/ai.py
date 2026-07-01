@@ -69,10 +69,10 @@ GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
-HISTORY_LIMIT    = 3    # Keep the prompt short for faster responses
-MAX_TOKENS       = 220  # Shorter responses are much faster to generate
-PROVIDER_TIMEOUT = 3    # Fast failover keeps the user experience snappy
-GROQ_RETRIES     = 1    # one retry max; second timeout just backs off the key and falls to Gemini faster
+HISTORY_LIMIT    = 2    # Keep the prompt very short for faster responses
+MAX_TOKENS       = 180  # Shorter responses are much faster to generate
+PROVIDER_TIMEOUT = 2.0  # Aggressively fast failover keeps the user experience snappy
+GROQ_RETRIES     = 0    # No retries — fastest path, fewer round-trips
 
 # ── Available models for /setmodel ───────────────────────────────────────────
 # key        → internal identifier stored per user
@@ -1342,25 +1342,13 @@ async def generate_ai_response(
             reply = await _try_groq(history, system_prompt)
 
     else:
-        # "groq" or "auto" — Groq first (fastest), Gemini only as fallback.
-        # Exception: if ALL Groq keys are currently backed off, skip straight
-        # to Gemini rather than waiting for _try_groq to discover this itself.
-        groq_available = _next_groq_client() is not None
+        # Ultra-fast path for auto/groq: use Groq directly and avoid the extra
+        # Gemini fallback work entirely. This is the quickest practical route
+        # for normal chat replies and keeps latency low.
         if has_image:
             reply = await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
-        elif groq_available:
+        else:
             reply = await _try_groq(history, system_prompt)
-        # else: all Groq keys backed off — fall through directly to Gemini below
-
-        # Groq failed or was unavailable — race Gemini Flash + Lite across both keys
-        if not reply and genai is not None:
-            tasks = []
-            for key in filter(None, [GEMINI_API_KEY, GEMINI_API_KEY_2]):
-                if not _gemini_is_backed_off(key):
-                    tasks.append(asyncio.create_task(_try_gemini(key, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
-                    tasks.append(asyncio.create_task(_try_gemini(key, GEMINI_MODEL_LITE,  history, system_prompt, image_b64, media_type)))
-            if tasks:
-                reply = await _race_providers(*tasks)
 
     if not reply:
         history.pop()
@@ -1884,12 +1872,17 @@ class AI(commands.Cog):
         try:
             try:
                 async with message.channel.typing():
+                    # Send a lightweight acknowledgement immediately so the bot feels responsive.
+                    ack_task = asyncio.create_task(
+                        message.reply("⏳ Working on it…", delete_after=8)
+                    )
                     reply = await generate_ai_response(
                         message.author.id, user_text, message.channel.id,
                         guild_id, image_b64, media_type, user=message.author,
                         reply_context=reply_context,
                         thread_root_id=thread_root_id,
                     )
+                    await ack_task
             except Exception as e:
                 # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
                 print(f"[Warning] Failed to show typing indicator: {type(e).__name__}: {e}")
