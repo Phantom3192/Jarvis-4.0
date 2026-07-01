@@ -1872,17 +1872,12 @@ class AI(commands.Cog):
         try:
             try:
                 async with message.channel.typing():
-                    # Send a lightweight acknowledgement immediately so the bot feels responsive.
-                    ack_task = asyncio.create_task(
-                        message.reply("⏳ Working on it…", delete_after=8)
-                    )
                     reply = await generate_ai_response(
                         message.author.id, user_text, message.channel.id,
                         guild_id, image_b64, media_type, user=message.author,
                         reply_context=reply_context,
                         thread_root_id=thread_root_id,
                     )
-                    await ack_task
             except Exception as e:
                 # Network error (DNS failure, connection timeout, etc.) — proceed without typing indicator
                 print(f"[Warning] Failed to show typing indicator: {type(e).__name__}: {e}")
