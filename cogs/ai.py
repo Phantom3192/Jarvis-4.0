@@ -69,9 +69,9 @@ GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
 GEMINI_MODEL_FLASH = "gemini-2.0-flash"
 GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
 
-HISTORY_LIMIT    = 5    # Reduced for ultra-fast API responses
-MAX_TOKENS       = 400  # Snappier responses — still ~2 solid paragraphs
-PROVIDER_TIMEOUT = 8    # 8s per provider; backed-off keys skip instantly so p99 stays fast
+HISTORY_LIMIT    = 3    # Keep the prompt short for faster responses
+MAX_TOKENS       = 220  # Shorter responses are much faster to generate
+PROVIDER_TIMEOUT = 3    # Fast failover keeps the user experience snappy
 GROQ_RETRIES     = 1    # one retry max; second timeout just backs off the key and falls to Gemini faster
 
 # ── Available models for /setmodel ───────────────────────────────────────────
@@ -1172,12 +1172,12 @@ async def generate_ai_response(
             f"If you really need a repeated output, ask for at most {get_setting('max_repeat_requests', 10)} repetitions."
         )
 
-    # Quick cache check — if same message asked within 60s, return cached response
+    # Quick cache check — if same message asked within 30s, return cached response
     if not image_b64:  # Only cache text responses
         cache_key = (user_id, channel_id, user_message)
         if cache_key in _response_cache:
             cached_response, cache_time = _response_cache[cache_key]
-            if time.time() - cache_time < 60:  # Cache for 60 seconds
+            if time.time() - cache_time < 30:  # Cache for 30 seconds
                 # Still extract memory even on cache hits so "remember to call me X"
                 # is never silently dropped just because the message was repeated.
                 if user_message and thread_root_id is None:
@@ -1200,9 +1200,7 @@ async def generate_ai_response(
     # system prompt and history. We await it only right before we need it.
     memory_task = None
     if not in_group and not in_merge:
-        memory_task = asyncio.create_task(
-            asyncio.wait_for(get_facts(user_id), timeout=2.0)
-        )
+        memory_task = asyncio.create_task(get_facts(user_id))
 
     # Build history and prompt while memory is fetching in background
     history  = _get_history(user_id, channel_id, thread_root_id)
@@ -1212,7 +1210,7 @@ async def generate_ai_response(
     memory_suffix = ""
     if memory_task is not None:
         try:
-            facts = await memory_task
+            facts = await asyncio.wait_for(memory_task, timeout=0.25)
             memory_suffix = build_memory_prompt(facts)
         except Exception:
             memory_suffix = ""
@@ -1398,7 +1396,7 @@ async def generate_ai_response(
                 print(f"[Memory] extract error: {e}")
         asyncio.create_task(_extract_memory())
 
-    # Fire-and-forget: record stats to DB in background, don't block response
+    # Fire-and-forget: record stats in background, don't block response
     asyncio.create_task(asyncio.to_thread(_background_record, user_id, user_message, reply))
 
     new_count = increment_ai_usage(user_id)
@@ -1408,7 +1406,7 @@ async def generate_ai_response(
         remaining = limit - new_count
         reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=limit, remaining=remaining)}"
 
-    # Cache text responses for 60 seconds (skip if has image)
+    # Cache text responses for 30 seconds (skip if has image)
     # Sweep stale entries every 100 writes to avoid unbounded growth without
     # paying a full scan cost on every single message.
     if not image_b64:
@@ -1418,7 +1416,7 @@ async def generate_ai_response(
         _response_cache_writes[0] += 1
         if _response_cache_writes[0] >= 100:
             _response_cache_writes[0] = 0
-            stale = [k for k, (_, ts) in _response_cache.items() if now - ts > 60]
+            stale = [k for k, (_, ts) in _response_cache.items() if now - ts > 30]
             for k in stale:
                 _response_cache.pop(k, None)
 
@@ -1691,14 +1689,6 @@ class AI(commands.Cog):
 
             if not check_cooldown(message.author.id):
                 await message.add_reaction("⏳")
-                return
-
-            # Processing lock — if bot is still responding to this user's previous message
-            if message.author.id in _processing_users:
-                await message.reply(
-                    "⏳ Still working on your previous message — hang tight, I'll be right with you!",
-                    delete_after=5,
-                )
                 return
 
         if is_new_user(message.author.id):

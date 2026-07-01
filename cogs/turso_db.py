@@ -76,6 +76,7 @@ class TursoConnection:
         self._lock = asyncio.Lock()  # serialize reconnects across concurrent callers
         self._last_activity = 0.0
         self._last_connect = 0.0  # separate from _last_activity — only set on (re)connect
+        self._last_stream_log = 0.0
 
     def connect_sync(self) -> bool:
         """Blocking connect — call via asyncio.to_thread from async code."""
@@ -143,7 +144,10 @@ class TursoConnection:
                             # which just spams the same message repeatedly
                             # for what is really a single underlying event.
                             if time.monotonic() - self._last_connect > 0.5:
-                                print(f"[{self.label}] Stream error, reconnecting...")
+                                now = time.monotonic()
+                                if now - self._last_stream_log >= 15.0:
+                                    print(f"[{self.label}] Stream error, reconnecting...")
+                                    self._last_stream_log = now
                                 await asyncio.to_thread(self.connect_sync)
                         if self.conn is None:
                             print(f"[{self.label}] Reconnect failed, giving up.")
