@@ -73,6 +73,10 @@ def create_app(bot) -> FastAPI:
         from cogs.system import _START_TIME
         return _START_TIME
 
+    def _get_usage_stats():
+        from cogs.system import get_usage_stats
+        return get_usage_stats()
+
     @app.get("/api/categories")
     async def api_categories():
         try:
@@ -102,6 +106,10 @@ def create_app(bot) -> FastAPI:
             latency_ms = round(bot.latency * 1000) if bot.latency == bot.latency else None  # NaN guard
         except Exception:
             latency_ms = None
+        try:
+            usage = _get_usage_stats()
+        except Exception:
+            usage = {"available": False}
 
         return JSONResponse({
             "guilds": guild_count,
@@ -111,6 +119,7 @@ def create_app(bot) -> FastAPI:
             "latency_ms": latency_ms,
             "online": bot.is_ready() if hasattr(bot, "is_ready") else True,
             "bot_name": bot.user.name if bot.user else "Jarvis",
+            "usage": usage,
         })
 
     @app.get("/healthz")

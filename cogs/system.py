@@ -46,7 +46,7 @@ if _PSUTIL:
 # Check your real limit in the Railway dashboard (Settings → Usage / plan
 # page) and override it with the RAILWAY_DISK_LIMIT_GB env var if it's not 5.
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
-_DISK_LIMIT_BYTES = float(os.environ.get("RAILWAY_DISK_LIMIT_GB", "5")) * 1_073_741_824
+_DISK_LIMIT_BYTES = float(os.environ.get("RAILWAY_DISK_LIMIT_GB", "1")) * 1_073_741_824
 
 # Must stay in sync with COGS in main.py
 COGS = [
@@ -139,6 +139,54 @@ def _ping_colour(ms: float) -> discord.Color:
     if ms < 200:
         return discord.Color.yellow()
     return discord.Color.red()
+
+
+def get_usage_stats() -> dict:
+    """
+    Raw host/process resource numbers as plain JSON-serialisable data —
+    the numeric core shared by the !status "Usage" tab (embed) and the
+    public web API. Keeping one source of truth means the Discord
+    command and the website can never drift out of sync.
+    """
+    if not _PSUTIL:
+        return {"available": False}
+
+    proc    = _PROC
+    cpu_pct = psutil.cpu_percent(interval=None)
+    vm      = psutil.virtual_memory()
+
+    cgroup = _container_memory()
+    if cgroup:
+        ram_used, ram_total = cgroup
+        ram_pct    = ram_used / ram_total * 100
+        ram_source = "container"
+    else:
+        ram_used, ram_total, ram_pct = vm.used, vm.total, vm.percent
+        ram_source = "host"
+
+    storage_used  = _bot_storage_used()
+    storage_limit = int(_DISK_LIMIT_BYTES)
+    storage_pct   = storage_used / _DISK_LIMIT_BYTES * 100
+
+    with proc.oneshot():
+        proc_mem = proc.memory_info().rss
+        proc_cpu = proc.cpu_percent(interval=None)
+        threads  = proc.num_threads()
+
+    return {
+        "available":            True,
+        "cpu_percent":          round(cpu_pct, 1),
+        "ram_used_bytes":       ram_used,
+        "ram_total_bytes":      ram_total,
+        "ram_percent":          round(ram_pct, 1),
+        "ram_source":           ram_source,
+        "storage_used_bytes":   storage_used,
+        "storage_limit_bytes":  storage_limit,
+        "storage_percent":      round(storage_pct, 1),
+        "process_rss_bytes":    proc_mem,
+        "process_cpu_percent":  round(proc_cpu, 1),
+        "threads":              threads,
+    }
 
 
 def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
