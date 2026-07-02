@@ -246,9 +246,9 @@ class GuildBanReasonModal(discord.ui.Modal, title="Ban Guild"):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
-class UserBanModal(discord.ui.Modal, title="Ban User"):
+class UserBanModal(discord.ui.Modal, title="Ban User (blank duration = permanent)"):
     duration = discord.ui.TextInput(
-        label="Duration (e.g. 7d, 2h, 30m) — blank = permanent", required=False, max_length=20
+        label="Duration (e.g. 7d, 2h, 30m)", required=False, max_length=20
     )
     reason = discord.ui.TextInput(
         label="Reason", required=False, max_length=200, default="No reason provided"
