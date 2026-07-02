@@ -52,6 +52,7 @@ _DISK_LIMIT_BYTES = float(os.environ.get("RAILWAY_DISK_LIMIT_GB", "1")) * 1_073_
 COGS = [
     "cogs.ai",
     "cogs.admin",
+    "cogs.panel",
     "cogs.stats",
     "cogs.prompts",
     "cogs.announce",

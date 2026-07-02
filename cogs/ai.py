@@ -1686,13 +1686,19 @@ async def generate_ai_response(
             reply = await _try_groq(history, system_prompt)
 
     else:
-        # Ultra-fast path for auto/groq: use Groq directly and avoid the extra
-        # Gemini fallback work entirely. This is the quickest practical route
-        # for normal chat replies and keeps latency low.
+        # Fast path for auto/groq: try Groq first (no Gemini overhead on the
+        # common case, keeps latency low). If every Groq key is exhausted /
+        # rate-limited / timing out, fall back to Gemini flash-lite instead
+        # of giving up — this is our safety net so the bot doesn't go
+        # completely silent during a Groq outage.
         if has_image:
             reply = await _try_groq_vision(history, system_prompt, image_b64, media_type, user_message)
         else:
             reply = await _try_groq(history, system_prompt)
+
+        if not reply and gemini_keys_available:
+            print(f"[AI Response] All Groq keys failed for user {user_id} — falling back to Gemini flash-lite")
+            reply = await _try_gemini_pool(GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
 
     if not reply:
         history.pop()
