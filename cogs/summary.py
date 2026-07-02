@@ -144,7 +144,7 @@ async def _call_ai_summary(transcript: str, window_label: str) -> str:
         if result:
             return result
 
-    return "⚠️ AI providers are currently unavailable. Please try again in a moment."
+    return "⚠️ AI providers are still working on your request. Please wait a moment for a response."
 
 
 # ── Transcript formatter ──────────────────────────────────────────────────────
