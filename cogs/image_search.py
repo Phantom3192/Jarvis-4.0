@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import time
 
 import aiohttp
 import discord
@@ -70,6 +71,37 @@ _KEY_POOL: list[str] = _load_keys()
 
 # Infinite round-robin iterator over the key pool
 _key_cycle = itertools.cycle(_KEY_POOL) if _KEY_POOL else None
+
+_SERPER_STATS: dict[str, object] = {
+    "enabled": bool(_KEY_POOL),
+    "configured": len(_KEY_POOL),
+    "active": len(_KEY_POOL),
+    "requests": 0,
+    "successes": 0,
+    "failures": 0,
+    "total_tokens": 0,
+    "total_latency_ms": 0.0,
+    "keys": [],
+}
+
+
+def _record_serper_result(*, success: bool, latency_ms: float, tokens: int = 0, error: str | None = None) -> None:
+    _SERPER_STATS["requests"] = int(_SERPER_STATS.get("requests", 0)) + 1
+    if success:
+        _SERPER_STATS["successes"] = int(_SERPER_STATS.get("successes", 0)) + 1
+    else:
+        _SERPER_STATS["failures"] = int(_SERPER_STATS.get("failures", 0)) + 1
+    _SERPER_STATS["total_latency_ms"] = float(_SERPER_STATS.get("total_latency_ms", 0.0)) + latency_ms
+    _SERPER_STATS["total_tokens"] = int(_SERPER_STATS.get("total_tokens", 0)) + tokens
+    _SERPER_STATS["active"] = len(_KEY_POOL)
+    if error:
+        _SERPER_STATS["last_error"] = error[:120]
+
+
+def get_serper_status_snapshot() -> dict:
+    return {
+        key: value for key, value in _SERPER_STATS.items()
+    }
 
 
 def _next_key() -> str | None:
@@ -155,6 +187,7 @@ async def _search_images(query: str, safe: bool = True) -> list[dict] | None:
     }
     payload = {"q": query, "num": MAX_RESULTS, "safe": "active" if safe else "off"}
 
+    start = time.perf_counter()
     try:
         async with session.post(
             SERPER_URL,
@@ -163,11 +196,18 @@ async def _search_images(query: str, safe: bool = True) -> list[dict] | None:
             timeout=SERPER_TIMEOUT,
         ) as resp:
             if resp.status != 200:
+                latency_ms = (time.perf_counter() - start) * 1000
+                _record_serper_result(success=False, latency_ms=latency_ms, error=f"http-{resp.status}")
                 print(f"[Serper] HTTP {resp.status} for query: {query!r}")
                 return None
             data = await resp.json()
-            return data.get("images") or []
+            latency_ms = (time.perf_counter() - start) * 1000
+            results = data.get("images") or []
+            _record_serper_result(success=True, latency_ms=latency_ms, tokens=max(1, len(query) // 4 + len(str(results)) // 4))
+            return results
     except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        _record_serper_result(success=False, latency_ms=latency_ms, error=str(exc)[:120])
         print(f"[Serper] Error: {exc}")
         return None
 

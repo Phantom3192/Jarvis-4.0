@@ -16,6 +16,7 @@ from discord import app_commands
 import os
 import re
 import asyncio
+import hashlib
 import time
 from collections import defaultdict
 import groq
@@ -63,6 +64,219 @@ GROQ_API_KEYS: list[str] = _load_groq_keys()
 
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
 GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
+GEMINI_API_KEYS: list[str] = [k for k in (GEMINI_API_KEY, GEMINI_API_KEY_2) if k]
+
+
+def _fingerprint_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+
+
+def _build_initial_key_entries(api_keys: list[str]) -> list[dict]:
+    return [
+        {
+            "fingerprint": _fingerprint_key(key),
+            "status": "healthy",
+            "requests": 0,
+            "successes": 0,
+            "failures": 0,
+            "tokens": 0,
+            "avg_latency_ms": 0.0,
+            "last_error": None,
+        }
+        for key in api_keys
+    ]
+
+
+def _init_provider_status(configured: int, api_keys: list[str] | None = None) -> dict:
+    keys = _build_initial_key_entries(api_keys) if api_keys else []
+    return {
+        "enabled": configured > 0,
+        "configured": configured,
+        "active": len(keys),
+        "requests": 0,
+        "successes": 0,
+        "failures": 0,
+        "total_tokens": 0,
+        "total_latency_ms": 0.0,
+        "keys": keys,
+    }
+
+
+_API_PROVIDER_STATS: dict[str, dict] = {
+    "groq": _init_provider_status(len(GROQ_API_KEYS), GROQ_API_KEYS),
+    "gemini": _init_provider_status(len(GEMINI_API_KEYS), GEMINI_API_KEYS),
+}
+
+
+def _fingerprint_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+
+
+def _estimate_tokens(*parts) -> int:
+    text_parts = []
+    for part in parts:
+        if part is None:
+            continue
+        if isinstance(part, (list, tuple)):
+            text_parts.extend(str(item) for item in part)
+        elif isinstance(part, dict):
+            text_parts.append(str(part))
+        else:
+            text_parts.append(str(part))
+    total_chars = sum(len(item) for item in text_parts)
+    return max(1, total_chars // 4)
+
+
+def _get_or_create_key_entry(provider_stats: dict, api_key: str | None) -> dict:
+    if not api_key:
+        return {}
+    fingerprint = _fingerprint_key(api_key)
+    for entry in provider_stats.get("keys", []):
+        if entry.get("fingerprint") == fingerprint:
+            return entry
+    entry = {
+        "fingerprint": fingerprint,
+        "status": "healthy",
+        "requests": 0,
+        "successes": 0,
+        "failures": 0,
+        "tokens": 0,
+        "avg_latency_ms": 0.0,
+        "last_error": None,
+    }
+    provider_stats.setdefault("keys", []).append(entry)
+    return entry
+
+
+def _record_provider_result(provider: str, api_key: str | None, *, success: bool, latency_ms: float, tokens: int = 0, error: str | None = None, status: str | None = None) -> None:
+    stats = _API_PROVIDER_STATS.setdefault(provider, _init_provider_status(0))
+    stats["requests"] += 1
+    if success:
+        stats["successes"] += 1
+    else:
+        stats["failures"] += 1
+    stats["total_latency_ms"] += latency_ms
+    stats["total_tokens"] += tokens
+    if status is not None:
+        stats["status"] = status
+    if api_key:
+        entry = _get_or_create_key_entry(stats, api_key)
+        entry["requests"] += 1
+        if success:
+            entry["successes"] += 1
+        else:
+            entry["failures"] += 1
+        entry["tokens"] += tokens
+        if entry["requests"]:
+            entry["avg_latency_ms"] = ((entry.get("avg_latency_ms", 0.0) * (entry["requests"] - 1)) + latency_ms) / entry["requests"]
+        if error:
+            entry["last_error"] = error[:120]
+        entry["status"] = status or ("healthy" if success else "error")
+    stats["active"] = len([entry for entry in stats.get("keys", []) if entry.get("status") not in {"disabled", "backoff", "error"}])
+
+
+def get_api_status_snapshot() -> dict:
+    snapshot = {
+        name: dict(provider) for name, provider in _API_PROVIDER_STATS.items()
+    }
+    try:
+        from cogs.image_search import get_serper_status_snapshot
+        snapshot["serper"] = get_serper_status_snapshot()
+    except Exception:
+        snapshot["serper"] = {
+            "enabled": False,
+            "configured": 0,
+            "active": 0,
+            "requests": 0,
+            "successes": 0,
+            "failures": 0,
+            "total_tokens": 0,
+            "avg_latency_ms": 0.0,
+            "keys": [],
+        }
+    return snapshot
+
+
+def _provider_health_label(provider: dict) -> str:
+    if not provider.get("enabled"):
+        return "🔴 Disabled"
+    if provider.get("configured", 0) == 0:
+        return "🔴 No keys configured"
+    requests = provider.get("requests", 0)
+    failures = provider.get("failures", 0)
+    if requests == 0:
+        return "🟡 Idle"
+    error_rate = failures / max(requests, 1)
+    if error_rate >= 0.4:
+        return "🔴 Degraded"
+    if error_rate >= 0.1:
+        return "🟠 Unstable"
+    return "✅ Healthy"
+
+
+def build_api_status_embed(provider_stats: dict | None = None) -> discord.Embed:
+    stats = provider_stats or _API_PROVIDER_STATS
+    embed = discord.Embed(
+        title="🔧 API Provider Status",
+        description=(
+            "Owner-only diagnostics for configured provider pools. "
+            "No API secrets are shown — only masked key fingerprints and safe metrics."
+        ),
+        color=discord.Color.blurple(),
+    )
+
+    for provider_name, provider in stats.items():
+        title = provider_name.title()
+        health = _provider_health_label(provider)
+        enabled = "✅" if provider.get("enabled") else "❌"
+        configured = provider.get("configured", 0)
+        active = provider.get("active", configured if configured and provider.get("requests", 0) == 0 else provider.get("active", 0))
+        requests = provider.get("requests", 0)
+        successes = provider.get("successes", 0)
+        failures = provider.get("failures", 0)
+        total_tokens = provider.get("total_tokens", 0)
+        avg_latency = provider.get("total_latency_ms", 0.0) / max(requests, 1)
+
+        lines = [
+            f"Status: {health}",
+            f"Enabled: {enabled}",
+            f"Keys: {configured} configured / {active} active",
+            f"Requests: {requests} | Success: {successes} | Fail: {failures}",
+            f"Tokens: {total_tokens:,}",
+            f"Avg latency: {avg_latency:.0f} ms",
+        ]
+
+        keys = provider.get("keys") or []
+        if keys:
+            key_lines = []
+            for idx, key_entry in enumerate(keys, 1):
+                key_lines.append(
+                    f"• `{key_entry.get('fingerprint', 'unknown')}` {key_entry.get('status', 'unknown')} | "
+                    f"reqs {key_entry.get('requests', 0)} | ok {key_entry.get('successes', 0)} | "
+                    f"fail {key_entry.get('failures', 0)} | tok {key_entry.get('tokens', 0)} | "
+                    f"avg {key_entry.get('avg_latency_ms', 0.0):.0f}ms"
+                )
+            lines.append("\n".join(key_lines))
+        elif configured > 0:
+            lines.append(f"• {configured} configured key(s) available — no requests yet")
+        else:
+            lines.append("• No configured keys yet")
+
+        embed.add_field(name=f"{title} — {health}", value="\n".join(lines), inline=False)
+
+    embed.set_footer(text="Token counts are estimated. Key fingerprints are hashed and safe to display.")
+    return embed
+
+
+def build_api_status_report(provider_stats: dict | None = None) -> str:
+    embed = build_api_status_embed(provider_stats)
+    lines = [embed.title or "API Provider Status"]
+    if embed.description:
+        lines.append(embed.description)
+    for field in embed.fields:
+        lines.append(field.name)
+        lines.append(field.value)
+    return "\n".join(lines).strip()
 
 GROQ_MODEL_TEXT    = "openai/gpt-oss-120b"
 GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -426,6 +640,7 @@ async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
         api_key, client = pick
         tried.add(api_key)
         for attempt in range(1, GROQ_RETRIES + 1):
+            start = time.perf_counter()
             try:
                 resp = await asyncio.wait_for(
                     client.chat.completions.create(
@@ -435,12 +650,27 @@ async def _try_groq(messages: list[dict], system_prompt: str) -> str | None:
                     ),
                     timeout=PROVIDER_TIMEOUT,
                 )
-                return resp.choices[0].message.content.strip()
+                content = resp.choices[0].message.content.strip() if getattr(resp, "choices", None) else ""
+                latency_ms = (time.perf_counter() - start) * 1000
+                _record_provider_result(
+                    "groq",
+                    api_key,
+                    success=True,
+                    latency_ms=latency_ms,
+                    tokens=_estimate_tokens(system_prompt, messages, content),
+                    status="healthy",
+                )
+                return content
             except asyncio.TimeoutError:
+                latency_ms = (time.perf_counter() - start) * 1000
+                _record_provider_result("groq", api_key, success=False, latency_ms=latency_ms, error="timeout", status="timeout")
                 print(f"[Groq …{api_key[-6:]}] Timeout after {PROVIDER_TIMEOUT}s (attempt {attempt}/{GROQ_RETRIES})")
                 if attempt == GROQ_RETRIES:
                     _groq_set_backoff(api_key)  # repeated timeout → back off this key
             except Exception as e:
+                latency_ms = (time.perf_counter() - start) * 1000
+                error_msg = str(e)[:120]
+                _record_provider_result("groq", api_key, success=False, latency_ms=latency_ms, error=error_msg, status="error")
                 error_msg = str(e)[:120]
                 if "429" in error_msg or "rate" in error_msg.lower():
                     print(f"[Groq …{api_key[-6:]}] Rate limited — backing off: {error_msg}")
@@ -468,6 +698,7 @@ async def _try_groq_vision(
             break
         api_key, client = pick
         tried.add(api_key)
+        start = time.perf_counter()
         try:
             history = [{"role": "system", "content": system_prompt}] + messages[:-1]
             content: list[dict] = []
@@ -486,12 +717,26 @@ async def _try_groq_vision(
                 ),
                 timeout=PROVIDER_TIMEOUT,
             )
-            return resp.choices[0].message.content.strip()
+            content_text = resp.choices[0].message.content.strip() if getattr(resp, "choices", None) else ""
+            latency_ms = (time.perf_counter() - start) * 1000
+            _record_provider_result(
+                "groq",
+                api_key,
+                success=True,
+                latency_ms=latency_ms,
+                tokens=_estimate_tokens(system_prompt, history, content_text),
+                status="healthy",
+            )
+            return content_text
         except asyncio.TimeoutError:
+            latency_ms = (time.perf_counter() - start) * 1000
+            _record_provider_result("groq", api_key, success=False, latency_ms=latency_ms, error="vision-timeout", status="timeout")
             print(f"[Groq Vision …{api_key[-6:]}] Timeout after {PROVIDER_TIMEOUT}s — trying next key")
             _groq_set_backoff(api_key)
         except Exception as e:
+            latency_ms = (time.perf_counter() - start) * 1000
             error_msg = str(e)[:120]
+            _record_provider_result("groq", api_key, success=False, latency_ms=latency_ms, error=error_msg, status="error")
             if "429" in error_msg or "rate" in error_msg.lower():
                 print(f"[Groq Vision …{api_key[-6:]}] Rate limited — backing off")
                 _groq_set_backoff(api_key)
@@ -514,6 +759,7 @@ async def _try_gemini(
     # Skip immediately if this key is in backoff (recently 429'd)
     if _gemini_is_backed_off(api_key):
         return None
+    start = time.perf_counter()
     try:
         # Configure API key before creating the model (google.generativeai requires this)
         genai.configure(api_key=api_key)
@@ -530,12 +776,26 @@ async def _try_gemini(
             resp = await asyncio.wait_for(chat.send_message_async(parts), timeout=PROVIDER_TIMEOUT)
         else:
             resp = await asyncio.wait_for(chat.send_message_async(last), timeout=PROVIDER_TIMEOUT)
-        return resp.text.strip()
+        content = resp.text.strip() if getattr(resp, "text", None) else ""
+        latency_ms = (time.perf_counter() - start) * 1000
+        _record_provider_result(
+            "gemini",
+            api_key,
+            success=True,
+            latency_ms=latency_ms,
+            tokens=_estimate_tokens(system_prompt, history, last, content),
+            status="healthy",
+        )
+        return content
     except asyncio.TimeoutError:
+        latency_ms = (time.perf_counter() - start) * 1000
+        _record_provider_result("gemini", api_key, success=False, latency_ms=latency_ms, error="timeout", status="timeout")
         print(f"[Gemini {model_name}] Timeout after {PROVIDER_TIMEOUT}s")
         return None
     except Exception as e:
+        latency_ms = (time.perf_counter() - start) * 1000
         error_msg = str(e)
+        _record_provider_result("gemini", api_key, success=False, latency_ms=latency_ms, error=error_msg[:120], status="error")
         # 429 quota exceeded — back off silently, no spam
         if "429" in error_msg or "ResourceExhausted" in type(e).__name__ or "ResourceExhausted" in error_msg:
             _gemini_set_backoff(api_key)
@@ -2148,6 +2408,23 @@ class AI(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild) -> None:
         await _log_guild(guild, joined=True)
+
+    # ── API diagnostics (owner-only) ───────────────────────────────────────
+
+    @app_commands.command(name="apistatus", description="Show safe API provider status, latency, and token usage")
+    async def slash_apistatus(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
+            return
+        embed = build_api_status_embed(get_api_status_snapshot())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @commands.command(name="apistatus")
+    @commands.is_owner()
+    async def apistatus(self, ctx: commands.Context) -> None:
+        """Show safe API provider status, latency, and token usage for the owner."""
+        embed = build_api_status_embed(get_api_status_snapshot())
+        await ctx.reply(embed=embed)
 
     # ── Backfill command (owner-only) ─────────────────────────────────────────
 
