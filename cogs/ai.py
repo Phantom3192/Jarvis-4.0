@@ -62,9 +62,23 @@ def _load_groq_keys() -> list[str]:
 
 GROQ_API_KEYS: list[str] = _load_groq_keys()
 
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")
-GEMINI_API_KEY_2 = os.getenv("GEMINI_API_KEY_2")
-GEMINI_API_KEYS: list[str] = [k for k in (GEMINI_API_KEY, GEMINI_API_KEY_2) if k]
+# Gemini — dynamic multi-key pool, same pattern as Groq above.
+# Add keys to .env as GEMINI_API_KEY, GEMINI_API_KEY_1, GEMINI_API_KEY_2, GEMINI_API_KEY_3 ...
+# The bot picks them all up automatically — no code changes needed.
+def _load_gemini_keys() -> list[str]:
+    keys = []
+    # Accept bare GEMINI_API_KEY for backward compat
+    base = os.getenv("GEMINI_API_KEY", "").strip()
+    if base:
+        keys.append(base)
+    # Scan GEMINI_API_KEY_1, GEMINI_API_KEY_2, ... up to 20
+    for i in range(1, 21):
+        k = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+GEMINI_API_KEYS: list[str] = _load_gemini_keys()
 
 
 def _fingerprint_key(key: str) -> str:
@@ -280,12 +294,24 @@ def build_api_status_report(provider_stats: dict | None = None) -> str:
 
 GROQ_MODEL_TEXT    = "openai/gpt-oss-120b"
 GROQ_MODEL_VISION  = "meta-llama/llama-4-scout-17b-16e-instruct"
-GEMINI_MODEL_FLASH = "gemini-2.0-flash"
-GEMINI_MODEL_LITE  = "gemini-2.0-flash-lite"
+# Gemini 2.0 Flash / Flash-Lite were deprecated and shut down by Google on
+# June 1, 2026 — every call to them now fails (surfaced as a misleading
+# 429 RESOURCE_EXHAUSTED rather than a clean "model not found"). Using the
+# current Gemini 3 generation instead: gemini-3.5-flash (near-Pro quality
+# at Flash-tier cost/speed) and gemini-3.1-flash-lite (stable GA, NOT the
+# "-preview" variant being discontinued July 9, 2026) — ~3x the free-tier
+# quota of the 2.5 generation plus better quality/speed.
+GEMINI_MODEL_FLASH = "gemini-3.5-flash"
+GEMINI_MODEL_LITE  = "gemini-3.1-flash-lite"
 
 HISTORY_LIMIT    = 2    # Keep the prompt very short for faster responses
 MAX_TOKENS       = 180  # Shorter responses are much faster to generate
-PROVIDER_TIMEOUT = 6.0  # Allow providers a bit more time before falling back
+PROVIDER_TIMEOUT = 6.0  # Groq path — kept tight, Groq is meant to be the fast option
+# gemini-3.5-flash has "near-Pro" reasoning overhead and routinely needs more
+# than 6s to respond — the old 6s timeout (tuned for lightweight gemini-2.0-flash)
+# was causing spurious timeouts and burning through the whole key pool on
+# otherwise-healthy keys. Gemini gets its own, longer timeout instead.
+GEMINI_PROVIDER_TIMEOUT = 15.0
 GROQ_RETRIES     = 2    # Give Groq one extra chance to return a real response
 
 # ── Available models for /setmodel ───────────────────────────────────────────
@@ -306,12 +332,12 @@ MODELS: dict[str, dict] = {
         "supports_vision": False,
     },
     "gemini-flash": {
-        "label":           "✨ Gemini 2.0 Flash",
-        "desc":            "Google's fast multimodal model. Supports images.",
+        "label":           "✨ Gemini 3.5 Flash",
+        "desc":            "Google's newest model — near-Pro reasoning at Flash speed. Supports images.",
         "supports_vision": True,
     },
     "gemini-lite": {
-        "label":           "🪶 Gemini 2.0 Flash-Lite",
+        "label":           "🪶 Gemini 3.1 Flash-Lite",
         "desc":            "Lightest model. Best for simple tasks when speed matters.",
         "supports_vision": True,
     },
@@ -411,24 +437,42 @@ def _next_groq_client() -> tuple[str, groq.AsyncGroq] | None:
     return None  # all keys backed off
 
 # ── Gemini package detection ───────────────────────────────────────────────
+# Uses Google's current unified SDK (`google-genai`, imported as `google.genai`).
+# The old `google-generativeai` package (GenerativeModel/start_chat API) is
+# deprecated upstream and receives no further updates, so it's intentionally
+# not supported here.
 _GENAI_PACKAGE: str | None = None
 genai = None
-for _name in ("google.genai", "google.generativeai"):
-    try:
-        module = importlib.import_module(_name)
-        if hasattr(module, "GenerativeModel"):
-            genai = module
-            _GENAI_PACKAGE = _name
-            break
-    except ImportError:
-        continue
+genai_types = None
+try:
+    import google.genai as _genai_module
+    from google.genai import types as _genai_types
+    if hasattr(_genai_module, "Client"):
+        genai = _genai_module
+        genai_types = _genai_types
+        _GENAI_PACKAGE = "google.genai"
+except ImportError:
+    pass
 
 if genai is None:
     print("Warning: No supported Google GenAI package available. Gemini will be disabled.")
+elif GEMINI_API_KEYS:
+    print(f"Using Google GenAI package: {_GENAI_PACKAGE}")
+    print(f"Gemini pool: {len(GEMINI_API_KEYS)} key(s) loaded")
 else:
     print(f"Using Google GenAI package: {_GENAI_PACKAGE}")
+    print("No GEMINI_API_KEY* found - Gemini disabled")
 
+# One Client instance per API key, reused across requests (the new SDK is
+# Client-based rather than the old module-level genai.configure() pattern).
 _gemini_clients: dict[str, object] = {}
+
+def _get_gemini_client(api_key: str):
+    client = _gemini_clients.get(api_key)
+    if client is None:
+        client = genai.Client(api_key=api_key)
+        _gemini_clients[api_key] = client
+    return client
 
 # ── Gemini circuit breaker ─────────────────────────────────────────────────────
 # When a key hits 429, skip it for _GEMINI_BACKOFF seconds so Groq responds fast.
@@ -440,6 +484,26 @@ def _gemini_is_backed_off(api_key: str) -> bool:
 
 def _gemini_set_backoff(api_key: str) -> None:
     _gemini_backoff_until[api_key] = time.time() + _GEMINI_BACKOFF
+
+# Round-robin cursor for picking one Gemini key at a time — mirrors the Groq
+# pool's _next_groq_client. Gemini's rate limit is per-project, so firing
+# every key at once for one message just multiplies requests against the
+# same shared quota; trying keys sequentially (only falling back on failure)
+# uses the pool as actual redundancy instead of burning it in one shot.
+_gemini_rr_index = 0
+
+def _next_gemini_key() -> str | None:
+    """Return the next available (non-backed-off) Gemini key, round-robin."""
+    global _gemini_rr_index
+    if not GEMINI_API_KEYS:
+        return None
+    n = len(GEMINI_API_KEYS)
+    for _ in range(n):
+        key = GEMINI_API_KEYS[_gemini_rr_index % n]
+        _gemini_rr_index = (_gemini_rr_index + 1) % n
+        if not _gemini_is_backed_off(key):
+            return key
+    return None  # all keys backed off
 
 # ── History stores ────────────────────────────────────────────────────────────
 
@@ -761,21 +825,28 @@ async def _try_gemini(
         return None
     start = time.perf_counter()
     try:
-        # Configure API key before creating the model (google.generativeai requires this)
-        genai.configure(api_key=api_key)
-        model   = genai.GenerativeModel(model_name=model_name, system_instruction=system_prompt)
+        # New SDK is Client-based (no module-level genai.configure()); reuse
+        # one Client per key instead of recreating it on every call.
+        client  = _get_gemini_client(api_key)
         history = [
-            {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+            genai_types.Content(
+                role="user" if m["role"] == "user" else "model",
+                parts=[genai_types.Part(text=m["content"])],
+            )
             for m in messages[:-1]
         ]
-        chat = model.start_chat(history=history)
+        chat = client.aio.chats.create(
+            model=model_name,
+            config=genai_types.GenerateContentConfig(system_instruction=system_prompt),
+            history=history,
+        )
         last = messages[-1]["content"]
         if image_b64 and media_type:
             parts = (([last] if last else []) +
-                     [{"mime_type": media_type, "data": base64.b64decode(image_b64)}])
-            resp = await asyncio.wait_for(chat.send_message_async(parts), timeout=PROVIDER_TIMEOUT)
+                     [genai_types.Part.from_bytes(data=base64.b64decode(image_b64), mime_type=media_type)])
+            resp = await asyncio.wait_for(chat.send_message(parts), timeout=GEMINI_PROVIDER_TIMEOUT)
         else:
-            resp = await asyncio.wait_for(chat.send_message_async(last), timeout=PROVIDER_TIMEOUT)
+            resp = await asyncio.wait_for(chat.send_message(last), timeout=GEMINI_PROVIDER_TIMEOUT)
         content = resp.text.strip() if getattr(resp, "text", None) else ""
         latency_ms = (time.perf_counter() - start) * 1000
         _record_provider_result(
@@ -790,19 +861,53 @@ async def _try_gemini(
     except asyncio.TimeoutError:
         latency_ms = (time.perf_counter() - start) * 1000
         _record_provider_result("gemini", api_key, success=False, latency_ms=latency_ms, error="timeout", status="timeout")
-        print(f"[Gemini {model_name}] Timeout after {PROVIDER_TIMEOUT}s")
+        print(f"[Gemini {model_name}] Timeout after {GEMINI_PROVIDER_TIMEOUT}s")
         return None
     except Exception as e:
         latency_ms = (time.perf_counter() - start) * 1000
         error_msg = str(e)
         _record_provider_result("gemini", api_key, success=False, latency_ms=latency_ms, error=error_msg[:120], status="error")
-        # 429 quota exceeded — back off silently, no spam
-        if "429" in error_msg or "ResourceExhausted" in type(e).__name__ or "ResourceExhausted" in error_msg:
+        status_code = getattr(e, "code", None)
+        if status_code == 429 or "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
             _gemini_set_backoff(api_key)
-            print(f"[Gemini {model_name}] 429 quota hit — pausing this key for {_GEMINI_BACKOFF}s, falling back to Groq.")
+            # Print the ACTUAL error text — a 429 can mean genuine quota
+            # exhaustion (RESOURCE_EXHAUSTED) or transient server-side
+            # overload reported as 429, and those need different fixes.
+            print(f"[Gemini {model_name}] 429 — pausing key ...{api_key[-6:]} for {_GEMINI_BACKOFF}s. Raw error: {error_msg[:300]}")
             return None
-        print(f"[Gemini {model_name} Error] {type(e).__name__}: {error_msg[:100]}")
+        print(f"[Gemini {model_name} Error] {type(e).__name__} (code={status_code}): {error_msg[:200]}")
         return None
+
+
+async def _try_gemini_pool(
+    model_name: str,
+    messages: list[dict],
+    system_prompt: str,
+    image_b64: str | None = None,
+    media_type: str | None = None,
+) -> str | None:
+    """Try Gemini keys ONE AT A TIME, round-robin — not all at once.
+
+    Gemini's rate limit is per-project, so if your keys share a project,
+    firing every key in parallel for a single message just sends multiple
+    requests against the same shared quota bucket at once, which can trip
+    429 on several keys from one message. Trying sequentially — only
+    falling back to the next key if the current one actually fails — uses
+    the pool as real redundancy instead of burning through it in one shot.
+    Same pattern as _try_groq's key pool.
+    """
+    if not GEMINI_API_KEYS or not genai:
+        return None
+    tried: set[str] = set()
+    for _ in range(len(GEMINI_API_KEYS)):
+        key = _next_gemini_key()
+        if key is None or key in tried:
+            break  # all keys exhausted or backed off
+        tried.add(key)
+        reply = await _try_gemini(key, model_name, messages, system_prompt, image_b64, media_type)
+        if reply:
+            return reply
+    return None
 
 
 async def _race_providers(*tasks: asyncio.Task) -> str | None:
@@ -1563,41 +1668,20 @@ async def generate_ai_response(
 
     gemini_keys_available = (
         genai is not None and
-        (
-            (GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY)) or
-            (GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2))
-        )
+        any(not _gemini_is_backed_off(k) for k in GEMINI_API_KEYS)
     )
 
     if preferred == "gemini-flash":
-        # Try Gemini first, fall back to Groq
-        tasks = []
-        if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
-            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
-        if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
-            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
-        if tasks:
-            reply = await _race_providers(*tasks)
+        # Try Gemini keys one at a time (not all at once — see _try_gemini_pool), fall back to Groq
+        reply = await _try_gemini_pool(GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
         if not reply:
             reply = await _try_groq(history, system_prompt)
 
     elif preferred == "gemini-lite":
-        # Try Gemini lite first, fall back to flash, then Groq
-        tasks = []
-        if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
-            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)))
-        if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
-            tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)))
-        if tasks:
-            reply = await _race_providers(*tasks)
+        # Try Gemini lite first, fall back to flash, then Groq — each stage tries keys sequentially
+        reply = await _try_gemini_pool(GEMINI_MODEL_LITE, history, system_prompt, image_b64, media_type)
         if not reply and gemini_keys_available:
-            flash_tasks = []
-            if GEMINI_API_KEY   and not _gemini_is_backed_off(GEMINI_API_KEY):
-                flash_tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY,  GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
-            if GEMINI_API_KEY_2 and not _gemini_is_backed_off(GEMINI_API_KEY_2):
-                flash_tasks.append(asyncio.create_task(_try_gemini(GEMINI_API_KEY_2, GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)))
-            if flash_tasks:
-                reply = await _race_providers(*flash_tasks)
+            reply = await _try_gemini_pool(GEMINI_MODEL_FLASH, history, system_prompt, image_b64, media_type)
         if not reply:
             reply = await _try_groq(history, system_prompt)
 
