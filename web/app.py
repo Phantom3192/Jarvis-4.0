@@ -111,7 +111,6 @@ def create_app(bot) -> FastAPI:
                 "rank": rank,
                 "user_id": str(uid),
                 "name": user.display_name if user else f"User {uid}",
-                "avatar_url": str(user.display_avatar.url) if user else None,
                 "credits": bal,
             })
         return entries
