@@ -273,10 +273,17 @@ _REDEEM_FAILURE_MESSAGES = {
 
 LEADERBOARD_SIZE = 10
 _MEDALS = ["🥇", "🥈", "🥉"]
+_LB_NAME_WIDTH = 20  # longer display names get truncated so columns stay aligned
 
 
 async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
-    """Build an embed showing the top JC holders across the whole bot."""
+    """Build an embed showing the top JC holders across the whole bot.
+
+    Rendered as a monospace table (inside a code block) rather than a plain
+    bullet list — Discord embeds can't do real HTML tables, so a padded
+    fixed-width layout is the closest equivalent and reads far cleaner once
+    there are more than a couple of entries.
+    """
     balances = get_all_credits()
     ranked = sorted(
         ((uid, bal) for uid, bal in balances.items() if bal > 0),
@@ -290,7 +297,7 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         embed.description = "Nobody has earned any Jarvis Credits yet!"
         return embed
 
-    lines = []
+    rows = []
     for i, (uid, bal) in enumerate(ranked):
         user = bot.get_user(int(uid))
         if user is None:
@@ -299,10 +306,22 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
             except discord.HTTPException:
                 user = None
         name = user.display_name if user else f"User {uid}"
-        rank = _MEDALS[i] if i < len(_MEDALS) else f"**#{i + 1}**"
-        lines.append(f"{rank} {name} — **{bal}** {JC_EMOJI}")
+        if len(name) > _LB_NAME_WIDTH:
+            name = name[: _LB_NAME_WIDTH - 1] + "…"
+        rank_label = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+        rows.append((rank_label, name, f"{bal:,}"))
 
-    embed.description = "\n".join(lines)
+    rank_col = max(len(r[0]) for r in rows)
+    name_col = max(len(r[1]) for r in rows + [("", "Player", "")])
+    bal_col = max(len(r[2]) for r in rows + [("", "", "Balance")])
+
+    header = f"{'#'.ljust(rank_col)}  {'Player'.ljust(name_col)}  {'Balance'.rjust(bal_col)}"
+    divider = f"{'-' * rank_col}  {'-' * name_col}  {'-' * bal_col}"
+    lines = [header, divider]
+    for rank_label, name, bal_str in rows:
+        lines.append(f"{rank_label.ljust(rank_col)}  {name.ljust(name_col)}  {bal_str.rjust(bal_col)}")
+
+    embed.description = "```\n" + "\n".join(lines) + f"\n```\nBalances shown in {JC_EMOJI}"
     return embed
 
 
