@@ -44,9 +44,32 @@ def _parse_time_arg(val: str) -> float:
 
 LOG_WEBHOOK_URL = os.getenv("LOG_WEBHOOK_URL", "")
 
-ADMIN_USERNAMES: frozenset[str] = frozenset({
-    "phantom_3192",   # ← add more Discord usernames here (all lowercase)
-})
+def _load_admin_ids() -> frozenset[int]:
+    """Admin IDs — Discord *user IDs*, not usernames. Usernames are
+    changeable and get released for anyone to claim once the original
+    holder renames — a username-based check can silently lock an admin
+    out after a rename, or silently grant access to whoever later claims
+    that stale name. IDs are permanent for the life of the account.
+
+    To get a user's ID: Discord → User Settings → Advanced → enable
+    Developer Mode, then right-click their name → Copy User ID.
+
+    Two ways to configure — both are merged together:
+      1. Hardcode below (same spot ADMIN_USERNAMES used to live).
+      2. Set an ADMIN_IDS env var — comma-separated user IDs — handy for
+         adding/rotating admins without a code change or redeploy.
+    """
+    hardcoded: set[int] = {
+        1049677357927125012,  # ← replace with your real Discord user ID(s)
+    }
+    env_ids = {
+        int(part.strip())
+        for part in os.getenv("ADMIN_IDS", "").split(",")
+        if part.strip().isdigit()
+    }
+    return frozenset(hardcoded | env_ids)
+
+ADMIN_IDS: frozenset[int] = _load_admin_ids()
 
 # ── Duration parser ───────────────────────────────────────────────────────────
 
@@ -87,8 +110,8 @@ def parse_duration_str(s: str):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def is_admin(user: discord.User | discord.Member) -> bool:
-    """O(1) admin check using a pre-built frozenset."""
-    return user.name.lower() in ADMIN_USERNAMES
+    """O(1) admin check using a pre-built frozenset of user IDs."""
+    return user.id in ADMIN_IDS
 
 BAN_USAGE = (
     "**Usage:** `!global-ban @user [duration] [reason]`\n"

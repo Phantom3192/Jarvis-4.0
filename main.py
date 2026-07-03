@@ -3,10 +3,11 @@ from discord.ext import commands
 import os
 import asyncio
 import logging
+import signal
 import time
 from dotenv import load_dotenv
 from cogs.errorhandler import install_stdout_error_forwarding, install_view_error_suppression
-from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown
+from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown, flush_all_saves
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
@@ -184,11 +185,54 @@ async def run_web_server() -> None:
     except Exception as e:
         print(f"❌ Web server failed to start: {e}")
 
+async def _flush_and_exit() -> None:
+    """SIGTERM/SIGINT handler: flush any pending debounced state saves to
+    Turso before the process actually terminates, then exit immediately.
+
+    Railway (and most container platforms) send SIGTERM on every
+    redeploy/restart. Python's default SIGTERM handling kills the process
+    right away without running pending asyncio tasks or `finally` blocks,
+    so anything still sitting inside state.py's 2s debounce window would
+    otherwise be silently lost — this is what was causing stats like
+    Messages/Tokens/Last Active to intermittently revert after a restart.
+    """
+    print("🛑 Shutdown signal received — flushing pending state before exit…")
+    try:
+        await flush_all_saves()
+    except Exception as e:
+        print(f"❌ Error flushing state on shutdown: {e}")
+    try:
+        # Lazy import — cogs.game is already loaded via load_extension() by
+        # the time a shutdown signal can fire, so this just looks up the
+        # already-imported module rather than re-running its module-level
+        # code (unlike importing it eagerly at the top of this file, which
+        # would double-init it the same way cogs.ai/cogs.system avoid above).
+        from cogs.game import flush_all_counting_saves
+        flush_all_counting_saves()
+    except Exception as e:
+        print(f"❌ Error flushing counting state on shutdown: {e}")
+    os._exit(0)
+
+
+def _install_signal_handlers() -> None:
+    """Registered once at startup — replaces the default SIGTERM/SIGINT
+    behaviour with the flush-then-exit sequence above."""
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(_flush_and_exit()))
+        except (NotImplementedError, RuntimeError):
+            # Not supported on some platforms (e.g. Windows for SIGTERM) —
+            # falls back to default signal handling there.
+            pass
+
 async def main():
     # Validate token early for a clear error message
     if not TOKEN:
         print("❌ DISCORD_TOKEN is not set in your .env file. Exiting.")
         return
+
+    _install_signal_handlers()
 
     MAX_RETRIES = 5
     BASE_DELAY  = 10    # seconds before first retry
@@ -276,4 +320,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

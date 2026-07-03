@@ -210,6 +210,36 @@ def _count_delete_db(guild_id: int):
         print(f"❌ Counting DB delete error: {e}")
 
 
+def flush_all_counting_saves() -> None:
+    """Immediately persist every guild with a pending (not-yet-fired)
+    debounced counting save, skipping the normal 2s wait. Call this from
+    a SIGTERM/SIGINT handler before the process actually exits — same
+    restart-data-loss risk as state.py's rate_limits/stats: a redeploy
+    landing inside the 2s debounce window would otherwise silently roll
+    back a guild's counting streak/high-score by whatever changed in
+    those last couple seconds. `_count_persist` is a plain blocking call
+    (no asyncio.to_thread wrapper here, matching the rest of this file),
+    so this function is sync too — call it directly, no await needed.
+    """
+    if _count_conn is None:
+        return
+
+    pending = [key for key, task in _count_save_tasks.items() if task and not task.done()]
+    for key in pending:
+        _count_save_tasks[key].cancel()
+
+    saved = 0
+    for key in pending:
+        try:
+            _count_persist(int(key))
+            saved += 1
+        except Exception as e:
+            print(f"❌ Error flushing counting guild '{key}' on shutdown: {e}")
+
+    if saved:
+        print(f"✅ Flushed {saved} pending counting row(s) before shutdown.")
+
+
 async def _count_offer_save(message: discord.Message, old: int, reason_text: str) -> bool:
     """
     Show a Yes/No prompt offering to spend JC to keep the count at `old`

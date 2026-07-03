@@ -183,6 +183,36 @@ async def _debounced_save(key: str, delay: float = 2.0) -> None:
             print(f"❌ Unexpected error in debounced save ({key}): {e}")
 
 
+async def flush_all_saves() -> None:
+    """Immediately persist every key with a pending (not-yet-fired) debounced
+    save, skipping the normal 2s wait. Call this from a SIGTERM/SIGINT
+    handler before the process actually exits — otherwise any change made
+    in the last ~2s before a restart/redeploy is silently lost, since
+    platforms like Railway send SIGTERM and Python doesn't run pending
+    asyncio tasks or `finally` blocks for that signal on its own.
+    """
+    if _db is None:
+        return
+
+    pending = [key for key, task in _save_tasks.items() if task and not task.done()]
+    for key in pending:
+        _save_tasks[key].cancel()
+
+    saved = 0
+    for key in pending:
+        serialiser = _SERIALISE.get(key)
+        if not serialiser:
+            continue
+        try:
+            await _save_key(key, serialiser())
+            saved += 1
+        except Exception as e:
+            print(f"❌ Error flushing '{key}' on shutdown: {e}")
+
+    if saved:
+        print(f"✅ Flushed {saved} pending state key(s) before shutdown.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BAN STATE
 # ══════════════════════════════════════════════════════════════════════════════
