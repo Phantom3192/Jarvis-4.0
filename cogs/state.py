@@ -45,6 +45,7 @@ _data: dict[str, Any] = {
     "guild_logs":     {},    # str(guild_id) → {"name": str, "joined_at": float, "member_count": int, "owner_id": int}
     "referral_codes": {},    # str(user_id) → str code (each user's own stable invite code)
     "referred_by":    {},    # str(user_id) → referrer's user_id (int). Presence = "already redeemed a code".
+    "dnd_users":      {},    # str(user_id) → True (presence = DND enabled)
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -65,6 +66,7 @@ _SERIALISE: dict[str, Any] = {
     "guild_logs":      lambda: _data["guild_logs"],
     "referral_codes":  lambda: _data["referral_codes"],
     "referred_by":     lambda: _data["referred_by"],
+    "dnd_users":       lambda: _data["dnd_users"],
 }
 
 
@@ -125,6 +127,7 @@ async def init_db():
     if "guild_logs"     in db: _data["guild_logs"]     = db["guild_logs"]
     if "referral_codes" in db: _data["referral_codes"] = db["referral_codes"]
     if "referred_by"    in db: _data["referred_by"]    = db["referred_by"]
+    if "dnd_users"      in db: _data["dnd_users"]       = db["dnd_users"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())

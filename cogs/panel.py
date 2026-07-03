@@ -32,7 +32,7 @@ from cogs.admin import (
     _build_ban_list_embed,
     _build_guild_ban_embed,
 )
-from cogs.state import get_setting, set_setting, reset_ai_usage
+from cogs.state import get_setting, set_setting, reset_ai_usage, seen_users, add_credits
 # NOTE: cogs.system is intentionally NOT imported at module level here.
 # cogs.panel loads earlier than cogs.system in main.py's COGS list, and
 # discord.py's load_extension() re-executes a cog from scratch rather than
@@ -41,6 +41,13 @@ from cogs.state import get_setting, set_setting, reset_ai_usage
 # second time (the exact double-init bug this project already worked around
 # for cogs.ai). _do_reload is imported lazily inside reload_btn instead,
 # same pattern cogs/ai.py already uses for its own cogs.system references.
+#
+# Same reasoning applies to cogs.announce (loads after cogs.panel) and
+# cogs.economy (loads much later) — anything imported from those modules
+# is imported lazily inside the relevant callback/on_submit instead of up
+# here. cogs.state and cogs.ui_components are plain helper modules with no
+# cog registration side effects, so they're safe to import eagerly.
+from cogs.ui_components import ConfirmView
 
 PANEL_TIMEOUT = 180
 
@@ -56,7 +63,10 @@ def _get_admin_cog(bot: commands.Bot):
 
 async def _resolve_user(bot: commands.Bot, query: str) -> discord.User | None:
     """Resolve a user from an ID, a raw mention, or a name/display-name
-    substring match across guilds the bot can see."""
+    substring match. Name search is scoped to seen_users — every user
+    Jarvis has actually talked to (same audience Broadcast DMs) — not
+    guild membership, so it won't surface someone who merely shares a
+    server with the bot but has never interacted with it."""
     query = query.strip()
     raw = query.strip("<@!>") if query.startswith("<@") else query
     if raw.isdigit():
@@ -68,13 +78,12 @@ async def _resolve_user(bot: commands.Bot, query: str) -> discord.User | None:
             return None
 
     q = query.lower()
-    seen: set[int] = set()
-    for member in bot.get_all_members():
-        if member.id in seen:
+    for uid in seen_users:
+        user = bot.get_user(uid)
+        if user is None:
             continue
-        seen.add(member.id)
-        if q in member.name.lower() or (member.display_name and q in member.display_name.lower()):
-            return member
+        if q in user.name.lower() or (user.display_name and q in user.display_name.lower()):
+            return user
     return None
 
 
@@ -200,6 +209,58 @@ class BurstModal(discord.ui.Modal, title="Configure Burst Protection"):
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
+class BroadcastModal(discord.ui.Modal, title="Global Announcement"):
+    """Panel equivalent of `!global-announce <message>` — plain-text only
+    (a modal has no room for the --embed/--title/--color flags the text
+    command supports; use !global-announce directly for those)."""
+
+    message = discord.ui.TextInput(
+        label="Message to DM every user",
+        style=discord.TextStyle.paragraph,
+        placeholder="This will be sent as a DM to everyone Jarvis has ever talked to…",
+        required=True,
+        max_length=2000,
+    )
+
+    def __init__(self, parent_view: "PanelHomeView"):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # lazy — see import note at top of file (cogs.announce loads after cogs.panel)
+        from cogs.announce import _deliver, _build_preview_embed
+
+        text = str(self.message).strip()
+        if not text:
+            await interaction.response.send_message("❌ Message cannot be empty.", ephemeral=True)
+            return
+
+        recipient_count = len(seen_users)
+        _, embeds = _build_preview_embed(recipient_count, False, text, None)
+
+        confirm_view = ConfirmView()
+        await interaction.response.send_message(embeds=embeds, view=confirm_view, ephemeral=True)
+        await confirm_view.wait()
+
+        if not confirm_view.confirmed:
+            await interaction.edit_original_response(content="❌ Announcement cancelled.", embeds=[], view=None)
+            return
+
+        await interaction.edit_original_response(
+            content=f"📤 Sending to {recipient_count} user(s)…", embeds=[], view=None
+        )
+        success, fail = await _deliver(interaction.client, text, None)
+
+        await interaction.edit_original_response(
+            content=(
+                f"📢 **Announcement sent!**\n"
+                f"✅ Delivered: **{success}** | ❌ Failed (DMs closed): **{fail}**"
+            ),
+            embeds=[],
+            view=None,
+        )
+
+
 class UserSearchModal(discord.ui.Modal, title="Find a User"):
     user_query = discord.ui.TextInput(
         label="User ID, @mention, or username",
@@ -287,6 +348,62 @@ class UserBanModal(discord.ui.Modal, title="Ban User (blank duration = permanent
         await interaction.response.edit_message(embed=embed, view=view)
 
 
+class CreditAdjustModal(discord.ui.Modal, title="Adjust Jarvis Credits"):
+    """Panel equivalent of !givecredits / !removejc — one amount field
+    covers both (positive grants, negative removes), same as the text
+    commands. `add_credits` already floors the balance at 0."""
+
+    amount = discord.ui.TextInput(
+        label="Amount (negative to remove)",
+        placeholder="e.g. 100 or -50",
+        required=True,
+        max_length=10,
+    )
+    reason = discord.ui.TextInput(
+        label="Reason (optional — shown in the result only)",
+        required=False,
+        max_length=200,
+    )
+
+    def __init__(self, panel_cog: "Panel", author_id: int, user: discord.User, parent_view: "UserDetailView"):
+        super().__init__()
+        self.panel_cog = panel_cog
+        self.author_id = author_id
+        self.user = user
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # lazy — see import note at top of file (cogs.economy loads well after cogs.panel)
+        from cogs.economy import JC_NAME, JC_EMOJI
+
+        try:
+            amt = int(str(self.amount).strip())
+            if amt == 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Amount must be a non-zero whole number.", ephemeral=True
+            )
+            return
+
+        new_balance = add_credits(self.user.id, amt)
+        verb = "Granted" if amt > 0 else "Removed"
+        reason_text = str(self.reason).strip() or "No reason provided"
+
+        embed = self.parent_view.build_embed()
+        embed.add_field(
+            name="💰 Credits Adjusted",
+            value=(
+                f"{JC_EMOJI} **{verb} {abs(amt)} {JC_NAME}** "
+                f"{'to' if amt > 0 else 'from'} **{self.user.display_name}**.\n"
+                f"New balance: **{new_balance}** {JC_EMOJI}\n"
+                f"Reason: {reason_text}"
+            ),
+            inline=False,
+        )
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
 def _collector() -> tuple[list[str], "callable"]:
     """Small helper so panel actions can capture the message that a shared
     _do_botban / _do_guild_ban / etc. helper would normally send via
@@ -347,6 +464,20 @@ class UserDetailView(_AuthorGatedView):
                 await interaction.response.send_message("❌ You can't ban another admin.", ephemeral=True)
                 return
             await interaction.response.send_modal(UserBanModal(self.panel_cog, self.author_id, self.user))
+
+    @discord.ui.button(label="💰 Adjust Credits", style=discord.ButtonStyle.secondary, row=0)
+    async def adjust_credits(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # JC economy commands (!givecredits/!removejc) are owner-only, not just
+        # admin-only — mirror that restriction here even though the panel itself
+        # only requires is_admin to open.
+        if not await interaction.client.is_owner(interaction.user):
+            await interaction.response.send_message(
+                "🚫 Only the bot owner can adjust Jarvis Credits.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            CreditAdjustModal(self.panel_cog, self.author_id, self.user, self)
+        )
 
     @discord.ui.button(label="🔍 Search Another", style=discord.ButtonStyle.secondary, row=0)
     async def search_again(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -624,6 +755,10 @@ class PanelHomeSelect(discord.ui.Select):
                 description="Hot-reload all cogs",
             ),
             discord.SelectOption(
+                label="Broadcast", value="broadcast", emoji="📢",
+                description="DM an announcement to every user Jarvis has talked to",
+            ),
+            discord.SelectOption(
                 label="Reset Limit", value="reset_limit", emoji="⏱️",
                 description="Reset a user's daily AI message limit",
             ),
@@ -668,6 +803,9 @@ class PanelHomeSelect(discord.ui.Select):
             result = await _do_reload(interaction.client)
             embed = _base_embed("🔄 Reload Complete", result, discord.Color.green())
             await interaction.edit_original_response(embed=embed, view=view)
+
+        elif choice == "broadcast":
+            await interaction.response.send_modal(BroadcastModal(view))
 
         elif choice == "reset_limit":
             await interaction.response.send_modal(ResetLimitModal(view))
