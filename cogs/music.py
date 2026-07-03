@@ -872,7 +872,7 @@ class Music(commands.Cog):
 
     # ── Prefix commands ───────────────────────────────────────────────────────
 
-    @commands.command(name="controls", aliases=["ctrl", "panel", "cp"])
+    @commands.command(name="controls", aliases=["control"])
     async def prefix_controls(self, ctx: commands.Context) -> None:
         await self._send_controls(ctx.guild, ctx.reply)
 

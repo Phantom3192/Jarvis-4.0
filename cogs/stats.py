@@ -16,8 +16,9 @@ import time
 from cogs.state import (
     get_stats, get_all_stats, get_all_bans, get_all_rate_limits,
     _today_utc, seen_users, DAILY_AI_LIMIT, get_ai_usage, get_ai_limit,
+    get_image_search_count, get_burst_status,
 )
-from cogs.admin import is_admin
+from cogs.admin import bot_bans
 
 USERS_PAGE_SIZE = 10
 
@@ -75,7 +76,23 @@ def _format_stats(
     else:
         ai_status = "🟢 Good to go"
 
-    color = _activity_color(msgs)
+    img_count = get_image_search_count(user.id)
+
+    burst = get_burst_status(user.id)
+    if burst["pct"] >= 90:
+        burst_status = "🔴 Near spam threshold"
+    elif burst["pct"] >= 50:
+        burst_status = "🟡 Elevated activity"
+    else:
+        burst_status = "🟢 Normal"
+
+    ban = bot_bans.get(str(user.id))
+    is_banned = False
+    if ban:
+        expires = ban.get("expires")
+        is_banned = expires is None or time.time() < expires
+
+    color = discord.Color.red() if is_banned else _activity_color(msgs)
     rank_str = f"  •  Rank {_rank_badge(rank)}" if rank else ""
 
     embed = discord.Embed(
@@ -87,16 +104,20 @@ def _format_stats(
     # Row 1 — core numbers
     embed.add_field(name="💬 Messages",   value=f"`{msgs:,}`",    inline=True)
     embed.add_field(name="🔤 ~Tokens",    value=f"`{tokens:,}`",  inline=True)
-    if memory_count:
-        embed.add_field(name="🧠 Memories", value=f"`{memory_count}`", inline=True)
-    else:
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(name="🖼️ Image Searches", value=f"`{img_count:,}`", inline=True)
 
     # Row 2 — timeline
-    if first_seen:
-        embed.add_field(name="📅 First Seen", value=_ts_to_discord(first_seen), inline=True)
-        embed.add_field(name="🕐 Last Active", value=_ts_to_discord(last_seen),  inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
+    embed.add_field(
+        name="📅 First Seen",
+        value=_ts_to_discord(first_seen) if first_seen else "Never",
+        inline=True,
+    )
+    embed.add_field(
+        name="🕐 Last Active",
+        value=_ts_to_discord(last_seen) if last_seen else "Never",
+        inline=True,
+    )
+    embed.add_field(name="🧠 Memories", value=f"`{memory_count}`", inline=True)
 
     # Row 3 — daily AI bar
     embed.add_field(
@@ -108,7 +129,36 @@ def _format_stats(
         inline=False,
     )
 
-    embed.set_footer(text="Token count is an estimate (~4 chars/token)")
+    # Row 4 — live spam/burst activity
+    burst_bar = _bar(burst["count"], burst["limit"])
+    embed.add_field(
+        name="🚨 Spam Activity (live)",
+        value=(
+            f"`{burst_bar}` **{burst['count']}/{burst['limit']}** commands "
+            f"in last {int(burst['window'])}s ({burst['pct']}%)\n"
+            f"{burst_status}"
+        ),
+        inline=False,
+    )
+
+    # Row 5 — ban status
+    if ban:
+        expires = ban.get("expires")
+        if is_banned:
+            expiry_str = "Permanent" if not expires else discord.utils.format_dt(
+                datetime.fromtimestamp(expires, tz=timezone.utc), style="R"
+            )
+            embed.add_field(
+                name="🚫 Ban Status",
+                value=f"**Banned** — {ban.get('reason', 'No reason')}\nExpires: {expiry_str}",
+                inline=False,
+            )
+        else:
+            embed.add_field(name="✅ Ban Status", value="Not banned (previous ban expired)", inline=False)
+    else:
+        embed.add_field(name="✅ Ban Status", value="Not banned", inline=False)
+
+    embed.set_footer(text="Token count is an estimate (~4 chars/token)  •  Owner-only view")
     return embed
 
 
@@ -326,40 +376,28 @@ class Stats(commands.Cog):
     # ── /stats & !stats ───────────────────────────────────────────────────────
 
     @commands.command(name="stats")
+    @commands.is_owner()
     async def prefix_stats(self, ctx: commands.Context, user: discord.User = None):
-        """!stats — your stats  |  !stats @user — admin only"""
-        if user is not None and not is_admin(ctx.author):
-            await ctx.reply("🚫 Only admins can view other users' stats.")
-            return
-
+        """Bot owner only — !stats or !stats @user for full usage/spam details."""
         target = user or ctx.author
-        data   = get_stats(target.id)
-        if not data:
-            await ctx.reply(embed=_no_stats_embed(target, target.id == ctx.author.id))
-            return
+        data   = get_stats(target.id) or {}
 
         rank   = self._user_rank(target.id)
         mem    = await self._memory_count(target.id)
         await ctx.reply(embed=_format_stats(target, data, rank=rank, memory_count=mem))
 
-    @app_commands.command(name="stats", description="View your Jarvis usage stats")
-    @app_commands.describe(user="User to look up (admins only — leave empty for your own stats)")
+    @app_commands.command(name="stats", description="Owner only — view a user's full Jarvis usage stats")
+    @app_commands.describe(user="User to look up (leave empty for your own stats)")
     async def slash_stats(self, interaction: discord.Interaction, user: discord.User = None):
-        if user is not None and not is_admin(interaction.user):
+        if not await interaction.client.is_owner(interaction.user):
             await interaction.response.send_message(
-                "🚫 Only admins can view other users' stats.", ephemeral=True
+                "🚫 This command is restricted to the bot owner.", ephemeral=True
             )
             return
 
-        await interaction.response.defer(ephemeral=bool(user))
+        await interaction.response.defer(ephemeral=True)
         target = user or interaction.user
-        data   = get_stats(target.id)
-        if not data:
-            await interaction.followup.send(
-                embed=_no_stats_embed(target, target.id == interaction.user.id),
-                ephemeral=True,
-            )
-            return
+        data   = get_stats(target.id) or {}
 
         rank = self._user_rank(target.id)
         mem  = await self._memory_count(target.id)

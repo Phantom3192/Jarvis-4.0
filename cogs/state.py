@@ -278,6 +278,26 @@ def record_message(user_id: int, user_text: str, reply_text: str) -> None:
 def get_stats(user_id: int) -> dict | None:
     return _data["stats"].get(str(user_id))
 
+def record_image_search(user_id: int) -> None:
+    """Bump a user's cumulative !image usage count. Reuses the same 'stats'
+    table/persistence as record_message() rather than adding a new table."""
+    uid   = str(user_id)
+    now   = time.time()
+    stats = _data["stats"]
+    if uid not in stats:
+        stats[uid] = {
+            "messages":   0,
+            "tokens_est": 0,
+            "first_seen": now,
+            "last_seen":  now,
+        }
+    stats[uid]["image_searches"] = stats[uid].get("image_searches", 0) + 1
+    _schedule_save("stats")
+
+def get_image_search_count(user_id: int) -> int:
+    data = _data["stats"].get(str(user_id))
+    return data.get("image_searches", 0) if data else 0
+
 def get_all_stats() -> dict[str, dict]:
     """Return a copy of all user stats, keyed by str(user_id)."""
     return dict(_data["stats"])
@@ -560,6 +580,29 @@ def check_burst_and_maybe_timeout(user_id: int) -> tuple[bool, float | None]:
         return False, timeout
 
     return True, None
+
+
+def get_burst_status(user_id: int) -> dict:
+    """Live snapshot of a user's current burst-window activity, for display
+    purposes only (does not mutate state or trigger a timeout). Useful for
+    spotting a user who's ramping up before they actually hit the limit."""
+    now    = time.monotonic()
+    window = float(get_setting("burst_window_seconds", 60.0))
+    limit  = int(get_setting("burst_limit_count", 20))
+
+    dq = _burst_records.get(user_id)
+    if not dq:
+        count = 0
+    else:
+        cutoff = now - window
+        count = sum(1 for t in dq if t >= cutoff)
+
+    return {
+        "count":  count,
+        "limit":  limit,
+        "window": window,
+        "pct":    round((count / limit) * 100) if limit else 0,
+    }
 
 
 # ── Mention spam protection ──────────────────────────────────────────────────

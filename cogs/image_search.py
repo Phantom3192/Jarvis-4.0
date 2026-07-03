@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 from cogs.http_session import get_session
 from cogs.economy import SpendCreditsView, JC_EMOJI, JC_NAME, get_credits
+from cogs.state import record_image_search
 
 load_dotenv()
 
@@ -133,6 +134,7 @@ def _check_cooldown(user_id: int) -> float:
 def _mark_searched(user_id: int) -> None:
     import time
     _last_searched[user_id] = time.time()
+    record_image_search(user_id)
 
 def _fmt_time(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)

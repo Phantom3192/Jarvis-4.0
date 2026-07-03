@@ -94,7 +94,7 @@ CATEGORIES = {
         "description": "Play music in voice channels via YouTube.",
         "color": 0x1DB954,
         "commands": [
-            ("!controls / !ctrl  /controls", "Open the interactive music control panel"),
+            ("!controls / !control  /controls", "Open the interactive music control panel"),
             ("!play / !p <song>  /play",      "Join VC and play a song or YouTube URL"),
             ("!skip / !s  /skip",             "Skip the current track"),
             ("!stop  /stop",                  "Stop music and disconnect"),
@@ -481,4 +481,3 @@ class Help(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Help(bot))
-    

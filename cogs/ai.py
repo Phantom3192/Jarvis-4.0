@@ -1209,20 +1209,16 @@ async def _try_intent_intercept(
     # ── personal stats ────────────────────────────────────────────────────
     if _INTENT_STATS.search(user_text):
         from cogs.state import get_stats as _get_stats
-        from cogs.stats import _format_stats, _no_stats_embed
-        data = _get_stats(message.author.id)
-        if not data:
-            await safe_reply(message, embed=_no_stats_embed(message.author, True))
-        else:
-            # Get rank and memory count
-            try:
-                from cogs.stats import Stats as _StatsCog
-                cog = bot.cogs.get("Stats")
-                rank = cog._user_rank(message.author.id) if cog else None
-                mem  = await cog._memory_count(message.author.id) if cog else 0
-            except Exception:
-                rank, mem = None, 0
-            await safe_reply(message, embed=_format_stats(message.author, data, rank=rank, memory_count=mem))
+        from cogs.stats import _format_stats
+        data = _get_stats(message.author.id) or {}
+        # Get rank and memory count
+        try:
+            cog = bot.cogs.get("Stats")
+            rank = cog._user_rank(message.author.id) if cog else None
+            mem  = await cog._memory_count(message.author.id) if cog else 0
+        except Exception:
+            rank, mem = None, 0
+        await safe_reply(message, embed=_format_stats(message.author, data, rank=rank, memory_count=mem))
         return True
 
     # ── daily AI limit ────────────────────────────────────────────────────

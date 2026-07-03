@@ -4,7 +4,7 @@ Panel cog — a live, button-driven admin control panel.
 Wraps the existing admin/system commands (!global-ban, !global-unban,
 !guild-ban, !guild-unban, !reload, !resetlimit, !set-cooldown, !set-burst)
 behind one interactive message so admins never have to remember exact
-command syntax. Opened with `!adminpanel` (alias `!apanel`) or `/panel`.
+command syntax. Opened with `!panel` (alias `!apanel`) or `/panel`.
 
 DESIGN NOTES:
 - This cog does not duplicate any ban/reload/setting logic. It calls straight
@@ -96,7 +96,7 @@ class _AuthorGatedView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
             await interaction.response.send_message(
-                "⚠️ Only the admin who opened this panel can use it. Run `!adminpanel` yourself.",
+                "⚠️ Only the admin who opened this panel can use it. Run `!panel` yourself.",
                 ephemeral=True,
             )
             return False
@@ -597,67 +597,104 @@ class GuildBansListView(_AuthorGatedView):
 
 # ── Home ─────────────────────────────────────────────────────────────────────
 
+class PanelHomeSelect(discord.ui.Select):
+    """Single dropdown replacing the old row of home-screen buttons —
+    mirrors the CategorySelect pattern from cogs/help.py."""
+
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Guilds", value="guilds", emoji="📋",
+                description="Browse every server Jarvis is in",
+            ),
+            discord.SelectOption(
+                label="Guild Bans", value="guild_bans", emoji="🚫",
+                description="View and unban banned servers",
+            ),
+            discord.SelectOption(
+                label="User Bans", value="user_bans", emoji="👤",
+                description="View and unban banned users",
+            ),
+            discord.SelectOption(
+                label="Find User", value="find_user", emoji="🔍",
+                description="Look up a user by ID, mention, or name",
+            ),
+            discord.SelectOption(
+                label="Reload", value="reload", emoji="🔄",
+                description="Hot-reload all cogs",
+            ),
+            discord.SelectOption(
+                label="Reset Limit", value="reset_limit", emoji="⏱️",
+                description="Reset a user's daily AI message limit",
+            ),
+            discord.SelectOption(
+                label="Cooldown", value="cooldown", emoji="⚙️",
+                description="Set the command cooldown",
+            ),
+            discord.SelectOption(
+                label="Burst Protection", value="burst", emoji="💥",
+                description="Configure burst rate limiting",
+            ),
+        ]
+        super().__init__(placeholder="Choose an action…", options=options, min_values=1, max_values=1, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view: "PanelHomeView" = self.view
+        choice = self.values[0]
+
+        if choice == "guilds":
+            new_view = GuildListView(view.panel_cog, view.author_id, interaction.client)
+            await interaction.response.edit_message(embed=new_view.build_embed(), view=new_view)
+
+        elif choice == "guild_bans":
+            embed = await _build_guild_ban_embed(interaction.client)
+            new_view = GuildBansListView(view.panel_cog, view.author_id, interaction.client)
+            await interaction.response.edit_message(embed=embed, view=new_view)
+
+        elif choice == "user_bans":
+            new_view = UserBansListView(view.panel_cog, view.author_id)
+            await new_view._load(interaction.client)
+            embed = await new_view.build_embed(interaction.client)
+            await interaction.response.edit_message(embed=embed, view=new_view)
+
+        elif choice == "find_user":
+            await interaction.response.send_modal(UserSearchModal(view.panel_cog, view.author_id))
+
+        elif choice == "reload":
+            from cogs.system import _do_reload  # lazy — see import note at top of file
+            await interaction.response.edit_message(
+                embed=_base_embed("🔄 Reloading…", color=discord.Color.blurple()), view=view
+            )
+            result = await _do_reload(interaction.client)
+            embed = _base_embed("🔄 Reload Complete", result, discord.Color.green())
+            await interaction.edit_original_response(embed=embed, view=view)
+
+        elif choice == "reset_limit":
+            await interaction.response.send_modal(ResetLimitModal(view))
+
+        elif choice == "cooldown":
+            await interaction.response.send_modal(CooldownModal(view))
+
+        elif choice == "burst":
+            await interaction.response.send_modal(BurstModal(view))
+
+
 class PanelHomeView(_AuthorGatedView):
     def __init__(self, panel_cog: "Panel", author_id: int):
         super().__init__(author_id)
         self.panel_cog = panel_cog
+        self.add_item(PanelHomeSelect())
 
     def build_embed(self) -> discord.Embed:
         bot = self.panel_cog.bot
         embed = _base_embed(
             "🛠️ Jarvis Control Panel",
-            "Manage servers, users, and bot settings without typing commands.",
+            "Manage servers, users, and bot settings — pick an action from the dropdown below.",
         )
         embed.add_field(name="Guilds", value=str(len(bot.guilds)), inline=True)
         embed.add_field(name="Guild bans", value=str(len(_guild_bans)), inline=True)
         embed.add_field(name="User bans", value=str(len(bot_bans)), inline=True)
         return embed
-
-    # Row 0 — browse / moderate
-    @discord.ui.button(label="📋 Guilds", style=discord.ButtonStyle.primary, row=0)
-    async def guilds_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = GuildListView(self.panel_cog, self.author_id, interaction.client)
-        await interaction.response.edit_message(embed=view.build_embed(), view=view)
-
-    @discord.ui.button(label="🚫 Guild Bans", style=discord.ButtonStyle.secondary, row=0)
-    async def guild_bans_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await _build_guild_ban_embed(interaction.client)
-        view = GuildBansListView(self.panel_cog, self.author_id, interaction.client)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-    @discord.ui.button(label="👤 User Bans", style=discord.ButtonStyle.secondary, row=0)
-    async def user_bans_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = UserBansListView(self.panel_cog, self.author_id)
-        await view._load(interaction.client)
-        embed = await view.build_embed(interaction.client)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-    @discord.ui.button(label="🔍 Find User", style=discord.ButtonStyle.secondary, row=0)
-    async def find_user_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(UserSearchModal(self.panel_cog, self.author_id))
-
-    # Row 1 — bot settings
-    @discord.ui.button(label="🔄 Reload", style=discord.ButtonStyle.success, row=1)
-    async def reload_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        from cogs.system import _do_reload  # lazy — see import note at top of file
-        await interaction.response.edit_message(
-            embed=_base_embed("🔄 Reloading…", color=discord.Color.blurple()), view=self
-        )
-        result = await _do_reload(interaction.client)
-        embed = _base_embed("🔄 Reload Complete", result, discord.Color.green())
-        await interaction.edit_original_response(embed=embed, view=self)
-
-    @discord.ui.button(label="⏱️ Reset Limit", style=discord.ButtonStyle.secondary, row=1)
-    async def reset_limit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ResetLimitModal(self))
-
-    @discord.ui.button(label="⚙️ Cooldown", style=discord.ButtonStyle.secondary, row=1)
-    async def cooldown_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CooldownModal(self))
-
-    @discord.ui.button(label="💥 Burst", style=discord.ButtonStyle.secondary, row=1)
-    async def burst_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(BurstModal(self))
 
 
 # ── Cog ──────────────────────────────────────────────────────────────────────
@@ -666,7 +703,7 @@ class Panel(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command(name="adminpanel", aliases=["apanel"])
+    @commands.command(name="panel", aliases=["apanel"])
     async def prefix_panel(self, ctx: commands.Context):
         """Admin only — open the live control panel."""
         if not is_admin(ctx.author):
