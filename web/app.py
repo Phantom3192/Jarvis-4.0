@@ -16,6 +16,9 @@ below over plain HTTP:
                              truth — imported straight from cogs/help.py,
                              so the Discord !help menu and the website docs
                              page can never drift out of sync)
+    GET /api/leaderboard -> top Jarvis Credit holders (username + avatar
+                             resolved via the Discord API, cached — see
+                             _LEADERBOARD_CACHE_TTL below)
 
 Keeping this split means the bot and the website can be deployed,
 scaled, and restarted completely independently.
@@ -40,6 +43,15 @@ def _fmt_uptime(seconds: float) -> str:
         parts.append(f"{hours}h")
     parts.append(f"{minutes}m")
     return " ".join(parts)
+
+
+LEADERBOARD_SIZE = 10
+_LEADERBOARD_CACHE_TTL = 60.0  # seconds — resolving usernames means real
+                                # Discord API calls (fetch_user for anyone
+                                # not already in cache), so this is cached
+                                # server-side to avoid hammering Discord on
+                                # every website visitor.
+_leaderboard_cache: dict = {"data": [], "ts": 0.0}
 
 
 def create_app(bot) -> FastAPI:
@@ -76,6 +88,53 @@ def create_app(bot) -> FastAPI:
     def _get_usage_stats():
         from cogs.system import get_usage_stats
         return get_usage_stats()
+
+    async def _build_leaderboard() -> list[dict]:
+        from cogs.state import get_all_credits
+
+        balances = get_all_credits()
+        ranked = sorted(
+            ((uid, bal) for uid, bal in balances.items() if bal > 0),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )[:LEADERBOARD_SIZE]
+
+        entries = []
+        for rank, (uid, bal) in enumerate(ranked, start=1):
+            user = bot.get_user(int(uid))
+            if user is None:
+                try:
+                    user = await bot.fetch_user(int(uid))
+                except Exception:
+                    user = None
+            entries.append({
+                "rank": rank,
+                "user_id": str(uid),
+                "name": user.display_name if user else f"User {uid}",
+                "avatar_url": str(user.display_avatar.url) if user else None,
+                "credits": bal,
+            })
+        return entries
+
+    @app.get("/api/leaderboard")
+    async def api_leaderboard():
+        now = time.monotonic()
+        if now - _leaderboard_cache["ts"] < _LEADERBOARD_CACHE_TTL and _leaderboard_cache["data"]:
+            entries = _leaderboard_cache["data"]
+        else:
+            try:
+                entries = await _build_leaderboard()
+                _leaderboard_cache["data"] = entries
+                _leaderboard_cache["ts"] = now
+            except Exception:
+                entries = _leaderboard_cache["data"]  # serve stale on error
+
+        return JSONResponse({
+            "bot_name": bot.user.name if bot.user else "Jarvis",
+            "currency_name": "Jarvis Credit",
+            "currency_emoji": "🪙",
+            "leaderboard": entries,
+        })
 
     @app.get("/api/categories")
     async def api_categories():
