@@ -17,14 +17,20 @@ below over plain HTTP:
                              so the Discord !help menu and the website docs
                              page can never drift out of sync)
     GET /api/leaderboard -> top Jarvis Credit holders (username + avatar
-                             resolved via the Discord API, cached — see
-                             _LEADERBOARD_CACHE_TTL below)
+                             resolved via the Discord API. Refreshed by a
+                             background loop every _LEADERBOARD_REFRESH_SECS
+                             — NOT triggered by website requests — so no
+                             matter how many visitors hit the site at once,
+                             Discord's API only ever gets called on a fixed
+                             schedule, never scaled by traffic.
 
 Keeping this split means the bot and the website can be deployed,
 scaled, and restarted completely independently.
 """
+import asyncio
 import os
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,16 +52,27 @@ def _fmt_uptime(seconds: float) -> str:
 
 
 LEADERBOARD_SIZE = 10
-_LEADERBOARD_CACHE_TTL = 60.0  # seconds — resolving usernames means real
-                                # Discord API calls (fetch_user for anyone
-                                # not already in cache), so this is cached
-                                # server-side to avoid hammering Discord on
-                                # every website visitor.
+_LEADERBOARD_REFRESH_SECS = 60.0  # how often the background loop below
+                                    # re-pulls balances + resolves Discord
+                                    # usernames — independent of how many
+                                    # people are visiting the website.
 _leaderboard_cache: dict = {"data": [], "ts": 0.0}
 
 
 def create_app(bot) -> FastAPI:
-    app = FastAPI(title="Jarvis API", docs_url=None, redoc_url=None)
+    leaderboard_task: dict = {"task": None}
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        leaderboard_task["task"] = asyncio.create_task(_refresh_leaderboard_loop())
+        try:
+            yield
+        finally:
+            task = leaderboard_task["task"]
+            if task:
+                task.cancel()
+
+    app = FastAPI(title="Jarvis API", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     # The website is a separate domain/project, so the browser-facing fetch
     # calls it makes need CORS. Lock this down to your website's real domain
@@ -115,18 +132,34 @@ def create_app(bot) -> FastAPI:
             })
         return entries
 
-    @app.get("/api/leaderboard")
-    async def api_leaderboard():
-        now = time.monotonic()
-        if now - _leaderboard_cache["ts"] < _LEADERBOARD_CACHE_TTL and _leaderboard_cache["data"]:
-            entries = _leaderboard_cache["data"]
-        else:
+    async def _refresh_leaderboard_loop() -> None:
+        """Runs on a fixed schedule for the whole life of the process —
+        NOT triggered by website requests. This is what keeps Discord API
+        usage (fetch_user for uncached users) constant regardless of how
+        many people are hitting the website at once: a viral traffic spike
+        still only costs one refresh every _LEADERBOARD_REFRESH_SECS,
+        exactly like a quiet day.
+        """
+        await bot.wait_until_ready()  # bot.get_user/fetch_user need a live session
+        while True:
             try:
                 entries = await _build_leaderboard()
                 _leaderboard_cache["data"] = entries
-                _leaderboard_cache["ts"] = now
-            except Exception:
-                entries = _leaderboard_cache["data"]  # serve stale on error
+                _leaderboard_cache["ts"] = time.monotonic()
+            except Exception as e:
+                print(f"⚠️ Leaderboard background refresh failed: {e}")
+                # Keep serving whatever's already cached — never let a
+                # failed refresh blank out the leaderboard.
+            await asyncio.sleep(_LEADERBOARD_REFRESH_SECS)
+
+    @app.get("/api/leaderboard")
+    async def api_leaderboard():
+        # Pure cache read — this endpoint never calls Discord itself. If
+        # the background loop hasn't completed its first refresh yet
+        # (e.g. right after a restart, before the bot has fully logged
+        # in), this briefly serves an empty list rather than blocking the
+        # request on a live Discord fetch.
+        entries = _leaderboard_cache["data"]
 
         return JSONResponse({
             "bot_name": bot.user.name if bot.user else "Jarvis",
