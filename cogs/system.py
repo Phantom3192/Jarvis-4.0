@@ -47,10 +47,23 @@ if _PSUTIL:
 # background loop samples psutil on ONE fixed, fast cadence and every
 # consumer just reads the latest snapshot — accurate, consistent, and
 # updated every _SAMPLE_INTERVAL seconds no matter who's asking or how often.
-_SAMPLE_INTERVAL = 2.0  # seconds — fast enough to feel real-time, slow enough
-                         # to stay well above psutil's noise floor
+_SAMPLE_INTERVAL = 2.0    # seconds — cheap psutil reads (CPU/RAM/threads),
+                          # fast enough to feel real-time
+_STORAGE_INTERVAL = 30.0  # seconds — os.walk() over the whole project dir
+                          # is real IO/CPU work, unlike the /proc reads
+                          # above, and disk usage from logs/caches simply
+                          # doesn't need sub-minute freshness. Doing this
+                          # every 2s like the rest would be 15x more disk
+                          # scanning than needed for zero user-visible
+                          # benefit.
+_PING_INTERVAL = 5.0      # seconds — the REST probe below is a real
+                          # network call to Discord; every 2s (1,800/hr)
+                          # was more than needed for a number a human is
+                          # glancing at, so this backs it off ~60% while
+                          # still feeling live on the page.
 _usage_cache: dict = {"data": {"available": False}, "ts": 0.0}
 _ping_cache: dict = {"ws_ms": None, "api_ms": None, "ts": 0.0}
+_storage_cache: dict = {"used_bytes": 0, "ts": 0.0}
 
 
 # Railway (and most container platforms) don't expose a per-service disk
@@ -178,7 +191,7 @@ def _compute_usage_stats() -> dict:
         ram_used, ram_total, ram_pct = vm.used, vm.total, vm.percent
         ram_source = "host"
 
-    storage_used  = _bot_storage_used()
+    storage_used  = _storage_cache["used_bytes"]
     storage_limit = int(_DISK_LIMIT_BYTES)
     storage_pct   = storage_used / _DISK_LIMIT_BYTES * 100
 
@@ -401,27 +414,49 @@ async def _do_reload(bot: commands.Bot) -> str:
 class System(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        if _PSUTIL and not _storage_cache["ts"]:
+            # Prime once synchronously at startup so the first /api/stats
+            # response has a real number instead of 0 for the ~30s until
+            # _sample_storage_loop's first tick.
+            _storage_cache["used_bytes"] = _bot_storage_used()
+            _storage_cache["ts"] = time.time()
         self._sample_loop.start()
+        self._sample_storage_loop.start()
+        self._sample_ping_loop.start()
 
     def cog_unload(self):
         # Critical for !reload: without this, every reload_extension() call
-        # would start a NEW copy of this loop on top of the old one (which
-        # keeps running, since nothing else stops it), stacking up duplicate
-        # samplers over time.
+        # would start a NEW copy of each loop on top of the old one (which
+        # keeps running, since nothing else stops it), stacking up
+        # duplicate samplers over time.
         self._sample_loop.cancel()
+        self._sample_storage_loop.cancel()
+        self._sample_ping_loop.cancel()
 
     @tasks.loop(seconds=_SAMPLE_INTERVAL)
     async def _sample_loop(self):
+        """Cheap CPU/RAM/thread reads — just a couple of /proc file reads,
+        negligible cost even at this cadence."""
+        _usage_cache["data"] = _compute_usage_stats()
+        _usage_cache["ts"]   = time.time()
+
+    @tasks.loop(seconds=_STORAGE_INTERVAL)
+    async def _sample_storage_loop(self):
+        """The one genuinely non-trivial sample here — os.walk() over the
+        whole project directory — deliberately kept on its own much
+        slower cadence. See _STORAGE_INTERVAL comment above."""
+        _storage_cache["used_bytes"] = _bot_storage_used()
+        _storage_cache["ts"] = time.time()
+
+    @tasks.loop(seconds=_PING_INTERVAL)
+    async def _sample_ping_loop(self):
         """The single source of truth for both usage and ping data.
 
         Runs on a fixed cadence for the life of the process — not
         triggered by commands or web requests — so !usage, /status, and
-        the website's /api/stats all read the exact same fresh-within-
-        _SAMPLE_INTERVAL-seconds snapshot instead of racing each other.
+        the website's /api/stats all read the exact same fresh snapshot
+        instead of racing each other.
         """
-        _usage_cache["data"] = _compute_usage_stats()
-        _usage_cache["ts"]   = time.time()
-
         ws_ms = round(self.bot.latency * 1000) if self.bot.latency == self.bot.latency else None  # NaN guard
 
         api_ms = None
@@ -439,6 +474,14 @@ class System(commands.Cog):
 
     @_sample_loop.before_loop
     async def _before_sample_loop(self):
+        await self.bot.wait_until_ready()
+
+    @_sample_storage_loop.before_loop
+    async def _before_sample_storage_loop(self):
+        await self.bot.wait_until_ready()
+
+    @_sample_ping_loop.before_loop
+    async def _before_sample_ping_loop(self):
         await self.bot.wait_until_ready()
 
     # ── !ping ─────────────────────────────────────────────────────────────────
