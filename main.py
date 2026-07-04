@@ -58,7 +58,7 @@ COGS = [
     "cogs.status",
 ]
 
-# Track users we've already DM'd about their ban this session — avoid spamming.
+# Track users we've already DM'd about their ban this session — avoid spamming
 _dm_sent_bans: set[int] = set()
 
 
