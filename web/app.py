@@ -157,7 +157,7 @@ def create_app(bot) -> FastAPI:
         # Pure cache read — this endpoint never calls Discord itself. If
         # the background loop hasn't completed its first refresh yet
         # (e.g. right after a restart, before the bot has fully logged
-        # in), this briefly serves an empty list rather than blocking the
+        # in), this briefly serves an empty list rather than blocking the.
         # request on a live Discord fetch.
         entries = _leaderboard_cache["data"]
 
