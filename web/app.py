@@ -106,6 +106,10 @@ def create_app(bot) -> FastAPI:
         from cogs.system import get_usage_stats
         return get_usage_stats()
 
+    def _get_ping_stats():
+        from cogs.system import get_ping_stats
+        return get_ping_stats()
+
     async def _build_leaderboard() -> list[dict]:
         from cogs.state import get_all_credits
 
@@ -194,9 +198,12 @@ def create_app(bot) -> FastAPI:
         except Exception:
             uptime_seconds = 0
         try:
-            latency_ms = round(bot.latency * 1000) if bot.latency == bot.latency else None  # NaN guard
+            ping = _get_ping_stats()
+            latency_ms = ping.get("ws_ms")
+            api_latency_ms = ping.get("api_ms")
         except Exception:
             latency_ms = None
+            api_latency_ms = None
         try:
             usage = _get_usage_stats()
         except Exception:
@@ -208,6 +215,7 @@ def create_app(bot) -> FastAPI:
             "uptime_seconds": round(uptime_seconds),
             "uptime_human": _fmt_uptime(uptime_seconds),
             "latency_ms": latency_ms,
+            "api_latency_ms": api_latency_ms,
             "online": bot.is_ready() if hasattr(bot, "is_ready") else True,
             "bot_name": bot.user.name if bot.user else "Jarvis",
             "usage": usage,

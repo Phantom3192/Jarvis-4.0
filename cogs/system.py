@@ -12,7 +12,7 @@ import gc
 import os
 import time
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from typing import Optional
 
@@ -37,6 +37,21 @@ if _PSUTIL:
     _PROC = psutil.Process(os.getpid())
     _PROC.cpu_percent(interval=None)
     psutil.cpu_percent(interval=None)
+
+# ── Live background sampling ──────────────────────────────────────────────────
+# CPU% via psutil is a *delta since the last call to this same function*, not
+# a point-in-time read. Every consumer that used to call psutil directly
+# (Discord !usage, /status, the web API) was resetting that delta window on
+# each other — whichever call landed second after a short gap saw an almost-
+# zero elapsed time and reported a near-0% or noisy spike. A single
+# background loop samples psutil on ONE fixed, fast cadence and every
+# consumer just reads the latest snapshot — accurate, consistent, and
+# updated every _SAMPLE_INTERVAL seconds no matter who's asking or how often.
+_SAMPLE_INTERVAL = 2.0  # seconds — fast enough to feel real-time, slow enough
+                         # to stay well above psutil's noise floor
+_usage_cache: dict = {"data": {"available": False}, "ts": 0.0}
+_ping_cache: dict = {"ws_ms": None, "api_ms": None, "ts": 0.0}
+
 
 # Railway (and most container platforms) don't expose a per-service disk
 # *quota* anywhere the app can read it — psutil.disk_usage("/") just reports
@@ -142,12 +157,10 @@ def _ping_colour(ms: float) -> discord.Color:
     return discord.Color.red()
 
 
-def get_usage_stats() -> dict:
-    """
-    Raw host/process resource numbers as plain JSON-serialisable data —
-    the numeric core shared by the !status "Usage" tab (embed) and the
-    public web API. Keeping one source of truth means the Discord
-    command and the website can never drift out of sync.
+def _compute_usage_stats() -> dict:
+    """One live psutil sample. Called ONLY by the background sampler loop
+    below — never call this directly from a command or route handler, or
+    you're back to the race condition this whole cache exists to avoid.
     """
     if not _PSUTIL:
         return {"available": False}
@@ -187,7 +200,38 @@ def get_usage_stats() -> dict:
         "process_rss_bytes":    proc_mem,
         "process_cpu_percent":  round(proc_cpu, 1),
         "threads":              threads,
+        "sampled_at":           time.time(),
     }
+
+
+def get_usage_stats() -> dict:
+    """Live, race-free resource numbers — the numeric core shared by the
+    !status "Usage" tab (embed) and the public web API. This is a pure
+    cache read (updated every _SAMPLE_INTERVAL seconds by the background
+    loop in System.cog); it never touches psutil itself, so no matter how
+    many places ask for this at once, they all see the exact same
+    consistent, current snapshot.
+    """
+    return _usage_cache["data"]
+
+
+def get_ping_stats() -> dict:
+    """Live latency numbers, refreshed every _SAMPLE_INTERVAL seconds by an
+    active REST probe — NOT just the gateway heartbeat.
+
+    bot.latency only changes when Discord ACKs a heartbeat (roughly every
+    ~40s by default), so relying on it alone means the ping shown can look
+    "stuck" between heartbeats even though it's technically correct. The
+    background sampler also times a real, cheap REST round-trip
+    (fetching the bot's own user) every _SAMPLE_INTERVAL seconds, giving a
+    genuinely live "is Discord responding right now" number in between
+    heartbeats.
+    """
+    return {
+        "ws_ms":  _ping_cache["ws_ms"],
+        "api_ms": _ping_cache["api_ms"],
+    }
+
 
 
 def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
@@ -201,57 +245,41 @@ def _build_usage_embed(bot: commands.Bot) -> discord.Embed:
     embed.add_field(name="🌐 Guilds",     value=f"`{len(bot.guilds)}`",     inline=True)
     embed.add_field(name="👤 Seen Users", value=f"`{len(seen_users):,}`",   inline=True)
 
-    if _PSUTIL:
-        # Reuse the single module-level Process instance (primed at import
-        # time) instead of psutil.Process(os.getpid()) here — a fresh
-        # instance has no CPU baseline and would always report 0.0%.
-        proc    = _PROC
-        cpu_pct = psutil.cpu_percent(interval=None)
-        vm      = psutil.virtual_memory()
+    # Reads the same background-sampled snapshot the web API serves — this
+    # embed used to take its own separate live psutil reading here, which
+    # raced against the sampler loop and the website's requests, each one
+    # resetting the CPU delta window the others depended on. One source of
+    # truth means the Discord embed and the website can never drift or show
+    # a bogus 0%/spiked reading from a too-short measurement window.
+    usage = get_usage_stats()
+    if usage.get("available"):
+        ram_label = "💾 Container RAM" if usage["ram_source"] == "container" else "💾 Host RAM"
 
-        cgroup = _container_memory()
-        if cgroup:
-            ram_used, ram_total = cgroup
-            ram_pct   = ram_used / ram_total * 100
-            ram_label = "💾 Container RAM"
-        else:
-            ram_used, ram_total, ram_pct = vm.used, vm.total, vm.percent
-            ram_label = "💾 Host RAM"
-
-        embed.add_field(name="🔲 CPU",   value=f"`{cpu_pct:.1f}%`", inline=True)
+        embed.add_field(name="🔲 CPU", value=f"`{usage['cpu_percent']:.1f}%`", inline=True)
         embed.add_field(
             name=ram_label,
-            value=f"`{_fmt_bytes(ram_used)} / {_fmt_bytes(ram_total)}` ({ram_pct:.1f}%)",
+            value=f"`{_fmt_bytes(usage['ram_used_bytes'])} / {_fmt_bytes(usage['ram_total_bytes'])}` ({usage['ram_percent']:.1f}%)",
             inline=True,
         )
-        # NOTE: Railway doesn't expose a per-service disk quota to the app,
-        # so this measures the bot's own project folder against a limit set
-        # via RAILWAY_DISK_LIMIT_GB (defaults to 5 GB — update to match your
-        # actual Railway plan, found in the dashboard's Usage/plan page).
-        storage_used = _bot_storage_used()
-        storage_pct  = storage_used / _DISK_LIMIT_BYTES * 100
         embed.add_field(
             name="💿 Bot Storage",
-            value=f"`{_fmt_bytes(storage_used)} / {_fmt_bytes(int(_DISK_LIMIT_BYTES))}` ({storage_pct:.1f}%)",
+            value=f"`{_fmt_bytes(usage['storage_used_bytes'])} / {_fmt_bytes(usage['storage_limit_bytes'])}` ({usage['storage_percent']:.1f}%)",
             inline=True,
         )
+        embed.add_field(name="🤖 Bot RSS", value=f"`{_fmt_bytes(usage['process_rss_bytes'])}`", inline=True)
+        embed.add_field(name="🤖 Bot CPU", value=f"`{usage['process_cpu_percent']:.1f}%`",       inline=True)
+        embed.add_field(name="🧵 Threads", value=f"`{usage['threads']}`",                         inline=True)
 
-        with proc.oneshot():
-            proc_mem = proc.memory_info().rss
-            proc_cpu = proc.cpu_percent(interval=None)
-            threads  = proc.num_threads()
-
-        embed.add_field(name="🤖 Bot RSS", value=f"`{_fmt_bytes(proc_mem)}`", inline=True)
-        embed.add_field(name="🤖 Bot CPU", value=f"`{proc_cpu:.1f}%`",        inline=True)
-        embed.add_field(name="🧵 Threads", value=f"`{threads}`",               inline=True)
+        age = time.time() - usage.get("sampled_at", time.time())
+        embed.set_footer(text=f"Jarvis System  •  Admin only  •  Sampled {age:.1f}s ago")
     else:
         embed.add_field(
             name="⚠️ psutil not installed",
             value="Run `pip install psutil` to enable CPU/RAM metrics.",
             inline=False,
         )
+        embed.set_footer(text="Jarvis System  •  Admin only")
 
-    embed.set_footer(text="Jarvis System  •  Admin only")
     return embed
 
 
@@ -373,6 +401,45 @@ async def _do_reload(bot: commands.Bot) -> str:
 class System(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._sample_loop.start()
+
+    def cog_unload(self):
+        # Critical for !reload: without this, every reload_extension() call
+        # would start a NEW copy of this loop on top of the old one (which
+        # keeps running, since nothing else stops it), stacking up duplicate
+        # samplers over time.
+        self._sample_loop.cancel()
+
+    @tasks.loop(seconds=_SAMPLE_INTERVAL)
+    async def _sample_loop(self):
+        """The single source of truth for both usage and ping data.
+
+        Runs on a fixed cadence for the life of the process — not
+        triggered by commands or web requests — so !usage, /status, and
+        the website's /api/stats all read the exact same fresh-within-
+        _SAMPLE_INTERVAL-seconds snapshot instead of racing each other.
+        """
+        _usage_cache["data"] = _compute_usage_stats()
+        _usage_cache["ts"]   = time.time()
+
+        ws_ms = round(self.bot.latency * 1000) if self.bot.latency == self.bot.latency else None  # NaN guard
+
+        api_ms = None
+        if self.bot.is_ready() and self.bot.user:
+            before = time.monotonic()
+            try:
+                await self.bot.fetch_user(self.bot.user.id)  # cheap, real REST round-trip
+                api_ms = round((time.monotonic() - before) * 1000)
+            except Exception:
+                pass  # keep the last good api_ms rather than blanking it on a hiccup
+
+        _ping_cache["ws_ms"]  = ws_ms
+        _ping_cache["api_ms"] = api_ms if api_ms is not None else _ping_cache["api_ms"]
+        _ping_cache["ts"]     = time.time()
+
+    @_sample_loop.before_loop
+    async def _before_sample_loop(self):
+        await self.bot.wait_until_ready()
 
     # ── !ping ─────────────────────────────────────────────────────────────────
 
