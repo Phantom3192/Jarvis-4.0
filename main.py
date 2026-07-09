@@ -247,22 +247,12 @@ async def main():
                 await init_history()
                 await init_memory()
 
-                # Load all cog extensions FIRST. discord.py's load_extension()
-                # always re-executes a cog module from scratch (it doesn't
-                # reuse sys.modules), so this must be the ONLY place cogs.ai
-                # gets imported — otherwise its module-level setup (Groq /
-                # Gemini client pools) runs twice and you see the pool-loaded
-                # logs printed twice at startup.
                 for cog in COGS:
                     try:
                         await bot.load_extension(cog)
                     except Exception as e:
                         print(f"❌ Failed to load cog '{cog}': {e}")
 
-                # Restore persisted session histories into in-memory store.
-                # Pull private_history from the already-loaded cogs.ai extension
-                # instead of doing a fresh "from cogs.ai import private_history",
-                # which would trigger a second import of the module.
                 ai_ext = bot.extensions.get("cogs.ai")
                 if ai_ext is not None:
                     private_history = ai_ext.private_history
@@ -273,11 +263,6 @@ async def main():
                         print(f"✅ Restored session history for {len(restored)} user(s)")
                 else:
                     print("❌ cogs.ai failed to load — skipping session history restore.")
-
-                # try:
-                #     await bot.start(TOKEN)
-                # finally:
-                #     await http_session.close_session()
                 
                 try:
                     await asyncio.gather(

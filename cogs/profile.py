@@ -38,10 +38,12 @@ def _progress_bar(current: int, total: int, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
-def _normalize_title_text(s: str) -> str:
-    """Strip emoji/punctuation and collapse whitespace so title names can be
+def _normalize_text(s: str) -> str:
+    """Strip emoji/punctuation and collapse whitespace so item names can be
     matched regardless of whether the user included the leading emoji —
-    '💎 VIP', 'VIP', and 'vip' all normalize to the same string."""
+    '💎 VIP', 'VIP', and 'vip' all normalize to the same string. Used for
+    both title and banner name matching so neither requires typing the
+    emoji back."""
     return " ".join("".join(ch for ch in s if ch.isalnum() or ch.isspace()).lower().split())
 
 
@@ -200,11 +202,11 @@ class Profile(commands.Cog):
         # left off (Chess Master, VIP) — all matched case-insensitively, so
         # a user typing just the plain name doesn't have to hunt down and
         # retype the emoji for it to resolve correctly.
-        target = _normalize_title_text(name)
+        target = _normalize_text(name)
         match = None
         for owned_id in owned:
             label = get_title_label(owned_id)
-            if name == owned_id or target == _normalize_title_text(label):
+            if name == owned_id or target == _normalize_text(label):
                 match = owned_id
                 break
         if match is None:
@@ -244,11 +246,15 @@ class Profile(commands.Cog):
             equip_banner(user.id, None)
             return "✅ Banner unequipped."
         owned = get_banners(user.id)["owned"]
-        # Accept either the raw item id (banner_gold) or its display label (🥇 Gold Banner)
+        # Accept the raw item id (banner_gold), the full display label
+        # (🥇 Gold Banner), or the label with its leading emoji left off
+        # (Gold Banner) — matched case-insensitively, same as /title, so
+        # typing the plain name works without hunting down the emoji.
+        target = _normalize_text(name)
         match = None
         for b in owned:
             label = BANNER_COLORS.get(b, (b, 0))[0]
-            if name == b or name.lower() == label.lower():
+            if name == b or target == _normalize_text(label):
                 match = b
                 break
         if match is None:

@@ -115,7 +115,7 @@ _PERK_LABELS = {
     "reset_cost_multiplier":  lambda v: f"{round((1 - v) * 100)}% off AI daily-limit resets",
     "referral_bonus_multiplier": lambda v: f"+{round((v - 1) * 100)}% {JC_NAME}s per successful referral",
     "weekly_loyalty_bonus":   lambda v: f"+{v} {JC_NAME}s free every week your subscription renews",
-    "leaderboard_flair":      lambda v: "Colored name highlight on !leaderboard" if v else None,
+    "leaderboard_flair":      lambda v: "✨ Highlighted name on !leaderboard" if v else None,
 }
 
 
@@ -453,14 +453,22 @@ _REDEEM_FAILURE_MESSAGES = {
 LEADERBOARD_SIZE = 10
 _MEDALS = ["🥇", "🥈", "🥉"]
 _LB_NAME_WIDTH = 24  # longer display names get truncated so the layout stays tidy
+_LB_BAR_LENGTH = 8
+
+
+def _lb_bar(value: int, max_value: int, length: int = _LB_BAR_LENGTH) -> str:
+    filled = round((value / max_value) * length) if max_value else 0
+    return "▰" * filled + "▱" * (length - filled)
 
 
 async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
     """Build an embed showing the top JC holders across the whole bot.
 
-    Rendered as clean per-line entries (medal + bold name + balance) rather
-    than a monospace code-block table — reads better on both desktop and
-    mobile, and lets each top-3 entry stand out visually.
+    Top 3 get a "podium" treatment (medal, bold name, a relative balance
+    bar) so they stand out at a glance; ranks 4-10 are a compact list
+    underneath. No monospace/ANSI code-block — those escape codes don't
+    render as color on every client, so keeping the layout to plain
+    embed formatting looks consistent everywhere.
     """
     balances = get_all_credits()
     ranked = sorted(
@@ -469,47 +477,76 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         reverse=True,
     )[:LEADERBOARD_SIZE]
 
-    embed = discord.Embed(title=f"{JC_EMOJI} Jarvis Credit Leaderboard", color=discord.Color.gold())
+    embed = discord.Embed(title="🏆 Jarvis Credit Leaderboard", color=discord.Color.gold())
 
     if not ranked:
         embed.description = "Nobody has earned any Jarvis Credits yet!"
         return embed
 
-    lines = []
-    _ANSI_RESET = "\u001b[0m"
-    for i, (uid, bal) in enumerate(ranked):
+    max_bal = ranked[0][1]
+    resolved: list[tuple[str, int, discord.User | None]] = []
+    for uid, bal in ranked:
         user = bot.get_user(int(uid))
         if user is None:
             try:
                 user = await bot.fetch_user(int(uid))
             except discord.HTTPException:
                 user = None
+        resolved.append((uid, bal, user))
+
+    def _display(uid: str, bal: int, user: discord.User | None) -> tuple[str, str]:
         name = user.display_name if user else f"User {uid}"
         if len(name) > _LB_NAME_WIDTH:
             name = name[: _LB_NAME_WIDTH - 1] + "…"
-
         title_id = get_equipped_title(int(uid))
-        title_suffix = f" {get_title_label(title_id)}" if title_id else ""
+        title_suffix = f" · {get_title_label(title_id)}" if title_id else ""
+        # A perk-granting title gets a small sparkle instead of the old
+        # ANSI color codes, which don't render as color on every client.
+        flair = "✨ " if title_id and TITLE_PERKS.get(title_id, {}).get("leaderboard_flair") else ""
+        return f"{flair}**{name}**{title_suffix}", bal
 
-        # Titles with a "leaderboard_flair" perk get their name rendered in
-        # color via a Discord ANSI code block (the whole description below
-        # is wrapped in one ```ansi``` fence for this to actually render).
-        flair = TITLE_PERKS.get(title_id, {}).get("leaderboard_flair") if title_id else None
-        name_display = f"{flair}{name}{_ANSI_RESET}" if flair else name
+    podium_lines = []
+    for i in range(min(3, len(resolved))):
+        uid, bal, user = resolved[i]
+        name_display, bal = _display(uid, bal, user)
+        bar = _lb_bar(bal, max_bal)
+        podium_lines.append(f"{_MEDALS[i]} {name_display}\n`{bar}` **{bal:,}** {JC_EMOJI}")
 
-        rank_label = _MEDALS[i] if i < len(_MEDALS) else f"#{i + 1}"
-        lines.append(f"{rank_label} {name_display}{title_suffix} — {bal:,} {JC_EMOJI}")
+    embed.description = "\n\n".join(podium_lines)
 
-    embed.description = "```ansi\n" + "\n".join(lines) + "\n```"
-    embed.set_footer(text=f"Balances shown in {JC_NAME}s")
+    if len(resolved) > 3:
+        rest_lines = []
+        for i in range(3, len(resolved)):
+            uid, bal, user = resolved[i]
+            name_display, bal = _display(uid, bal, user)
+            rest_lines.append(f"`#{i + 1:>2}` {name_display} — **{bal:,}** {JC_EMOJI}")
+        embed.add_field(name=f"Ranks 4–{len(resolved)}", value="\n".join(rest_lines), inline=False)
+
+    top_user = resolved[0][2]
+    if top_user:
+        embed.set_thumbnail(url=top_user.display_avatar.url)
+
+    embed.set_footer(text=f"Balances shown in {JC_NAME}s • Top {len(resolved)} of all Jarvis users")
     return embed
 
 
 # ── JC Shop ──────────────────────────────────────────────────────────────────
 
+def _main_shop_items() -> list[tuple[str, dict]]:
+    """Every shop item except banners — banners live in their own sub-menu
+    (see _banner_shop_items / BannerShopView)."""
+    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] != "banner"]
+
+
+def _banner_shop_items() -> list[tuple[str, dict]]:
+    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] == "banner"]
+
+
 def _shop_page_embed(page: int) -> discord.Embed:
-    """Build one page of the paginated shop embed. `page` is 0-indexed."""
-    items = list(SHOP_ITEMS.items())
+    """Build one page of the paginated shop embed. `page` is 0-indexed.
+    Banners are excluded here — they have their own sub-menu, opened via
+    the 🎨 Banners button."""
+    items = _main_shop_items()
     total_pages = max(1, (len(items) + SHOP_PAGE_SIZE - 1) // SHOP_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     start = page * SHOP_PAGE_SIZE
@@ -517,7 +554,7 @@ def _shop_page_embed(page: int) -> discord.Embed:
 
     embed = discord.Embed(
         title=f"{JC_EMOJI} Jarvis Credit Shop",
-        description="Spend your JC on perks, boosts, and a little gambling. Use the buttons below to buy.",
+        description="Spend your JC on perks, boosts, and a little gambling. Buy with the dropdown below.",
         color=discord.Color.gold(),
     )
     for item_id, item in chunk:
@@ -526,7 +563,24 @@ def _shop_page_embed(page: int) -> discord.Embed:
             value=f"{item['description']}\n`!shop buy {item_id}`",
             inline=False,
         )
-    embed.set_footer(text=f"Page {page + 1}/{total_pages} • Buy with !shop buy <item_id> or the buttons below")
+    embed.set_footer(text=f"Page {page + 1}/{total_pages} • Buy with !shop buy <item_id> or the dropdown below")
+    return embed
+
+
+def _banner_shop_embed() -> discord.Embed:
+    """Standalone banner sub-menu, opened via the shop's 🎨 Banners button."""
+    embed = discord.Embed(
+        title="🎨 Profile Banners",
+        description="Cosmetic colors for your /profile card. Buy with the dropdown below.",
+        color=discord.Color.purple(),
+    )
+    for item_id, item in _banner_shop_items():
+        embed.add_field(
+            name=f"{item['name']} — {item['price']} {JC_EMOJI}",
+            value=f"{item['description']}\n`!shop buy {item_id}`",
+            inline=False,
+        )
+    embed.set_footer(text="Buy with !shop buy <item_id> or the dropdown below • ◀ Back to Shop returns you here")
     return embed
 
 
@@ -701,17 +755,63 @@ async def _handle_redeem(
     )
 
 
+class _BuySelect(discord.ui.Select):
+    """One dropdown covering every item passed in, used instead of a Buy
+    button per item — keeps the shop tidy no matter how many items a
+    category ends up with. Buying is just picking an option; the person
+    who opened the menu is re-checked in the callback (interaction_check
+    on the parent view already gates page/back navigation, but a fresh
+    Select interaction needs its own check too)."""
+
+    def __init__(self, items: list[tuple[str, dict]], *, placeholder: str, owner_id: int):
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(
+                label=f"Buy {item['name'].split(' ', 1)[-1]} — {item['price']} {JC_NAME}s",
+                emoji=item["name"].split(" ", 1)[0],
+                value=item_id,
+            )
+            for item_id, item in items
+        ] or [discord.SelectOption(label="Nothing here yet", value="__none__")]
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "Open your own shop with `!shop` to buy something!", ephemeral=True
+            )
+            return
+        item_id = self.values[0]
+        if item_id == "__none__":
+            await interaction.response.defer()
+            return
+        success, msg = await _purchase_item(interaction.user, item_id, channel=interaction.channel)
+        if msg is None:
+            # Public announcement already posted to the channel — just
+            # quietly confirm to the buyer so we don't double-post.
+            await interaction.response.send_message("✅ Purchased!", ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=not success)
+
+
 class ShopView(discord.ui.View):
-    """Paginated shop embed with Prev/Next navigation and per-item Buy buttons."""
+    """Paginated shop embed: ◀ Prev / Next ▶ / 🔍 View Perks / 🎨 Banners
+    buttons up top, and a single Buy dropdown instead of one button per
+    item."""
 
     def __init__(self, user_id: int, *, timeout: float = 90):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.page = 0
-        self.items = list(SHOP_ITEMS.items())
+        self.items = _main_shop_items()
         self.total_pages = max(1, (len(self.items) + SHOP_PAGE_SIZE - 1) // SHOP_PAGE_SIZE)
         self.message: discord.Message | None = None
-        self._rebuild_buy_buttons()
+        self.add_item(self._make_select())
+
+    def _make_select(self) -> _BuySelect:
+        start = self.page * SHOP_PAGE_SIZE
+        chunk = self.items[start:start + SHOP_PAGE_SIZE]
+        return _BuySelect(chunk, placeholder="🛒 Choose an item to buy…", owner_id=self.user_id)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
@@ -721,37 +821,14 @@ class ShopView(discord.ui.View):
             return False
         return True
 
-    def _rebuild_buy_buttons(self) -> None:
-        # Remove old buy buttons (keep nav buttons, which are added via decorators
-        # and always present as the first two children).
+    def _rebuild_select(self) -> None:
         for child in list(self.children):
-            if isinstance(child, discord.ui.Button) and child.custom_id and child.custom_id.startswith("buy:"):
+            if isinstance(child, discord.ui.Select):
                 self.remove_item(child)
-
-        start = self.page * SHOP_PAGE_SIZE
-        chunk = self.items[start:start + SHOP_PAGE_SIZE]
-        for item_id, item in chunk:
-            btn = discord.ui.Button(
-                label=f"Buy {item['name'].split(' ', 1)[-1]} ({item['price']} JC)",
-                style=discord.ButtonStyle.success,
-                custom_id=f"buy:{item_id}",
-            )
-            btn.callback = self._make_buy_callback(item_id)
-            self.add_item(btn)
-
-    def _make_buy_callback(self, item_id: str):
-        async def callback(interaction: discord.Interaction):
-            success, msg = await _purchase_item(interaction.user, item_id, channel=interaction.channel)
-            if msg is None:
-                # Public announcement already posted to the channel — just
-                # quietly confirm to the buyer so we don't double-post.
-                await interaction.response.send_message("✅ Purchased!", ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=not success)
-        return callback
+        self.add_item(self._make_select())
 
     async def _refresh(self, interaction: discord.Interaction) -> None:
-        self._rebuild_buy_buttons()
+        self._rebuild_select()
         await interaction.response.edit_message(embed=_shop_page_embed(self.page), view=self)
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=0)
@@ -767,6 +844,46 @@ class ShopView(discord.ui.View):
     @discord.ui.button(label="🔍 View Perks", style=discord.ButtonStyle.primary, row=0)
     async def view_perks(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(embed=_title_perks_embed(), ephemeral=True)
+
+    @discord.ui.button(label="🎨 Banners", style=discord.ButtonStyle.secondary, row=0)
+    async def banners_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = BannerShopView(self.user_id)
+        await interaction.response.edit_message(embed=_banner_shop_embed(), view=view)
+        view.message = interaction.message
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class BannerShopView(discord.ui.View):
+    """Separate banner sub-menu: a Buy dropdown for banners only, plus a
+    Back button that returns to the main shop's first page."""
+
+    def __init__(self, user_id: int, *, timeout: float = 90):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.message: discord.Message | None = None
+        self.add_item(_BuySelect(_banner_shop_items(), placeholder="🎨 Choose a banner to buy…", owner_id=user_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Open your own shop with `!shop` to buy something!", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Back to Shop", style=discord.ButtonStyle.secondary, row=0)
+    async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ShopView(self.user_id)
+        await interaction.response.edit_message(embed=_shop_page_embed(0), view=view)
+        view.message = interaction.message
 
     async def on_timeout(self) -> None:
         for child in self.children:
