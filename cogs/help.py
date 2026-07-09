@@ -136,6 +136,18 @@ CATEGORIES = {
             ("Reset AI limit",        "Spend JC to reset your daily AI message limit"),
         ],
     },
+    "🪪 Profile": {
+        "description": "Your Jarvis rank card — stats, streak, game records, badges, titles, and banners.",
+        "color": 0x9B59B6,
+        "commands": [
+            ("!profile / !rank  /profile", "View your (or someone else's) profile card"),
+            ("!titles  /titles", "See the titles you own and which one is equipped"),
+            ("!title <name>  /title", "Equip an owned title (or `none` to unequip)"),
+            ("!banners  /banners", "See the profile banners you own"),
+            ("!banner <name>  /banner", "Equip an owned banner (or `none` to unequip)"),
+            ("🏅 Badges", "Unlocked automatically — win games, chat, and play music to earn them"),
+        ],
+    },
     "📊 Stats": {
         "description": "View your Jarvis usage stats.",
         "color": 0x2ECC71,

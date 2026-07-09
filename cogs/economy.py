@@ -9,12 +9,17 @@ from to:
     button view (SpendCreditsView), used by the counting game and the AI
     daily-limit flow.
 """
+import time
 import discord
+from discord.ext import tasks
 
 from cogs.state import (
     spend_credits, bump_streak, get_streak, STREAK_MILESTONES,
     get_or_create_referral_code, redeem_referral_code, is_new_user, mark_seen,
+    get_equipped_title, grant_title, get_titles, grant_banner, get_banners,
+    get_all_subscriptions, set_subscription, clear_subscription, revoke_title,
 )
+from cogs.achievements import TITLE_LABELS
 
 JC_NAME  = "Jarvis Credit"
 JC_EMOJI = "🪙"
@@ -52,6 +57,43 @@ MYSTERY_BOX_COST     = 200  # JC to open a Mystery Box
 MYSTERY_BOX_MIN      = 100   # min payout
 MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 
+# Profile banner colors — shown as the /profile embed color once equipped.
+# Keyed by the same id used in SHOP_ITEMS/grant_banner/equip_banner.
+BANNER_COLORS: dict[str, tuple[str, int]] = {
+    "banner_gold":     ("🥇 Gold Banner",     0xF1C40F),
+    "banner_royal":    ("👑 Royal Banner",    0x9B59B6),
+    "banner_midnight": ("🌌 Midnight Banner", 0x2C3E50),
+    "banner_emerald":  ("🟢 Emerald Banner",  0x2ECC71),
+}
+
+# Weekly billing period for subscription-style shop items.
+SUBSCRIPTION_PERIOD_SECONDS = 7 * 24 * 3600
+
+# Gameplay perks tied to an EQUIPPED title id. Only applies while the title
+# is actually equipped (not just owned) — gives equipping a premium title
+# an actual reason beyond cosmetics.
+TITLE_PERKS: dict[str, dict] = {
+    "title_vip":   {"chat_jc_multiplier": 1.25},                    # +25% JC from AI chat
+    "title_elite": {"chat_jc_multiplier": 1.5, "free_hints": True},  # +50% JC + unlimited free chess hints
+}
+
+
+def get_active_perks(user_id: int) -> dict:
+    """Return the perk dict for whatever title the user currently has
+    equipped, or {} if none/not a perk-granting title."""
+    equipped = get_equipped_title(user_id)
+    return TITLE_PERKS.get(equipped, {})
+
+
+def get_title_label(title_id: str) -> str:
+    """Resolve a stored title id back to its display label — checks shop
+    items first, then achievement-granted titles. Falls back to the raw id
+    if somehow neither catalog has it (shouldn't normally happen)."""
+    if title_id in SHOP_ITEMS:
+        return SHOP_ITEMS[title_id]["name"]
+    return TITLE_LABELS.get(title_id, title_id)
+
+
 # Shop catalog. Keys are stable item ids (used by !shop buy <id>).
 # Add more items here later — each needs name/price/description/kind/announce.
 SHOP_ITEMS: dict[str, dict] = {
@@ -61,6 +103,55 @@ SHOP_ITEMS: dict[str, dict] = {
         "description": f"Random reward: anywhere from {MYSTERY_BOX_MIN}–{MYSTERY_BOX_MAX} JC, equal chance.",
         "kind": "mystery_box",
         "announce": True,
+    },
+    "title_vip": {
+        "name": "💎 VIP",
+        "price": 2000,
+        "description": "Billed **2,000 JC/week**. While equipped: **+25% JC from chatting**.",
+        "kind": "subscription_title",
+        "announce": True,
+    },
+    "title_elite": {
+        "name": "🌟 Elite",
+        "price": 3500,
+        "description": "Billed **3,500 JC/week**. While equipped: **+50% JC from chatting** and **unlimited free chess hints**.",
+        "kind": "subscription_title",
+        "announce": True,
+    },
+    "title_legend": {
+        "name": "🔥 Legend",
+        "price": 1200,
+        "description": "An equippable Legend title, shown on your /profile and the leaderboard.",
+        "kind": "title",
+        "announce": True,
+    },
+    "banner_gold": {
+        "name": "🥇 Gold Banner",
+        "price": 300,
+        "description": "Colors your /profile card gold.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "banner_royal": {
+        "name": "👑 Royal Banner",
+        "price": 300,
+        "description": "Colors your /profile card royal purple.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "banner_midnight": {
+        "name": "🌌 Midnight Banner",
+        "price": 300,
+        "description": "Colors your /profile card midnight blue.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "banner_emerald": {
+        "name": "🟢 Emerald Banner",
+        "price": 300,
+        "description": "Colors your /profile card emerald green.",
+        "kind": "banner",
+        "announce": False,
     },
 }
 SHOP_PAGE_SIZE = 3
@@ -273,16 +364,15 @@ _REDEEM_FAILURE_MESSAGES = {
 
 LEADERBOARD_SIZE = 10
 _MEDALS = ["🥇", "🥈", "🥉"]
-_LB_NAME_WIDTH = 20  # longer display names get truncated so columns stay aligned
+_LB_NAME_WIDTH = 24  # longer display names get truncated so the layout stays tidy
 
 
 async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
     """Build an embed showing the top JC holders across the whole bot.
 
-    Rendered as a monospace table (inside a code block) rather than a plain
-    bullet list — Discord embeds can't do real HTML tables, so a padded
-    fixed-width layout is the closest equivalent and reads far cleaner once
-    there are more than a couple of entries.
+    Rendered as clean per-line entries (medal + bold name + balance) rather
+    than a monospace code-block table — reads better on both desktop and
+    mobile, and lets each top-3 entry stand out visually.
     """
     balances = get_all_credits()
     ranked = sorted(
@@ -297,7 +387,7 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         embed.description = "Nobody has earned any Jarvis Credits yet!"
         return embed
 
-    rows = []
+    lines = []
     for i, (uid, bal) in enumerate(ranked):
         user = bot.get_user(int(uid))
         if user is None:
@@ -308,20 +398,18 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         name = user.display_name if user else f"User {uid}"
         if len(name) > _LB_NAME_WIDTH:
             name = name[: _LB_NAME_WIDTH - 1] + "…"
-        rank_label = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
-        rows.append((rank_label, name, f"{bal:,}"))
 
-    rank_col = max(len(r[0]) for r in rows)
-    name_col = max(len(r[1]) for r in rows + [("", "Player", "")])
-    bal_col = max(len(r[2]) for r in rows + [("", "", "Balance")])
+        title_id = get_equipped_title(int(uid))
+        title_suffix = f" {get_title_label(title_id)}" if title_id else ""
 
-    header = f"{'#'.ljust(rank_col)}  {'Player'.ljust(name_col)}  {'Balance'.rjust(bal_col)}"
-    divider = f"{'-' * rank_col}  {'-' * name_col}  {'-' * bal_col}"
-    lines = [header, divider]
-    for rank_label, name, bal_str in rows:
-        lines.append(f"{rank_label.ljust(rank_col)}  {name.ljust(name_col)}  {bal_str.rjust(bal_col)}")
+        if i < len(_MEDALS):
+            rank_label = _MEDALS[i]
+            lines.append(f"{rank_label} **{name}**{title_suffix} — **{bal:,}** {JC_EMOJI}")
+        else:
+            lines.append(f"`#{i + 1}` {name}{title_suffix} — **{bal:,}** {JC_EMOJI}")
 
-    embed.description = "```\n" + "\n".join(lines) + f"\n```\nBalances shown in {JC_EMOJI}"
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"Balances shown in {JC_NAME}s")
     return embed
 
 
@@ -369,6 +457,15 @@ async def _purchase_item(
     if item is None:
         return False, f"❌ Unknown item `{item_id}`. Use `!shop` to see what's available."
 
+    kind = item["kind"]
+
+    # Cosmetics are one-time (or already-subscribed) purchases — don't let
+    # someone spend JC twice on the same title/banner they already own.
+    if kind in ("title", "subscription_title") and item_id in get_titles(user.id)["owned"]:
+        return False, f"❌ You already own **{item['name']}**."
+    if kind == "banner" and item_id in get_banners(user.id)["owned"]:
+        return False, f"❌ You already own **{item['name']}**."
+
     if not spend_credits(user.id, item["price"]):
         bal = get_credits(user.id)
         return False, (
@@ -376,7 +473,6 @@ async def _purchase_item(
             f"You have **{bal}** {JC_EMOJI}."
         )
 
-    kind = item["kind"]
     fallback_msg = f"✅ **{user.display_name}** bought **{item['name']}**!"
     public_msg = None
 
@@ -385,6 +481,31 @@ async def _purchase_item(
         new_balance = add_credits(user.id, reward)
         fallback_msg = f"🎰 You opened the Mystery Box and won **+{reward} {JC_NAME}**! New balance: **{new_balance}** {JC_EMOJI}"
         public_msg = mystery_box_result_embed(user, reward, new_balance)
+
+    elif kind == "title":
+        grant_title(user.id, item_id)
+        fallback_msg = (
+            f"✅ **{user.display_name}** bought the **{item['name']}** title! "
+            f"Equip it with `/title {item['name']}`."
+        )
+        public_msg = f"🛍️ **{user.display_name}** just bought the **{item['name']}** title!"
+
+    elif kind == "subscription_title":
+        grant_title(user.id, item_id)
+        set_subscription(user.id, item_id, time.time() + SUBSCRIPTION_PERIOD_SECONDS)
+        fallback_msg = (
+            f"✅ **{user.display_name}** subscribed to **{item['name']}**! "
+            f"Billed **{item['price']:,} JC/week** — first payment taken now. "
+            f"Equip it with `/title {item['name']}` to activate its perks."
+        )
+        public_msg = f"🛍️ **{user.display_name}** just subscribed to **{item['name']}**!"
+
+    elif kind == "banner":
+        grant_banner(user.id, item_id)
+        fallback_msg = (
+            f"✅ **{user.display_name}** bought the **{item['name']}**! "
+            f"Equip it with `/banner {item['name']}`."
+        )
 
     if channel is not None and item.get("announce") and public_msg is not None:
         try:
@@ -657,6 +778,45 @@ class TransferRequestView(discord.ui.View):
 class Economy(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.bill_subscriptions.start()
+
+    def cog_unload(self):
+        self.bill_subscriptions.cancel()
+
+    @tasks.loop(hours=1)
+    async def bill_subscriptions(self):
+        """Charge the weekly fee for every active title subscription. If a
+        user can't cover the renewal, the title is revoked entirely (and
+        unequipped if it was equipped) rather than left in limbo."""
+        now = time.time()
+        for uid_str, subs in get_all_subscriptions().items():
+            uid = int(uid_str)
+            for title_id, next_charge in subs.items():
+                if now < next_charge:
+                    continue
+                item = SHOP_ITEMS.get(title_id)
+                if item is None:
+                    clear_subscription(uid, title_id)
+                    continue
+                if spend_credits(uid, item["price"]):
+                    set_subscription(uid, title_id, now + SUBSCRIPTION_PERIOD_SECONDS)
+                else:
+                    revoke_title(uid, title_id)
+                    clear_subscription(uid, title_id)
+                    user = self.bot.get_user(uid)
+                    if user:
+                        try:
+                            await user.send(
+                                f"⚠️ Your **{item['name']}** subscription lapsed — you didn't have "
+                                f"enough {JC_EMOJI} for the **{item['price']:,} JC/week** renewal, "
+                                f"so it's been removed. You can buy it again anytime from `/shop`."
+                            )
+                        except discord.HTTPException:
+                            pass
+
+    @bill_subscriptions.before_loop
+    async def _before_bill_subscriptions(self):
+        await self.bot.wait_until_ready()
 
     @commands.command(name="balance", aliases=["jc", "credits"])
     async def prefix_balance(self, ctx: commands.Context, user: discord.User = None):
@@ -963,4 +1123,4 @@ class Economy(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Economy(bot))
+    await bot.add_cog(Economy(bot)) 

@@ -46,6 +46,12 @@ _data: dict[str, Any] = {
     "referral_codes": {},    # str(user_id) → str code (each user's own stable invite code)
     "referred_by":    {},    # str(user_id) → referrer's user_id (int). Presence = "already redeemed a code".
     "dnd_users":      {},    # str(user_id) → True (presence = DND enabled)
+    "game_stats":     {},    # str(user_id) → {"chess_wins","chess_losses","mafia_wins","mafia_losses","hangman_wins"}
+    "songs_played":   {},    # str(user_id) → int, lifetime count of songs played (not trimmed like song_history)
+    "badges":         {},    # str(user_id) → list[str] of unlocked achievement badge ids
+    "titles":         {},    # str(user_id) → {"owned": [title_id,...], "equipped": title_id|None}
+    "banners":        {},    # str(user_id) → {"owned": [banner_id,...], "equipped": banner_id|None}
+    "title_subscriptions": {}, # str(user_id) → {title_id: next_charge_epoch}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -67,6 +73,12 @@ _SERIALISE: dict[str, Any] = {
     "referral_codes":  lambda: _data["referral_codes"],
     "referred_by":     lambda: _data["referred_by"],
     "dnd_users":       lambda: _data["dnd_users"],
+    "game_stats":      lambda: _data["game_stats"],
+    "songs_played":    lambda: _data["songs_played"],
+    "badges":          lambda: _data["badges"],
+    "titles":          lambda: _data["titles"],
+    "banners":         lambda: _data["banners"],
+    "title_subscriptions": lambda: _data["title_subscriptions"],
 }
 
 
@@ -128,6 +140,12 @@ async def init_db():
     if "referral_codes" in db: _data["referral_codes"] = db["referral_codes"]
     if "referred_by"    in db: _data["referred_by"]    = db["referred_by"]
     if "dnd_users"      in db: _data["dnd_users"]       = db["dnd_users"]
+    if "game_stats"     in db: _data["game_stats"]      = db["game_stats"]
+    if "songs_played"   in db: _data["songs_played"]    = db["songs_played"]
+    if "badges"         in db: _data["badges"]          = db["badges"]
+    if "titles"         in db: _data["titles"]          = db["titles"]
+    if "banners"        in db: _data["banners"]         = db["banners"]
+    if "title_subscriptions" in db: _data["title_subscriptions"] = db["title_subscriptions"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -579,6 +597,11 @@ def append_song_history(user_id: int, track: dict[str, object], max_items: int =
     if len(history) > max_items:
         del history[:-max_items]
     _schedule_save("song_history")
+    # Lifetime counter — kept separate from the capped history above so
+    # achievement thresholds (e.g. "played 250 songs") stay accurate even
+    # after old plays get trimmed off song_history.
+    _data["songs_played"][uid] = _data["songs_played"].get(uid, 0) + 1
+    _schedule_save("songs_played")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -971,3 +994,192 @@ def get_guild_log(guild_id: int) -> dict | None:
 def get_all_guild_logs() -> dict[str, dict]:
     """Return a copy of all guild log entries, keyed by str(guild_id)."""
     return dict(_data["guild_logs"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GAME STATS  (win/loss records, used by /profile and achievements)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_GAME_STATS_DEFAULT = {
+    "chess_wins": 0, "chess_losses": 0,
+    "mafia_wins": 0, "mafia_losses": 0,
+    "hangman_wins": 0,
+}
+
+
+def get_game_stats(user_id: int) -> dict:
+    """Return a copy of the user's win/loss record, backfilled with defaults."""
+    stats = dict(_GAME_STATS_DEFAULT)
+    stats.update(_data["game_stats"].get(str(user_id), {}))
+    return stats
+
+
+def record_game_result(user_id: int, game: str, result: str) -> dict:
+    """Record a win or loss for `game` ("chess"/"mafia"/"hangman") and
+    `result` ("win"/"loss"). Returns the user's updated stats dict.
+
+    Hangman has no "losses" bucket since it's a free-for-all shared game —
+    only the person who guesses the word gets a recorded result.
+    """
+    uid = str(user_id)
+    stats = _data["game_stats"].setdefault(uid, dict(_GAME_STATS_DEFAULT))
+    for key, default in _GAME_STATS_DEFAULT.items():
+        stats.setdefault(key, default)
+    key = f"{game}_{'wins' if result == 'win' else 'losses'}"
+    if key in stats:
+        stats[key] += 1
+    _schedule_save("game_stats")
+    return dict(stats)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SONGS PLAYED  (lifetime counter — song_history above is capped/trimmed,
+# this is not, so it stays accurate for achievements like "played 100 songs")
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_songs_played(user_id: int) -> int:
+    return int(_data["songs_played"].get(str(user_id), 0))
+
+
+def get_favorite_song(user_id: int) -> str | None:
+    """Return the most-played track title from the user's (capped) song
+    history, or None if they haven't played anything yet."""
+    history = get_song_history(user_id)
+    if not history:
+        return None
+    counts: dict[str, int] = {}
+    for track in history:
+        title = track.get("title")
+        if title:
+            counts[title] = counts.get(title, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BADGES  (achievement unlocks — never purchasable, always earned)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_badges(user_id: int) -> list[str]:
+    return list(_data["badges"].get(str(user_id), []))
+
+
+def unlock_badge(user_id: int, badge_id: str) -> bool:
+    """Grant `badge_id` to the user if they don't already have it.
+    Returns True if it was newly unlocked (so the caller can announce it)."""
+    uid = str(user_id)
+    owned = _data["badges"].setdefault(uid, [])
+    if badge_id in owned:
+        return False
+    owned.append(badge_id)
+    _schedule_save("badges")
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TITLES & BANNERS  (cosmetic, bot-rendered only — never real Discord roles,
+# so behavior is identical across every server the bot is in)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _cosmetic_entry(kind: str, user_id: int) -> dict:
+    uid = str(user_id)
+    store = _data[kind]  # "titles" or "banners"
+    entry = store.setdefault(uid, {"owned": [], "equipped": None})
+    entry.setdefault("owned", [])
+    entry.setdefault("equipped", None)
+    return entry
+
+
+def get_titles(user_id: int) -> dict:
+    return dict(_cosmetic_entry("titles", user_id))
+
+
+def grant_title(user_id: int, title_id: str) -> bool:
+    """Add `title_id` to the user's owned titles. Returns True if newly owned."""
+    entry = _cosmetic_entry("titles", user_id)
+    if title_id in entry["owned"]:
+        return False
+    entry["owned"].append(title_id)
+    _schedule_save("titles")
+    return True
+
+
+def equip_title(user_id: int, title_id: str | None) -> bool:
+    """Equip an owned title (or None to unequip). Returns False if the
+    user doesn't own that title."""
+    entry = _cosmetic_entry("titles", user_id)
+    if title_id is not None and title_id not in entry["owned"]:
+        return False
+    entry["equipped"] = title_id
+    _schedule_save("titles")
+    return True
+
+
+def get_equipped_title(user_id: int) -> str | None:
+    return _cosmetic_entry("titles", user_id).get("equipped")
+
+
+def get_banners(user_id: int) -> dict:
+    return dict(_cosmetic_entry("banners", user_id))
+
+
+def grant_banner(user_id: int, banner_id: str) -> bool:
+    entry = _cosmetic_entry("banners", user_id)
+    if banner_id in entry["owned"]:
+        return False
+    entry["owned"].append(banner_id)
+    _schedule_save("banners")
+    return True
+
+
+def equip_banner(user_id: int, banner_id: str | None) -> bool:
+    entry = _cosmetic_entry("banners", user_id)
+    if banner_id is not None and banner_id not in entry["owned"]:
+        return False
+    entry["equipped"] = banner_id
+    _schedule_save("banners")
+    return True
+
+
+def get_equipped_banner(user_id: int) -> str | None:
+    return _cosmetic_entry("banners", user_id).get("equipped")
+
+
+def revoke_title(user_id: int, title_id: str) -> None:
+    """Remove an owned title entirely — used when a paid subscription lapses.
+    Safe to call even if the user doesn't own it."""
+    entry = _cosmetic_entry("titles", user_id)
+    if title_id in entry["owned"]:
+        entry["owned"].remove(title_id)
+        if entry["equipped"] == title_id:
+            entry["equipped"] = None
+        _schedule_save("titles")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TITLE SUBSCRIPTIONS  (recurring weekly JC billing for premium titles)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_subscriptions(user_id: int) -> dict[str, float]:
+    return dict(_data["title_subscriptions"].get(str(user_id), {}))
+
+
+def set_subscription(user_id: int, title_id: str, next_charge_epoch: float) -> None:
+    uid = str(user_id)
+    subs = _data["title_subscriptions"].setdefault(uid, {})
+    subs[title_id] = next_charge_epoch
+    _schedule_save("title_subscriptions")
+
+
+def clear_subscription(user_id: int, title_id: str) -> None:
+    uid = str(user_id)
+    subs = _data["title_subscriptions"].get(uid)
+    if subs and title_id in subs:
+        del subs[title_id]
+        _schedule_save("title_subscriptions")
+
+
+def get_all_subscriptions() -> dict[str, dict[str, float]]:
+    """Return a copy of every user's subscriptions, keyed by str(user_id)."""
+    return {uid: dict(subs) for uid, subs in _data["title_subscriptions"].items()}

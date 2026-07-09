@@ -30,12 +30,14 @@ from cogs.state import (
     get_reminders, add_reminder, delete_reminder, pop_due_reminders,
     set_dnd, is_dnd,
     get_credits, reset_ai_usage, earn_chat_credits, claim_daily_credits,
-    grant_onboarding_bonus,
+    grant_onboarding_bonus, bump_streak, add_credits,
 )
 from cogs.economy import (
     SpendCreditsView, AI_LIMIT_RESET_COST, JC_EMOJI, JC_NAME,
     DAILY_CHECKIN_REWARD, ONBOARDING_BONUS, AI_CHAT_REWARD, AI_CHAT_REWARD_DAILY_CAP,
+    streak_milestone_announcement, STREAK_MILESTONES, get_active_perks,
 )
+from cogs.achievements import check_achievements, unlocked_announcement
 from cogs.message_splitter import send_long_message, edit_or_send_long_message
 from cogs.http_session import get_session, safe_reply, safe_send
 from cogs.history import add_message as _db_add_message, get_history as _db_get_history, clear_history as _db_clear_history
@@ -1734,7 +1736,9 @@ async def generate_ai_response(
     asyncio.create_task(asyncio.to_thread(_background_record, user_id, user_message, reply))
 
     new_count = increment_ai_usage(user_id)
-    earn_chat_credits(user_id, AI_CHAT_REWARD, AI_CHAT_REWARD_DAILY_CAP)
+    perks = get_active_perks(user_id)
+    chat_reward = round(AI_CHAT_REWARD * perks.get("chat_jc_multiplier", 1))
+    earn_chat_credits(user_id, chat_reward, AI_CHAT_REWARD_DAILY_CAP)
     if new_count == WARN_AT:
         limit = get_ai_limit()
         remaining = limit - new_count
@@ -2036,6 +2040,20 @@ class AI(commands.Cog):
                 f"**+{DAILY_CHECKIN_REWARD} {JC_NAME}**!",
                 delete_after=10,
             ))
+            # Streak only advances once per day, at the same moment the daily
+            # check-in fires — so it's bumped here rather than on every message.
+            new_streak, hit_milestones = bump_streak(message.author.id)
+            for length in hit_milestones:
+                reward = STREAK_MILESTONES[length]
+                add_credits(message.author.id, reward)
+                asyncio.create_task(message.channel.send(
+                    streak_milestone_announcement(message.author, length, reward)
+                ))
+            new_achievements = check_achievements(message.author.id)
+            if new_achievements:
+                asyncio.create_task(message.channel.send(
+                    unlocked_announcement(message.author.display_name, new_achievements)
+                ))
 
         if is_ai_rate_limited(message.author.id):
             await _offer_ai_limit_reset(message.reply, message.author.id)

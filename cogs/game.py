@@ -5,7 +5,8 @@ import random
 import asyncio
 import os
 from cogs.ai import generate_ai_response
-from cogs.state import check_cooldown
+from cogs.state import check_cooldown, record_game_result
+from cogs.achievements import check_achievements, unlocked_announcement
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HANGMAN
@@ -573,6 +574,21 @@ def _chess_embed(game: dict, title: str = "♟️ Chess", msg: str = "") -> disc
 active_chess:    dict[int, dict] = {}
 active_akinator: dict[int, dict] = {}
 
+
+async def _record_chess_result(channel, winner: discord.abc.User, loser: discord.abc.User) -> None:
+    """Record a chess win/loss for both players and announce any newly
+    unlocked achievements. Never raises — a stats hiccup should never
+    break the actual game flow."""
+    try:
+        record_game_result(winner.id, "chess", "win")
+        record_game_result(loser.id, "chess", "loss")
+        for user in (winner, loser):
+            new = check_achievements(user.id)
+            if new and channel is not None:
+                await channel.send(unlocked_announcement(user.display_name, new))
+    except Exception as e:
+        print(f"[Achievements] Failed to record chess result: {e}")
+
 _PIECE_NAMES = {
     _chess.PAWN: "Pawn", _chess.ROOK: "Rook", _chess.KNIGHT: "Knight",
     _chess.BISHOP: "Bishop", _chess.QUEEN: "Queen", _chess.KING: "King",
@@ -917,6 +933,7 @@ class ChessMoveSelect(discord.ui.View):
             attachments=[_chess_file(self.game)],
             view=None
         )
+        await _record_chess_result(interaction.channel, winner, self.player)
     
     async def _draw_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.player.id:
@@ -1006,6 +1023,7 @@ class DestinationSelect(discord.ui.View):
             # Check for checkmate
             if board.is_checkmate():
                 winner = self.game["black"] if board.turn == _chess.WHITE else self.game["white"]
+                loser  = self.game["white"] if winner is self.game["black"] else self.game["black"]
                 channel_id = interaction.channel_id
                 if channel_id in active_chess:
                     del active_chess[channel_id]
@@ -1015,6 +1033,7 @@ class DestinationSelect(discord.ui.View):
                     attachments=[_chess_file(self.game)],
                     view=None
                 )
+                await _record_chess_result(interaction.channel, winner, loser)
                 return
             
             # Check for draw
@@ -2298,6 +2317,38 @@ class MafiaNightView(discord.ui.View):
 
 # ── End game ────────────────────────────────────────────────────────────────────
 
+_MAFIA_ALIGNED_ROLES = {"mafia"}
+_SOLO_ROLES = {"jester", "serialkiller"}  # win alone, not with village or mafia
+
+
+async def _record_mafia_results(channel, game: dict, winner: str) -> None:
+    """Record a win/loss for every player based on their role vs. the
+    winning side, and announce any newly unlocked achievements."""
+    try:
+        newly_unlocked = []
+        for uid, info in game["players"].items():
+            role = info.get("role")
+            if winner == "village":
+                won = role not in _MAFIA_ALIGNED_ROLES and role not in _SOLO_ROLES
+            elif winner == "mafia":
+                won = role in _MAFIA_ALIGNED_ROLES
+            elif winner in ("jester", "serialkiller"):
+                won = role == winner
+            else:
+                continue  # unknown/no winner — don't record anything
+            record_game_result(int(uid), "mafia", "win" if won else "loss")
+            user = channel.guild.get_member(int(uid)) if channel and channel.guild else None
+            name = user.display_name if user else f"User {uid}"
+            new = check_achievements(int(uid))
+            if new:
+                newly_unlocked.append((name, new))
+        if channel is not None:
+            for name, new in newly_unlocked:
+                await channel.send(unlocked_announcement(name, new))
+    except Exception as e:
+        print(f"[Achievements] Failed to record mafia results: {e}")
+
+
 async def _mafia_end_channel(channel, game: dict, winner: str, extra: str = "", msg=None):
     """End the game from a channel context (no interaction)."""
     channel_id = channel.id
@@ -2313,6 +2364,7 @@ async def _mafia_end_channel(channel, game: dict, winner: str, extra: str = "", 
         except Exception:
             pass
     await channel.send(embed=embed)
+    await _record_mafia_results(channel, game, winner)
 
 
 async def _mafia_end(interaction: discord.Interaction, game: dict, winner: str, extra=""):
@@ -2328,6 +2380,7 @@ async def _mafia_end(interaction: discord.Interaction, game: dict, winner: str, 
     except Exception:
         pass
     await interaction.channel.send(embed=embed)
+    await _record_mafia_results(interaction.channel, game, winner)
 
 
 def _build_end_embed(game: dict, winner: str, extra: str = "") -> discord.Embed:
@@ -2575,9 +2628,11 @@ class Fun(commands.Cog):
         game["hints_used"] = {}
         if board.is_checkmate():
             winner = game["black"] if board.turn == _chess.WHITE else game["white"]
+            loser  = game["white"] if winner is game["black"] else game["black"]
             del active_chess[ctx.channel.id]
             await ctx.reply(content=f"🏆 **{winner.display_name}** wins!",
                             embed=_chess_embed(game, title="♟️ Checkmate!"))
+            await _record_chess_result(ctx.channel, winner, loser)
             return
         if board.is_stalemate() or board.is_insufficient_material():
             del active_chess[ctx.channel.id]
@@ -2608,6 +2663,7 @@ class Fun(commands.Cog):
         del active_chess[channel.id]
         await reply_fn(content=f"🏳️ **{user.display_name}** resigned. **{winner.display_name}** wins!",
                        embed=_chess_embed(game, title="♟️ Resignation"), file=_chess_file(game))
+        await _record_chess_result(channel, winner, user)
 
     @app_commands.command(name="draw", description="Offer or accept a draw in chess")
     async def slash_draw(self, interaction: discord.Interaction):
@@ -2680,7 +2736,7 @@ class Fun(commands.Cog):
                                  defer_fn=ctx.typing)
 
     async def _handle_hint(self, channel, user, reply_fn, defer_fn):
-        from cogs.economy import SpendCreditsView, EXTRA_HINT_COST, JC_EMOJI, JC_NAME
+        from cogs.economy import SpendCreditsView, EXTRA_HINT_COST, JC_EMOJI, JC_NAME, get_active_perks
         from cogs.state import get_credits
 
         game = active_chess.get(channel.id)
@@ -2693,7 +2749,7 @@ class Fun(commands.Cog):
         hints_used = game.setdefault("hints_used", {})
         used = hints_used.get(str(user.id), 0)
 
-        if used >= 1:
+        if used >= 1 and not get_active_perks(user.id).get("free_hints"):
             # Free hint already used this turn — offer to spend JC for another.
             balance = get_credits(user.id)
 
@@ -3126,6 +3182,10 @@ class Fun(commands.Cog):
                     embed.colour = discord.Color.green()
                     embed.add_field(name="🎉 Winner!", value=f"**{message.author.display_name}** guessed the word!", inline=False)
                     await message.reply(embed=embed)
+                    record_game_result(message.author.id, "hangman", "win")
+                    new = check_achievements(message.author.id)
+                    if new:
+                        await message.channel.send(unlocked_announcement(message.author.display_name, new))
                     return
                 if state["wrong"] >= 6:
                     del active_hangman[cid]

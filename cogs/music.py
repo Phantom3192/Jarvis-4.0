@@ -40,6 +40,7 @@ from cogs.state import (
     get_user_playlists,
     set_user_playlist,
 )
+from cogs.achievements import check_achievements, unlocked_announcement
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -751,6 +752,9 @@ class Music(commands.Cog):
             embed = _track_embed(track, requester=author)
             embed.set_footer(text=f"Source: {source_label}")
             await send_fn(embed=embed)
+            new = check_achievements(author.id)
+            if new:
+                await send_fn(unlocked_announcement(author.display_name, new))
 
     async def _do_skip(self, guild, send_fn) -> None:
         player: wavelink.Player | None = guild.voice_client
@@ -993,6 +997,9 @@ class Music(commands.Cog):
             for track in playable_tracks[1:]:
                 player.queue.put(track)
             await ctx.reply(embed=_track_embed(playable_tracks[0], requester=ctx.author))
+            new = check_achievements(ctx.author.id)
+            if new:
+                await ctx.send(unlocked_announcement(ctx.author.display_name, new))
 
     @prefix_playlist.command(name="add")
     async def playlist_add(self, ctx: commands.Context, name: str, *, query: str) -> None:
