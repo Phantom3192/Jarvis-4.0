@@ -1454,8 +1454,10 @@ async def _offer_ai_limit_reset(send_fn, user_id: int) -> bool:
     (the user must resend their message after a reset).
     """
     limit = get_ai_limit()
+    perks = get_active_perks(user_id)
+    reset_cost = round(AI_LIMIT_RESET_COST * perks.get("reset_cost_multiplier", 1.0))
 
-    if get_credits(user_id) < AI_LIMIT_RESET_COST:
+    if get_credits(user_id) < reset_cost:
         await send_fn(content=DAILY_LIMIT_MSG.format(limit=limit))
         return True
 
@@ -1464,7 +1466,7 @@ async def _offer_ai_limit_reset(send_fn, user_id: int) -> bool:
         embed = discord.Embed(
             title="✅ Daily Limit Reset!",
             description=(
-                f"{JC_EMOJI} **{AI_LIMIT_RESET_COST} {JC_NAME}** spent.\n"
+                f"{JC_EMOJI} **{reset_cost} {JC_NAME}** spent.\n"
                 f"Your daily AI usage has been reset to **0/{limit}** — send your message again!"
             ),
             color=discord.Color.green(),
@@ -1474,15 +1476,15 @@ async def _offer_ai_limit_reset(send_fn, user_id: int) -> bool:
     async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
         text = DAILY_LIMIT_MSG.format(limit=limit)
         if reason == "insufficient":
-            text = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (need **{AI_LIMIT_RESET_COST}**).\n\n" + text
+            text = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (need **{reset_cost}**).\n\n" + text
         await interaction.response.edit_message(content=text, embed=None, view=view)
 
-    view = SpendCreditsView(user_id, AI_LIMIT_RESET_COST, on_confirm, on_decline, timeout=30)
+    view = SpendCreditsView(user_id, reset_cost, on_confirm, on_decline, timeout=30)
     embed = discord.Embed(
         title="📊 Daily AI Limit Reached",
         description=(
             f"You've used all **{limit}** of your free AI messages for today.\n\n"
-            f"Spend **{AI_LIMIT_RESET_COST}** {JC_EMOJI} {JC_NAME} to reset your daily counter "
+            f"Spend **{reset_cost}** {JC_EMOJI} {JC_NAME} to reset your daily counter "
             f"and keep chatting?"
         ),
         color=discord.Color.orange(),

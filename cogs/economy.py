@@ -57,6 +57,13 @@ MYSTERY_BOX_COST     = 200  # JC to open a Mystery Box
 MYSTERY_BOX_MIN      = 100   # min payout
 MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 
+# Higher-tier Mystery Box: pricier, better base payouts, and the only box
+# that VIP/Elite's mystery_box_multiplier perk applies to. The plain Mystery
+# Box above always pays out its normal range, no title bonus involved.
+DELUXE_MYSTERY_BOX_COST = 500  # JC to open a Deluxe Mystery Box
+DELUXE_MYSTERY_BOX_MIN  = 250   # min payout
+DELUXE_MYSTERY_BOX_MAX  = 600  # max payout — equal chance across the whole range
+
 # Profile banner colors — shown as the /profile embed color once equipped.
 # Keyed by the same id used in SHOP_ITEMS/grant_banner/equip_banner.
 BANNER_COLORS: dict[str, tuple[str, int]] = {
@@ -73,9 +80,57 @@ SUBSCRIPTION_PERIOD_SECONDS = 7 * 24 * 3600
 # is actually equipped (not just owned) — gives equipping a premium title
 # an actual reason beyond cosmetics.
 TITLE_PERKS: dict[str, dict] = {
-    "title_vip":   {"chat_jc_multiplier": 1.25},                    # +25% JC from AI chat
-    "title_elite": {"chat_jc_multiplier": 1.5, "free_hints": True},  # +50% JC + unlimited free chess hints
+    "title_vip": {
+        "chat_jc_multiplier": 1.25,       # +25% JC from AI chat
+        "mystery_box_multiplier": 1.15,   # +15% bigger Mystery Box payouts
+        "save_cost_multiplier": 0.5,      # 50% off counting-game streak saves
+        "referral_bonus_multiplier": 1.25, # +25% JC per successful referral
+        "weekly_loyalty_bonus": 100,      # free JC every week the sub renews
+        "leaderboard_flair": "\u001b[1;36m",  # bold cyan name on !leaderboard
+    },
+    "title_elite": {
+        "chat_jc_multiplier": 1.5,        # +50% JC from AI chat
+        "free_hints": True,               # unlimited free chess hints
+        "mystery_box_multiplier": 1.3,    # +30% bigger Mystery Box payouts
+        "save_cost_multiplier": 0.0,      # free counting-game streak saves
+        "reset_cost_multiplier": 0.5,     # 50% off AI daily-limit resets
+        "referral_bonus_multiplier": 1.5, # +50% JC per successful referral
+        "weekly_loyalty_bonus": 250,      # free JC every week the sub renews
+        "leaderboard_flair": "\u001b[1;33m",  # bold gold name on !leaderboard
+    },
 }
+
+# Human-readable descriptions for each perk key, used to build the perk
+# breakdown shown in the shop's "View Perks" button and in item descriptions.
+# Each value is a callable that takes the perk's value and returns a display
+# string (or None to skip it, e.g. a falsy free_hints flag).
+_PERK_LABELS = {
+    "chat_jc_multiplier":     lambda v: f"+{round((v - 1) * 100)}% {JC_NAME}s earned from chatting with Jarvis",
+    "mystery_box_multiplier": lambda v: f"+{round((v - 1) * 100)}% bigger Deluxe Mystery Box payouts",
+    "free_hints":             lambda v: "Unlimited free chess hints" if v else None,
+    "save_cost_multiplier":   lambda v: (
+        "Free counting-game streak saves" if v <= 0
+        else f"{round((1 - v) * 100)}% off counting-game streak saves"
+    ),
+    "reset_cost_multiplier":  lambda v: f"{round((1 - v) * 100)}% off AI daily-limit resets",
+    "referral_bonus_multiplier": lambda v: f"+{round((v - 1) * 100)}% {JC_NAME}s per successful referral",
+    "weekly_loyalty_bonus":   lambda v: f"+{v} {JC_NAME}s free every week your subscription renews",
+    "leaderboard_flair":      lambda v: "Colored name highlight on !leaderboard" if v else None,
+}
+
+
+def describe_perks(title_id: str) -> list[str]:
+    """Return a list of human-readable perk bullet strings for `title_id`,
+    or an empty list if it grants no gameplay perks."""
+    lines = []
+    for key, value in TITLE_PERKS.get(title_id, {}).items():
+        label_fn = _PERK_LABELS.get(key)
+        if not label_fn:
+            continue
+        label = label_fn(value)
+        if label:
+            lines.append(f"• {label}")
+    return lines
 
 
 def get_active_perks(user_id: int) -> dict:
@@ -104,17 +159,33 @@ SHOP_ITEMS: dict[str, dict] = {
         "kind": "mystery_box",
         "announce": True,
     },
+    "mystery_box_deluxe": {
+        "name": "🎆 Deluxe Mystery Box",
+        "price": DELUXE_MYSTERY_BOX_COST,
+        "description": (
+            f"A pricier box with better odds: anywhere from {DELUXE_MYSTERY_BOX_MIN}–{DELUXE_MYSTERY_BOX_MAX} JC. "
+            "VIP/Elite titles boost these payouts even further — see **🔍 View Perks**."
+        ),
+        "kind": "mystery_box_deluxe",
+        "announce": True,
+    },
     "title_vip": {
         "name": "💎 VIP",
         "price": 2000,
-        "description": "Billed **2,000 JC/week**. While equipped: **+25% JC from chatting**.",
+        "description": (
+            "Billed **2,000 JC/week**. An equippable VIP title with gameplay perks — "
+            "tap **🔍 View Perks** below to see what it grants."
+        ),
         "kind": "subscription_title",
         "announce": True,
     },
     "title_elite": {
         "name": "🌟 Elite",
         "price": 3500,
-        "description": "Billed **3,500 JC/week**. While equipped: **+50% JC from chatting** and **unlimited free chess hints**.",
+        "description": (
+            "Billed **3,500 JC/week**. An equippable Elite title with gameplay perks — "
+            "tap **🔍 View Perks** below to see what it grants."
+        ),
         "kind": "subscription_title",
         "announce": True,
     },
@@ -301,21 +372,31 @@ def streak_milestone_announcement(user: discord.User | discord.Member, length: i
     return f"{label}: **{user.display_name}** kept it going for **{length}** days — **+{reward} {JC_NAME}**! {JC_EMOJI}"
 
 
-def mystery_box_result_embed(user: discord.User | discord.Member, reward: int, new_balance: int) -> discord.Embed:
-    """Result embed shown after opening a Mystery Box."""
-    if reward >= 250:
+def mystery_box_result_embed(
+    user: discord.User | discord.Member,
+    reward: int,
+    new_balance: int,
+    *,
+    box_name: str = "Mystery Box",
+    box_emoji: str = "🎰",
+    jackpot_threshold: int = 250,
+    nice_threshold: int = 100,
+) -> discord.Embed:
+    """Result embed shown after opening a Mystery Box (or a higher shop tier
+    of it, like the Deluxe Mystery Box, via the box_name/threshold kwargs)."""
+    if reward >= jackpot_threshold:
         flavor = "🤯 JACKPOT!"
         color = discord.Color.gold()
-    elif reward >= 100:
+    elif reward >= nice_threshold:
         flavor = "🎉 Nice pull!"
         color = discord.Color.green()
     else:
         flavor = "📦 Not bad."
         color = discord.Color.blurple()
     embed = discord.Embed(
-        title="🎰 Mystery Box",
+        title=f"{box_emoji} {box_name}",
         description=(
-            f"{flavor} **{user.display_name}** opened a Mystery Box and got "
+            f"{flavor} **{user.display_name}** opened a {box_name} and got "
             f"**+{reward} {JC_NAME}**!\n\nNew balance: **{new_balance}** {JC_EMOJI}"
         ),
         color=color,
@@ -338,16 +419,23 @@ def _invite_embed(user: discord.User | discord.Member, code: str) -> discord.Emb
         ),
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="You get", value=f"**+{REFERRER_BONUS} {JC_NAME}** per successful referral", inline=True)
+    embed.add_field(
+        name="You get",
+        value=(
+            f"**+{REFERRER_BONUS} {JC_NAME}** per successful referral "
+            f"(more with an equipped VIP/Elite title — see `!titleperks`)"
+        ),
+        inline=True,
+    )
     # embed.add_field(name="They get", value="Their usual new-user bonus, no extra on top", inline=True)
     return embed
 
 
-def referral_success_announcement(referred_user: discord.User | discord.Member, referrer_id: int) -> str:
+def referral_success_announcement(referred_user: discord.User | discord.Member, referrer_id: int, bonus: int) -> str:
     """Public chat message announcing a successful referral redemption."""
     return (
         f"🎟️ **{referred_user.display_name}** joined Jarvis via referral! "
-        f"<@{referrer_id}> earned **+{REFERRER_BONUS} {JC_NAME}**! {JC_EMOJI}"
+        f"<@{referrer_id}> earned **+{bonus} {JC_NAME}**! {JC_EMOJI}"
     )
 
 
@@ -388,6 +476,7 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         return embed
 
     lines = []
+    _ANSI_RESET = "\u001b[0m"
     for i, (uid, bal) in enumerate(ranked):
         user = bot.get_user(int(uid))
         if user is None:
@@ -402,13 +491,16 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         title_id = get_equipped_title(int(uid))
         title_suffix = f" {get_title_label(title_id)}" if title_id else ""
 
-        if i < len(_MEDALS):
-            rank_label = _MEDALS[i]
-            lines.append(f"{rank_label} **{name}**{title_suffix} — **{bal:,}** {JC_EMOJI}")
-        else:
-            lines.append(f"`#{i + 1}` {name}{title_suffix} — **{bal:,}** {JC_EMOJI}")
+        # Titles with a "leaderboard_flair" perk get their name rendered in
+        # color via a Discord ANSI code block (the whole description below
+        # is wrapped in one ```ansi``` fence for this to actually render).
+        flair = TITLE_PERKS.get(title_id, {}).get("leaderboard_flair") if title_id else None
+        name_display = f"{flair}{name}{_ANSI_RESET}" if flair else name
 
-    embed.description = "\n".join(lines)
+        rank_label = _MEDALS[i] if i < len(_MEDALS) else f"#{i + 1}"
+        lines.append(f"{rank_label} {name_display}{title_suffix} — {bal:,} {JC_EMOJI}")
+
+    embed.description = "```ansi\n" + "\n".join(lines) + "\n```"
     embed.set_footer(text=f"Balances shown in {JC_NAME}s")
     return embed
 
@@ -435,6 +527,28 @@ def _shop_page_embed(page: int) -> discord.Embed:
             inline=False,
         )
     embed.set_footer(text=f"Page {page + 1}/{total_pages} • Buy with !shop buy <item_id> or the buttons below")
+    return embed
+
+
+def _title_perks_embed() -> discord.Embed:
+    """Standalone embed listing every purchasable title and the perks it
+    grants while equipped — shown via the shop's "View Perks" button and
+    the !titleperks / /titleperks commands."""
+    embed = discord.Embed(
+        title="🔍 Title Perks",
+        description=(
+            "Perks only apply while a title is **equipped** — see `!titles` and "
+            "`!title <name>` to check or switch."
+        ),
+        color=discord.Color.blurple(),
+    )
+    for item_id, item in SHOP_ITEMS.items():
+        if item["kind"] not in ("title", "subscription_title"):
+            continue
+        lines = describe_perks(item_id)
+        value = "\n".join(lines) if lines else "Cosmetic only — no gameplay perks."
+        embed.add_field(name=item["name"], value=value, inline=False)
+    embed.set_footer(text="Buy a title in the shop, then equip it with !title <name> to activate its perks.")
     return embed
 
 
@@ -481,6 +595,18 @@ async def _purchase_item(
         new_balance = add_credits(user.id, reward)
         fallback_msg = f"🎰 You opened the Mystery Box and won **+{reward} {JC_NAME}**! New balance: **{new_balance}** {JC_EMOJI}"
         public_msg = mystery_box_result_embed(user, reward, new_balance)
+
+    elif kind == "mystery_box_deluxe":
+        reward = random.randint(DELUXE_MYSTERY_BOX_MIN, DELUXE_MYSTERY_BOX_MAX)
+        perks = get_active_perks(user.id)
+        reward = round(reward * perks.get("mystery_box_multiplier", 1.0))
+        new_balance = add_credits(user.id, reward)
+        fallback_msg = f"🎆 You opened the Deluxe Mystery Box and won **+{reward} {JC_NAME}**! New balance: **{new_balance}** {JC_EMOJI}"
+        public_msg = mystery_box_result_embed(
+            user, reward, new_balance,
+            box_name="Deluxe Mystery Box", box_emoji="🎆",
+            jackpot_threshold=500, nice_threshold=350,
+        )
 
     elif kind == "title":
         grant_title(user.id, item_id)
@@ -559,12 +685,13 @@ async def _handle_redeem(
         grant_onboarding_bonus(user.id, ONBOARDING_BONUS)
     if REFERRED_BONUS:
         add_credits(user.id, REFERRED_BONUS)
-    add_credits(referrer_id, REFERRER_BONUS)
+    referrer_bonus = round(REFERRER_BONUS * get_active_perks(referrer_id).get("referral_bonus_multiplier", 1.0))
+    add_credits(referrer_id, referrer_bonus)
     new_user_balance = get_credits(user.id)
 
     if channel is not None:
         try:
-            await channel.send(referral_success_announcement(user, referrer_id))
+            await channel.send(referral_success_announcement(user, referrer_id, referrer_bonus))
         except discord.HTTPException:
             pass
 
@@ -636,6 +763,10 @@ class ShopView(discord.ui.View):
     async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page = (self.page + 1) % self.total_pages
         await self._refresh(interaction)
+
+    @discord.ui.button(label="🔍 View Perks", style=discord.ButtonStyle.primary, row=0)
+    async def view_perks(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=_title_perks_embed(), ephemeral=True)
 
     async def on_timeout(self) -> None:
         for child in self.children:
@@ -800,6 +931,18 @@ class Economy(commands.Cog):
                     continue
                 if spend_credits(uid, item["price"]):
                     set_subscription(uid, title_id, now + SUBSCRIPTION_PERIOD_SECONDS)
+                    bonus = TITLE_PERKS.get(title_id, {}).get("weekly_loyalty_bonus")
+                    if bonus:
+                        add_credits(uid, bonus)
+                        user = self.bot.get_user(uid)
+                        if user:
+                            try:
+                                await user.send(
+                                    f"🎁 Your **{item['name']}** subscription renewed — "
+                                    f"here's your weekly loyalty bonus: **+{bonus} {JC_NAME}** {JC_EMOJI}!"
+                                )
+                            except discord.HTTPException:
+                                pass
                 else:
                     revoke_title(uid, title_id)
                     clear_subscription(uid, title_id)
@@ -986,6 +1129,17 @@ class Economy(commands.Cog):
         if isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
             await ctx.reply("**Usage:** `!shop` or `!shop buy <item_id>`")
 
+    # ── !titleperks ──────────────────────────────────────────────────────────
+
+    @commands.command(name="titleperks", aliases=["perks"])
+    async def prefix_titleperks(self, ctx: commands.Context):
+        """!titleperks — see what gameplay perks each shop title grants."""
+        await ctx.reply(embed=_title_perks_embed())
+
+    @app_commands.command(name="titleperks", description="See what gameplay perks each shop title grants")
+    async def slash_titleperks(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=_title_perks_embed())
+
     # ── !mysterybox (shortcut straight to the shop's signature item) ─────────
 
     @commands.command(name="mysterybox", aliases=["mbox", "jcbox"])
@@ -1002,6 +1156,29 @@ class Economy(commands.Cog):
         success, msg = await _purchase_item(interaction.user, "mystery_box", channel=interaction.channel)
         if msg is None:
             await interaction.response.send_message("🎰 Box opened — see above!", ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=not success)
+
+    # ── !deluxebox (higher-tier box — this is the one title perks boost) ─────
+
+    @commands.command(name="deluxebox", aliases=["dbox"])
+    async def prefix_deluxebox(self, ctx: commands.Context):
+        """!deluxebox — open a Deluxe Mystery Box. Bigger cost, bigger reward,
+        and VIP/Elite titles boost the payout further."""
+        success, msg = await _purchase_item(ctx.author, "mystery_box_deluxe", channel=ctx.channel)
+        if msg is None:
+            await ctx.message.add_reaction("🎆")  # result already posted publicly above
+        else:
+            await ctx.reply(msg)
+
+    @app_commands.command(
+        name="deluxebox",
+        description=f"Open a Deluxe Mystery Box for {DELUXE_MYSTERY_BOX_COST} JC — bigger reward, boosted by VIP/Elite",
+    )
+    async def slash_deluxebox(self, interaction: discord.Interaction):
+        success, msg = await _purchase_item(interaction.user, "mystery_box_deluxe", channel=interaction.channel)
+        if msg is None:
+            await interaction.response.send_message("🎆 Box opened — see above!", ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=not success)
 
@@ -1123,4 +1300,4 @@ class Economy(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(Economy(bot)) 
+    await bot.add_cog(Economy(bot))

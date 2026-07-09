@@ -250,11 +250,13 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
     Returns True (the caller should return without resetting — the view's
     callbacks handle every outcome).
     """
-    from cogs.economy import SpendCreditsView, COUNT_SAVE_COST, JC_EMOJI, JC_NAME
+    from cogs.economy import SpendCreditsView, COUNT_SAVE_COST, JC_EMOJI, JC_NAME, get_active_perks
     from cogs.state import get_credits
 
     guild_id = message.guild.id
     balance = get_credits(message.author.id)
+    perks = get_active_perks(message.author.id)
+    save_cost = round(COUNT_SAVE_COST * perks.get("save_cost_multiplier", 1.0))
 
     def _reset():
         g = _count_guild(guild_id)
@@ -276,7 +278,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
         embed = discord.Embed(
             title="🛡️ Streak Saved!",
             description=(
-                f"{JC_EMOJI} **{COUNT_SAVE_COST} {JC_NAME}** spent.\n"
+                f"{JC_EMOJI} **{save_cost} {JC_NAME}** spent.\n"
                 f"The count stays at **{old}** — next number is **{old + 1}**."
             ),
             color=discord.Color.green(),
@@ -296,7 +298,7 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
         # ❌ NO — Streak lost: keep wrong msg, delete this msg, drop streak lost msg
         _reset()
         if reason == "insufficient":
-            extra = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{COUNT_SAVE_COST}**).\n"
+            extra = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{save_cost}**).\n"
         else:
             extra = ""
         await interaction.response.defer()
@@ -326,12 +328,12 @@ async def _count_offer_save(message: discord.Message, old: int, reason_text: str
             )
         )
 
-    view = SpendCreditsView(message.author.id, COUNT_SAVE_COST, on_confirm, on_decline, on_timeout_action, timeout=20)
+    view = SpendCreditsView(message.author.id, save_cost, on_confirm, on_decline, on_timeout_action, timeout=20)
     embed = discord.Embed(
         description=(
             f"{reason_text}\n"
             f"Count would reset to **0** (was **{old}**).\n\n"
-            f"Use **{COUNT_SAVE_COST}** {JC_EMOJI} {JC_NAME} to save the streak at **{old}**? "
+            f"Use **{save_cost}** {JC_EMOJI} {JC_NAME} to save the streak at **{old}**? "
             f"(you have **{balance}** {JC_EMOJI})"
         ),
         color=discord.Color.orange(),

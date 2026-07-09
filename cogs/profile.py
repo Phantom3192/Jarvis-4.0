@@ -38,6 +38,13 @@ def _progress_bar(current: int, total: int, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
+def _normalize_title_text(s: str) -> str:
+    """Strip emoji/punctuation and collapse whitespace so title names can be
+    matched regardless of whether the user included the leading emoji —
+    '💎 VIP', 'VIP', and 'vip' all normalize to the same string."""
+    return " ".join("".join(ch for ch in s if ch.isalnum() or ch.isspace()).lower().split())
+
+
 def _profile_embed(user: discord.User | discord.Member) -> discord.Embed:
     uid = user.id
     balance = get_credits(uid)
@@ -188,14 +195,16 @@ class Profile(commands.Cog):
             equip_title(user.id, None)
             return "✅ Title unequipped."
         owned = get_titles(user.id)["owned"]
-        # Accept either the raw stored id (chess_master, title_vip) or its
-        # display label (🏆 Chess Master, 💎 VIP) — matched case-insensitively
-        # so a copy-pasted or retyped label always resolves correctly instead
-        # of silently failing on an exact-character mismatch.
+        # Accept the raw stored id (chess_master, title_vip), the full display
+        # label (🏆 Chess Master, 💎 VIP), or the label with its leading emoji
+        # left off (Chess Master, VIP) — all matched case-insensitively, so
+        # a user typing just the plain name doesn't have to hunt down and
+        # retype the emoji for it to resolve correctly.
+        target = _normalize_title_text(name)
         match = None
         for owned_id in owned:
             label = get_title_label(owned_id)
-            if name == owned_id or name.lower() == label.lower():
+            if name == owned_id or target == _normalize_title_text(label):
                 match = owned_id
                 break
         if match is None:
