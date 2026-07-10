@@ -18,6 +18,7 @@ from cogs.state import (
     get_or_create_referral_code, redeem_referral_code, is_new_user, mark_seen,
     get_equipped_title, grant_title, get_titles, grant_banner, get_banners,
     get_all_subscriptions, set_subscription, clear_subscription, revoke_title,
+    grant_banner_border, get_banner_borders,
 )
 from cogs.achievements import TITLE_LABELS
 
@@ -72,6 +73,59 @@ BANNER_COLORS: dict[str, tuple[str, int]] = {
     "banner_midnight": ("🌌 Midnight Banner", 0x2C3E50),
     "banner_emerald":  ("🟢 Emerald Banner",  0x2ECC71),
 }
+
+# Gradient banners — a second style beyond flat color. Kept in a separate
+# catalog from BANNER_COLORS (rather than shoehorning a 2nd color into the
+# same tuple shape) so solid banners stay a simple (label, color) lookup
+# while gradients carry a (label, start_color, end_color) instead.
+# Owned/equipped through the exact same "banners" cosmetic slot as solid
+# colors — grant_banner/equip_banner/get_banners don't care which catalog
+# an id resolves in, so the two styles are interchangeable to equip.
+BANNER_GRADIENTS: dict[str, tuple[str, int, int]] = {
+    "banner_sunset":  ("🌅 Sunset Banner",  0xFF6B35, 0x8E2DE2),
+    "banner_ocean":   ("🌊 Ocean Banner",   0x00C6FF, 0x0072FF),
+    "banner_aurora":  ("🌌 Aurora Banner",  0x00F5A0, 0x00D9F5),
+    "banner_inferno": ("🔥 Inferno Banner", 0xFF512F, 0xDD2476),
+}
+
+# Banner "border" cosmetics — a frame drawn around the banner strip on
+# /profile, completely separate from the banner's own color/gradient so
+# people can mix-and-match (e.g. an Ocean Banner with a Sparkle Frame)
+# instead of every banner being a single locked-together flat swap.
+# Keyed by the same id used in SHOP_ITEMS/grant_banner_border/equip_banner_border.
+# Value is (label, style_key) — style_key is read by the renderer in profile.py.
+BANNER_BORDERS: dict[str, tuple[str, str]] = {
+    "border_dashed":  ("✂️ Dashed Frame",      "dashed"),
+    "border_dotted":  ("⚪ Dotted Frame",      "dotted"),
+    "border_double":  ("🎞️ Double-Line Frame", "double"),
+    "border_sparkle": ("✨ Sparkle Frame",     "sparkle"),
+}
+
+
+def get_banner_label(banner_id: str) -> str:
+    """Resolve a banner id (solid or gradient) to its display label."""
+    if banner_id in BANNER_COLORS:
+        return BANNER_COLORS[banner_id][0]
+    if banner_id in BANNER_GRADIENTS:
+        return BANNER_GRADIENTS[banner_id][0]
+    return banner_id
+
+
+def get_banner_colors(banner_id: str) -> list[int]:
+    """Return the color(s) that render `banner_id` — a single-item list for
+    a solid banner, a two-item [start, end] list for a gradient, or an
+    empty list if the id isn't a known banner (caller should fall back to
+    a default color)."""
+    if banner_id in BANNER_COLORS:
+        return [BANNER_COLORS[banner_id][1]]
+    if banner_id in BANNER_GRADIENTS:
+        _label, start, end = BANNER_GRADIENTS[banner_id]
+        return [start, end]
+    return []
+
+
+def get_border_label(border_id: str) -> str:
+    return BANNER_BORDERS.get(border_id, (border_id, "none"))[0]
 
 # Weekly billing period for subscription-style shop items.
 SUBSCRIPTION_PERIOD_SECONDS = 7 * 24 * 3600
@@ -222,6 +276,62 @@ SHOP_ITEMS: dict[str, dict] = {
         "price": 300,
         "description": "Colors your /profile card emerald green.",
         "kind": "banner",
+        "announce": False,
+    },
+    "banner_sunset": {
+        "name": "🌅 Sunset Banner",
+        "price": 450,
+        "description": "A warm orange-to-purple gradient across your /profile card.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "banner_ocean": {
+        "name": "🌊 Ocean Banner",
+        "price": 450,
+        "description": "A cool cyan-to-blue gradient across your /profile card.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "banner_aurora": {
+        "name": "🌌 Aurora Banner",
+        "price": 450,
+        "description": "A teal-to-cyan gradient across your /profile card.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "banner_inferno": {
+        "name": "🔥 Inferno Banner",
+        "price": 450,
+        "description": "A red-to-pink gradient across your /profile card.",
+        "kind": "banner",
+        "announce": False,
+    },
+    "border_dashed": {
+        "name": "✂️ Dashed Frame",
+        "price": 200,
+        "description": "A dashed-line frame around your banner — mix with any banner color or gradient.",
+        "kind": "banner_border",
+        "announce": False,
+    },
+    "border_dotted": {
+        "name": "⚪ Dotted Frame",
+        "price": 200,
+        "description": "A dotted frame around your banner — mix with any banner color or gradient.",
+        "kind": "banner_border",
+        "announce": False,
+    },
+    "border_double": {
+        "name": "🎞️ Double-Line Frame",
+        "price": 250,
+        "description": "A crisp double-line frame around your banner — mix with any banner color or gradient.",
+        "kind": "banner_border",
+        "announce": False,
+    },
+    "border_sparkle": {
+        "name": "✨ Sparkle Frame",
+        "price": 350,
+        "description": "A sparkle-dotted frame around your banner — mix with any banner color or gradient.",
+        "kind": "banner_border",
         "announce": False,
     },
 }
@@ -533,13 +643,18 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
 # ── JC Shop ──────────────────────────────────────────────────────────────────
 
 def _main_shop_items() -> list[tuple[str, dict]]:
-    """Every shop item except banners — banners live in their own sub-menu
-    (see _banner_shop_items / BannerShopView)."""
-    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] != "banner"]
+    """Every shop item except banners and banner borders — those live in
+    their own sub-menus (see _banner_shop_items/_border_shop_items and
+    BannerShopView/BorderShopView)."""
+    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] not in ("banner", "banner_border")]
 
 
 def _banner_shop_items() -> list[tuple[str, dict]]:
     return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] == "banner"]
+
+
+def _border_shop_items() -> list[tuple[str, dict]]:
+    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] == "banner_border"]
 
 
 def _shop_page_embed(page: int) -> discord.Embed:
@@ -575,6 +690,29 @@ def _banner_shop_embed() -> discord.Embed:
         color=discord.Color.purple(),
     )
     for item_id, item in _banner_shop_items():
+        embed.add_field(
+            name=f"{item['name']} — {item['price']} {JC_EMOJI}",
+            value=f"{item['description']}\n`!shop buy {item_id}`",
+            inline=False,
+        )
+    embed.set_footer(text="Buy with !shop buy <item_id> or the dropdown below • ◀ Back to Shop returns you here")
+    return embed
+
+
+def _border_shop_embed() -> discord.Embed:
+    """Standalone banner-border sub-menu, opened via the shop's 🖼️ Borders
+    button. Borders are a cosmetic frame around the banner strip, separate
+    from banner color — any owned border can be equipped alongside any
+    owned banner."""
+    embed = discord.Embed(
+        title="🖼️ Banner Borders",
+        description=(
+            "Cosmetic frames drawn around your /profile banner — independent of banner "
+            "color, so mix any border with any banner. Buy with the dropdown below."
+        ),
+        color=discord.Color.purple(),
+    )
+    for item_id, item in _border_shop_items():
         embed.add_field(
             name=f"{item['name']} — {item['price']} {JC_EMOJI}",
             value=f"{item['description']}\n`!shop buy {item_id}`",
@@ -633,6 +771,8 @@ async def _purchase_item(
         return False, f"❌ You already own **{item['name']}**."
     if kind == "banner" and item_id in get_banners(user.id)["owned"]:
         return False, f"❌ You already own **{item['name']}**."
+    if kind == "banner_border" and item_id in get_banner_borders(user.id)["owned"]:
+        return False, f"❌ You already own **{item['name']}**."
 
     if not spend_credits(user.id, item["price"]):
         bal = get_credits(user.id)
@@ -685,6 +825,13 @@ async def _purchase_item(
         fallback_msg = (
             f"✅ **{user.display_name}** bought the **{item['name']}**! "
             f"Equip it with `/banner {item['name']}`."
+        )
+
+    elif kind == "banner_border":
+        grant_banner_border(user.id, item_id)
+        fallback_msg = (
+            f"✅ **{user.display_name}** bought the **{item['name']}**! "
+            f"Equip it with `/border {item['name']}` — it mixes with whatever banner you have equipped."
         )
 
     if channel is not None and item.get("announce") and public_msg is not None:
@@ -849,6 +996,46 @@ class ShopView(discord.ui.View):
     async def banners_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = BannerShopView(self.user_id)
         await interaction.response.edit_message(embed=_banner_shop_embed(), view=view)
+        view.message = interaction.message
+
+    @discord.ui.button(label="🖼️ Borders", style=discord.ButtonStyle.secondary, row=0)
+    async def borders_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = BorderShopView(self.user_id)
+        await interaction.response.edit_message(embed=_border_shop_embed(), view=view)
+        view.message = interaction.message
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class BorderShopView(discord.ui.View):
+    """Separate banner-border sub-menu: a Buy dropdown for borders only,
+    plus a Back button that returns to the main shop's first page."""
+
+    def __init__(self, user_id: int, *, timeout: float = 90):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.message: discord.Message | None = None
+        self.add_item(_BuySelect(_border_shop_items(), placeholder="🖼️ Choose a border to buy…", owner_id=user_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Open your own shop with `!shop` to buy something!", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="◀ Back to Shop", style=discord.ButtonStyle.secondary, row=0)
+    async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ShopView(self.user_id)
+        await interaction.response.edit_message(embed=_shop_page_embed(0), view=view)
         view.message = interaction.message
 
     async def on_timeout(self) -> None:

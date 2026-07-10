@@ -115,6 +115,63 @@ TITLE_LABELS: dict[str, str] = {
 }
 
 
+# ── Avatar frames ──────────────────────────────────────────────────────────────
+# A cosmetic ring drawn around the /profile thumbnail, purely derived from
+# the highest-tier badge a user has actually earned. Deliberately separate
+# from titles: a person can be wearing someone else's purchased title while
+# still showing off the ring their own gameplay earned, and there's nothing
+# to equip or buy — it just reflects genuine progress automatically.
+# badge_id -> (tier name, RGB color, rank). Rank is only used to pick the
+# best frame when a user qualifies for more than one.
+AVATAR_FRAME_TIERS: dict[str, tuple[str, tuple[int, int, int], int]] = {
+    "chess_novice":      ("Bronze", (205, 127,  50), 1),
+    "mafia_survivor":    ("Silver", (192, 192, 192), 2),
+    "hangman_hero":      ("Silver", (192, 192, 192), 2),
+    "chatterbox":        ("Silver", (192, 192, 192), 2),
+    "chess_master":      ("Gold",   (255, 215,   0), 3),
+    "mafia_kingpin":     ("Gold",   (255, 215,   0), 3),
+    "loyal_month":       ("Gold",   (255, 215,   0), 3),
+    "chess_grandmaster": ("Platinum", (185, 242, 255), 4),
+}
+
+
+def get_avatar_frame(user_id: int) -> tuple[str, tuple[int, int, int], str] | None:
+    """Return (tier_name, rgb_color, badge_id) for the single highest-tier
+    achievement frame a user has unlocked, or None if they haven't earned
+    one yet. Never purchasable and never manually equipped/unequipped —
+    always reflects whatever their best qualifying badge currently is."""
+    owned = set(get_badges(user_id))
+    best: tuple[str, tuple[int, int, int], int, str] | None = None
+    for badge_id in owned:
+        tier = AVATAR_FRAME_TIERS.get(badge_id)
+        if tier is None:
+            continue
+        name, color, rank = tier
+        if best is None or rank > best[2]:
+            best = (name, color, rank, badge_id)
+    if best is None:
+        return None
+    return best[0], best[1], best[3]
+
+
+def next_avatar_frame_hint(user_id: int) -> str | None:
+    """Return a short human-readable hint for the next frame tier the user
+    hasn't reached yet (lowest rank they're missing), or None if they've
+    already unlocked every frame tier available."""
+    owned = set(get_badges(user_id))
+    missing = [
+        (tier[2], badge_id, tier)
+        for badge_id, tier in AVATAR_FRAME_TIERS.items()
+        if badge_id not in owned
+    ]
+    if not missing:
+        return None
+    missing.sort(key=lambda t: t[0])
+    _, badge_id, (name, _color, _rank) = missing[0]
+    ach = ACHIEVEMENTS.get(badge_id, {})
+    return f"{name} frame — {ach.get('description', badge_id)}"
+
+
 def unlocked_announcement(user_display_name: str, achievements: list[dict]) -> str:
     """Build a short public message for newly unlocked achievements."""
     lines = [f"{a['emoji']} **{a['name']}**" for a in achievements]
