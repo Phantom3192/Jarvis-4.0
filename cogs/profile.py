@@ -15,7 +15,8 @@ from discord import app_commands
 from cogs.state import (
     get_credits, get_streak, get_game_stats, get_songs_played,
     get_favorite_song, get_stats, get_badges, get_titles, get_banners,
-    equip_title, equip_banner,
+    equip_title, equip_banner, PROFILE_FIELDS, get_hidden_fields,
+    set_field_hidden,
 )
 from cogs.achievements import ACHIEVEMENTS
 from cogs.economy import JC_EMOJI, JC_NAME, BANNER_COLORS, get_title_label
@@ -47,8 +48,15 @@ def _normalize_text(s: str) -> str:
     return " ".join("".join(ch for ch in s if ch.isalnum() or ch.isspace()).lower().split())
 
 
-def _profile_embed(user: discord.User | discord.Member) -> discord.Embed:
+def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | discord.Member = None) -> discord.Embed:
+    """Build the profile card for `user`. `viewer` is whoever is looking at
+    it — defaults to `user` themself (e.g. internal calls, DMs). Fields the
+    owner has hidden via /profile hide are skipped for everyone except the
+    owner, so you always see your own full card regardless of your settings."""
     uid = user.id
+    is_owner = viewer is None or viewer.id == uid
+    hidden = set() if is_owner else set(get_hidden_fields(uid))
+
     balance = get_credits(uid)
     streak = get_streak(uid)
     stats = get_game_stats(uid)
@@ -70,44 +78,62 @@ def _profile_embed(user: discord.User | discord.Member) -> discord.Embed:
     embed = discord.Embed(title=f"🪪 {display_name}", color=color)
     embed.set_thumbnail(url=user.display_avatar.url)
 
-    embed.add_field(name=f"{JC_EMOJI} Balance", value=f"**{balance:,}** {JC_NAME}s", inline=True)
-    embed.add_field(name="🔥 Streak", value=f"**{streak}** day{'s' if streak != 1 else ''}", inline=True)
-    embed.add_field(
-        name=f"📈 Level {level}",
-        value=f"`{_progress_bar(into_level, per_level)}` {into_level}/{per_level}",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="♟️ Chess",
-        value=f"{stats['chess_wins']}W – {stats['chess_losses']}L",
-        inline=True,
-    )
-    embed.add_field(
-        name="🎭 Mafia",
-        value=f"{stats['mafia_wins']}W – {stats['mafia_losses']}L",
-        inline=True,
-    )
-    embed.add_field(
-        name="🪢 Hangman",
-        value=f"{stats['hangman_wins']} solved",
-        inline=True,
-    )
-
-    embed.add_field(name="🎵 Songs Played", value=str(songs), inline=True)
-    embed.add_field(name="🎧 Favorite Song", value=favorite or "—", inline=True)
-    embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer for a clean 3-column grid
-
-    badge_ids = get_badges(uid)
-    if badge_ids:
-        badge_line = "  ".join(
-            ACHIEVEMENTS[b]["emoji"] for b in badge_ids if b in ACHIEVEMENTS
+    if "balance" not in hidden:
+        embed.add_field(name=f"{JC_EMOJI} Balance", value=f"**{balance:,}** {JC_NAME}s", inline=True)
+    if "streak" not in hidden:
+        embed.add_field(name="🔥 Streak", value=f"**{streak}** day{'s' if streak != 1 else ''}", inline=True)
+    if "level" not in hidden:
+        embed.add_field(
+            name=f"📈 Level {level}",
+            value=f"`{_progress_bar(into_level, per_level)}` {into_level}/{per_level}",
+            inline=True,
         )
-        embed.add_field(name=f"🏅 Badges ({len(badge_ids)})", value=badge_line, inline=False)
-    else:
-        embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
 
-    embed.set_footer(text="Use /titles and /banners to see what you own and can equip.")
+    if "chess" not in hidden:
+        embed.add_field(
+            name="♟️ Chess",
+            value=f"{stats['chess_wins']}W – {stats['chess_losses']}L",
+            inline=True,
+        )
+    if "mafia" not in hidden:
+        embed.add_field(
+            name="🎭 Mafia",
+            value=f"{stats['mafia_wins']}W – {stats['mafia_losses']}L",
+            inline=True,
+        )
+    if "hangman" not in hidden:
+        embed.add_field(
+            name="🪢 Hangman",
+            value=f"{stats['hangman_wins']} solved",
+            inline=True,
+        )
+
+    if "songs" not in hidden:
+        embed.add_field(name="🎵 Songs Played", value=str(songs), inline=True)
+    if "favorite" not in hidden:
+        embed.add_field(name="🎧 Favorite Song", value=favorite or "—", inline=True)
+
+    # Spacer only makes sense once we know how many real fields landed in
+    # this row group — skip it entirely rather than leaving a lone blank
+    # tile when the owner has hidden most of the row.
+    trailing_row = sum(f not in hidden for f in ("songs", "favorite"))
+    if trailing_row and trailing_row % 3 != 0:
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+    if "badges" not in hidden:
+        badge_ids = get_badges(uid)
+        if badge_ids:
+            badge_line = "  ".join(
+                ACHIEVEMENTS[b]["emoji"] for b in badge_ids if b in ACHIEVEMENTS
+            )
+            embed.add_field(name=f"🏅 Badges ({len(badge_ids)})", value=badge_line, inline=False)
+        else:
+            embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
+
+    footer = "Use /titles and /banners to see what you own and can equip."
+    if is_owner and get_hidden_fields(uid):
+        footer = "Some fields are hidden from other viewers. " + footer
+    embed.set_footer(text=footer)
     return embed
 
 
@@ -156,13 +182,13 @@ class Profile(commands.Cog):
     async def prefix_profile(self, ctx: commands.Context, user: discord.User = None):
         """!profile — view your (or someone else's) rank card."""
         target = user or ctx.author
-        await ctx.reply(embed=_profile_embed(target))
+        await ctx.reply(embed=_profile_embed(target, viewer=ctx.author))
 
     @app_commands.command(name="profile", description="View your (or someone else's) Jarvis profile card")
     @app_commands.describe(user="User to look up (optional — leave empty for yourself)")
     async def slash_profile(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
-        await interaction.response.send_message(embed=_profile_embed(target))
+        await interaction.response.send_message(embed=_profile_embed(target, viewer=interaction.user))
 
     # ── !titles / /titles ───────────────────────────────────────────────────
 
@@ -214,6 +240,42 @@ class Profile(commands.Cog):
         equip_title(user.id, match)
         return f"✅ Equipped title: {get_title_label(match)}"
 
+    # ── !unequip / /unequip ──────────────────────────────────────────────────
+    # Equivalent to /title none or /banner none, but discoverable on its own —
+    # users shouldn't have to know "none" is the magic unequip keyword.
+
+    @commands.command(name="unequip")
+    async def prefix_unequip(self, ctx: commands.Context, what: str = None):
+        """!unequip title|banner|all — clear an equipped cosmetic."""
+        msg = self._handle_unequip(ctx.author, what)
+        await ctx.reply(msg)
+
+    @app_commands.command(name="unequip", description="Unequip your current title and/or banner")
+    @app_commands.describe(what="What to unequip")
+    @app_commands.choices(what=[
+        app_commands.Choice(name="Title", value="title"),
+        app_commands.Choice(name="Banner", value="banner"),
+        app_commands.Choice(name="Both", value="all"),
+    ])
+    async def slash_unequip(self, interaction: discord.Interaction, what: app_commands.Choice[str]):
+        msg = self._handle_unequip(interaction.user, what.value)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    def _handle_unequip(self, user: discord.User, what: str | None) -> str:
+        what = (what or "").strip().lower()
+        if what not in ("title", "banner", "all"):
+            return "**Usage:** `/unequip title`, `/unequip banner`, or `/unequip all`."
+        did = []
+        if what in ("title", "all") and get_titles(user.id).get("equipped"):
+            equip_title(user.id, None)
+            did.append("title")
+        if what in ("banner", "all") and get_banners(user.id).get("equipped"):
+            equip_banner(user.id, None)
+            did.append("banner")
+        if not did:
+            return "Nothing to unequip — you don't have a title or banner equipped."
+        return f"✅ Unequipped: {', '.join(did)}."
+
     # ── !banners / /banners ─────────────────────────────────────────────────
 
     @commands.command(name="banners", aliases=["mybanners"])
@@ -261,6 +323,69 @@ class Profile(commands.Cog):
             return f"❌ You don't own a banner called **{name}**. Check `/banners` for your list."
         equip_banner(user.id, match)
         return f"✅ Equipped banner: {BANNER_COLORS.get(match, (match, 0))[0]}"
+
+
+    # ── !profilehide / !profileshow / /profile-privacy ──────────────────────
+    # Per-field visibility. Hiding a field only affects what OTHER people see
+    # on /profile — the owner always sees their own full card.
+
+    _PRIVACY_CHOICES = [
+        app_commands.Choice(name=label, value=key) for key, label in PROFILE_FIELDS.items()
+    ]
+
+    @commands.command(name="profilehide")
+    async def prefix_profile_hide(self, ctx: commands.Context, *, field: str = None):
+        """!profilehide <field> — hide a stat from other people's view of your profile."""
+        msg = self._handle_set_hidden(ctx.author, field, True)
+        await ctx.reply(msg)
+
+    @commands.command(name="profileshow")
+    async def prefix_profile_show(self, ctx: commands.Context, *, field: str = None):
+        """!profileshow <field> — make a previously hidden stat visible again."""
+        msg = self._handle_set_hidden(ctx.author, field, False)
+        await ctx.reply(msg)
+
+    @commands.command(name="profilesettings", aliases=["profileprivacy"])
+    async def prefix_profile_settings(self, ctx: commands.Context):
+        """!profilesettings — see which fields are currently hidden from others."""
+        await ctx.reply(self._privacy_status(ctx.author))
+
+    @app_commands.command(name="profile-hide", description="Hide a stat from other people's view of your profile")
+    @app_commands.describe(field="Which field to hide")
+    @app_commands.choices(field=_PRIVACY_CHOICES)
+    async def slash_profile_hide(self, interaction: discord.Interaction, field: app_commands.Choice[str]):
+        msg = self._handle_set_hidden(interaction.user, field.value, True)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="profile-show", description="Make a previously hidden profile stat visible again")
+    @app_commands.describe(field="Which field to show")
+    @app_commands.choices(field=_PRIVACY_CHOICES)
+    async def slash_profile_show(self, interaction: discord.Interaction, field: app_commands.Choice[str]):
+        msg = self._handle_set_hidden(interaction.user, field.value, False)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @app_commands.command(name="profile-settings", description="See which of your profile fields are hidden from others")
+    async def slash_profile_settings(self, interaction: discord.Interaction):
+        await interaction.response.send_message(self._privacy_status(interaction.user), ephemeral=True)
+
+    def _handle_set_hidden(self, user: discord.User, field: str | None, hidden: bool) -> str:
+        if not field:
+            valid = ", ".join(PROFILE_FIELDS)
+            return f"**Usage:** `/profile-hide <field>` or `/profile-show <field>`. Valid fields: {valid}"
+        key = field.strip().lower()
+        if key not in PROFILE_FIELDS:
+            valid = ", ".join(PROFILE_FIELDS)
+            return f"❌ Unknown field **{field}**. Valid fields: {valid}"
+        set_field_hidden(user.id, key, hidden)
+        verb = "hidden from" if hidden else "visible to"
+        return f"✅ **{PROFILE_FIELDS[key]}** is now {verb} other people viewing your profile."
+
+    def _privacy_status(self, user: discord.User) -> str:
+        hidden = get_hidden_fields(user.id)
+        if not hidden:
+            return "Nothing is hidden — your whole profile is visible to everyone. Use `/profile-hide` to hide a field."
+        labels = ", ".join(PROFILE_FIELDS.get(f, f) for f in hidden)
+        return f"🙈 Hidden from other viewers: **{labels}**. Use `/profile-show` to unhide any of them."
 
 
 async def setup(bot: commands.Bot):

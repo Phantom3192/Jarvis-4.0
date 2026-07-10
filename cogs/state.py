@@ -52,6 +52,7 @@ _data: dict[str, Any] = {
     "titles":         {},    # str(user_id) → {"owned": [title_id,...], "equipped": title_id|None}
     "banners":        {},    # str(user_id) → {"owned": [banner_id,...], "equipped": banner_id|None}
     "title_subscriptions": {}, # str(user_id) → {title_id: next_charge_epoch}
+    "profile_privacy": {}, # str(user_id) → list[str] of field keys hidden from OTHER viewers (owner always sees all)
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -79,6 +80,7 @@ _SERIALISE: dict[str, Any] = {
     "titles":          lambda: _data["titles"],
     "banners":         lambda: _data["banners"],
     "title_subscriptions": lambda: _data["title_subscriptions"],
+    "profile_privacy":     lambda: _data["profile_privacy"],
 }
 
 
@@ -146,6 +148,7 @@ async def init_db():
     if "titles"         in db: _data["titles"]          = db["titles"]
     if "banners"        in db: _data["banners"]         = db["banners"]
     if "title_subscriptions" in db: _data["title_subscriptions"] = db["title_subscriptions"]
+    if "profile_privacy" in db: _data["profile_privacy"] = db["profile_privacy"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -1144,6 +1147,41 @@ def equip_banner(user_id: int, banner_id: str | None) -> bool:
 
 def get_equipped_banner(user_id: int) -> str | None:
     return _cosmetic_entry("banners", user_id).get("equipped")
+
+
+PROFILE_FIELDS = {
+    "balance":  "Balance",
+    "streak":   "Streak",
+    "level":    "Level",
+    "chess":    "Chess record",
+    "mafia":    "Mafia record",
+    "hangman":  "Hangman record",
+    "songs":    "Songs played",
+    "favorite": "Favorite song",
+    "badges":   "Badges",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROFILE PRIVACY  (per-field visibility — hides a stat from OTHER viewers'
+# /profile calls; the owner always sees their own full card regardless)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_hidden_fields(user_id: int) -> list[str]:
+    return list(_data["profile_privacy"].get(str(user_id), []))
+
+
+def set_field_hidden(user_id: int, field: str, hidden: bool) -> None:
+    """Hide or unhide a single profile field for other viewers."""
+    uid = str(user_id)
+    hidden_fields = _data["profile_privacy"].setdefault(uid, [])
+    if hidden:
+        if field not in hidden_fields:
+            hidden_fields.append(field)
+    else:
+        if field in hidden_fields:
+            hidden_fields.remove(field)
+    _schedule_save("profile_privacy")
 
 
 def revoke_title(user_id: int, title_id: str) -> None:

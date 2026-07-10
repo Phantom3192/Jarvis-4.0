@@ -10,6 +10,7 @@ from to:
     daily-limit flow.
 """
 import time
+from datetime import datetime, timezone
 import discord
 from discord.ext import tasks
 
@@ -75,6 +76,35 @@ BANNER_COLORS: dict[str, tuple[str, int]] = {
 
 # Weekly billing period for subscription-style shop items.
 SUBSCRIPTION_PERIOD_SECONDS = 7 * 24 * 3600
+
+
+def _until(date_str: str) -> float:
+    """Parse a fixed 'YYYY-MM-DD' UTC date into an epoch timestamp, for use
+    as a shop item's `available_until`. Deliberately a FIXED calendar date,
+    not `time.time() + N days` — the latter would silently push the window
+    back every time the bot restarts, so a "2-week" item could stay in the
+    shop forever. Interpreted as end-of-day UTC on that date."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, tzinfo=timezone.utc
+    )
+    return dt.timestamp()
+
+
+def _item_available(item: dict) -> bool:
+    """True unless the item has an `available_until` that's already passed.
+    Items with no `available_until` key are always available."""
+    until = item.get("available_until")
+    return until is None or time.time() < until
+
+
+def _availability_note(item: dict) -> str:
+    """A short '⏳ Available until ...' line for shop embeds, or '' for
+    items with no expiry."""
+    until = item.get("available_until")
+    if until is None:
+        return ""
+    date = datetime.fromtimestamp(until, tz=timezone.utc).strftime("%b %d, %Y")
+    return f"\n⏳ **Limited time** — available until {date} UTC"
 
 # Gameplay perks tied to an EQUIPPED title id. Only applies while the title
 # is actually equipped (not just owned) — gives equipping a premium title
@@ -195,6 +225,17 @@ SHOP_ITEMS: dict[str, dict] = {
         "description": "An equippable Legend title, shown on your /profile and the leaderboard.",
         "kind": "title",
         "announce": True,
+    },
+    "title_founder": {
+        "name": "🎗️ Founder",
+        "price": 1500,
+        "description": (
+            "A one-time-only equippable title for early supporters. Once this window "
+            "closes, it's gone for good — no re-runs."
+        ),
+        "kind": "title",
+        "announce": True,
+        "available_until": _until("2026-07-25"),  # ~2 weeks — adjust the date to run a new event
     },
     "banner_gold": {
         "name": "🥇 Gold Banner",
@@ -534,12 +575,19 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
 
 def _main_shop_items() -> list[tuple[str, dict]]:
     """Every shop item except banners — banners live in their own sub-menu
-    (see _banner_shop_items / BannerShopView)."""
-    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] != "banner"]
+    (see _banner_shop_items / BannerShopView). Excludes limited-time items
+    whose available_until has passed."""
+    return [
+        (iid, item) for iid, item in SHOP_ITEMS.items()
+        if item["kind"] != "banner" and _item_available(item)
+    ]
 
 
 def _banner_shop_items() -> list[tuple[str, dict]]:
-    return [(iid, item) for iid, item in SHOP_ITEMS.items() if item["kind"] == "banner"]
+    return [
+        (iid, item) for iid, item in SHOP_ITEMS.items()
+        if item["kind"] == "banner" and _item_available(item)
+    ]
 
 
 def _shop_page_embed(page: int) -> discord.Embed:
@@ -560,7 +608,7 @@ def _shop_page_embed(page: int) -> discord.Embed:
     for item_id, item in chunk:
         embed.add_field(
             name=f"{item['name']} — {item['price']} {JC_EMOJI}",
-            value=f"{item['description']}\n`!shop buy {item_id}`",
+            value=f"{item['description']}{_availability_note(item)}\n`!shop buy {item_id}`",
             inline=False,
         )
     embed.set_footer(text=f"Page {page + 1}/{total_pages} • Buy with !shop buy <item_id> or the dropdown below")
@@ -577,7 +625,7 @@ def _banner_shop_embed() -> discord.Embed:
     for item_id, item in _banner_shop_items():
         embed.add_field(
             name=f"{item['name']} — {item['price']} {JC_EMOJI}",
-            value=f"{item['description']}\n`!shop buy {item_id}`",
+            value=f"{item['description']}{_availability_note(item)}\n`!shop buy {item_id}`",
             inline=False,
         )
     embed.set_footer(text="Buy with !shop buy <item_id> or the dropdown below • ◀ Back to Shop returns you here")
@@ -624,6 +672,9 @@ async def _purchase_item(
     item = SHOP_ITEMS.get(item_id)
     if item is None:
         return False, f"❌ Unknown item `{item_id}`. Use `!shop` to see what's available."
+
+    if not _item_available(item):
+        return False, f"❌ **{item['name']}** was a limited-time item and is no longer available."
 
     kind = item["kind"]
 

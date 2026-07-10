@@ -73,6 +73,18 @@ ACHIEVEMENTS: dict[str, dict] = {
         "title": "⭐ Monthly Loyalist",
         "metric": lambda uid: get_streak(uid), "threshold": 30,
     },
+    "loyal_100": {
+        "name": "Centurion", "emoji": "🏵️",
+        "description": "Keep a 100-day chat streak going.",
+        "title": "🏵️ Centurion",
+        "metric": lambda uid: get_streak(uid), "threshold": 100,
+    },
+    "loyal_year": {
+        "name": "Year One", "emoji": "🎇",
+        "description": "Keep a 365-day chat streak going.",
+        "title": "🎇 Year One",
+        "metric": lambda uid: get_streak(uid), "threshold": 365,
+    },
     "chatterbox": {
         "name": "Chatterbox", "emoji": "💬",
         "description": "Send 500 messages to Jarvis.",
