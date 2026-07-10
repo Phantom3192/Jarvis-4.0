@@ -51,9 +51,7 @@ _data: dict[str, Any] = {
     "badges":         {},    # str(user_id) → list[str] of unlocked achievement badge ids
     "titles":         {},    # str(user_id) → {"owned": [title_id,...], "equipped": title_id|None}
     "banners":        {},    # str(user_id) → {"owned": [banner_id,...], "equipped": banner_id|None}
-    "banner_borders": {},    # str(user_id) → {"owned": [border_id,...], "equipped": border_id|None}
     "title_subscriptions": {}, # str(user_id) → {title_id: next_charge_epoch}
-    "profile_hidden": {},    # str(user_id) → list[str] of /profile section keys the user has hidden
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -80,9 +78,7 @@ _SERIALISE: dict[str, Any] = {
     "badges":          lambda: _data["badges"],
     "titles":          lambda: _data["titles"],
     "banners":         lambda: _data["banners"],
-    "banner_borders":  lambda: _data["banner_borders"],
     "title_subscriptions": lambda: _data["title_subscriptions"],
-    "profile_hidden":  lambda: _data["profile_hidden"],
 }
 
 
@@ -149,9 +145,7 @@ async def init_db():
     if "badges"         in db: _data["badges"]          = db["badges"]
     if "titles"         in db: _data["titles"]          = db["titles"]
     if "banners"        in db: _data["banners"]         = db["banners"]
-    if "banner_borders" in db: _data["banner_borders"]  = db["banner_borders"]
     if "title_subscriptions" in db: _data["title_subscriptions"] = db["title_subscriptions"]
-    if "profile_hidden" in db: _data["profile_hidden"]  = db["profile_hidden"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -1152,35 +1146,6 @@ def get_equipped_banner(user_id: int) -> str | None:
     return _cosmetic_entry("banners", user_id).get("equipped")
 
 
-def get_banner_borders(user_id: int) -> dict:
-    """Banner borders are a separate cosmetic slot from the banner itself —
-    a person can mix any owned border with any owned banner color/gradient
-    instead of the two being locked together."""
-    return dict(_cosmetic_entry("banner_borders", user_id))
-
-
-def grant_banner_border(user_id: int, border_id: str) -> bool:
-    entry = _cosmetic_entry("banner_borders", user_id)
-    if border_id in entry["owned"]:
-        return False
-    entry["owned"].append(border_id)
-    _schedule_save("banner_borders")
-    return True
-
-
-def equip_banner_border(user_id: int, border_id: str | None) -> bool:
-    entry = _cosmetic_entry("banner_borders", user_id)
-    if border_id is not None and border_id not in entry["owned"]:
-        return False
-    entry["equipped"] = border_id
-    _schedule_save("banner_borders")
-    return True
-
-
-def get_equipped_banner_border(user_id: int) -> str | None:
-    return _cosmetic_entry("banner_borders", user_id).get("equipped")
-
-
 def revoke_title(user_id: int, title_id: str) -> None:
     """Remove an owned title entirely — used when a paid subscription lapses.
     Safe to call even if the user doesn't own it."""
@@ -1218,34 +1183,3 @@ def clear_subscription(user_id: int, title_id: str) -> None:
 def get_all_subscriptions() -> dict[str, dict[str, float]]:
     """Return a copy of every user's subscriptions, keyed by str(user_id)."""
     return {uid: dict(subs) for uid, subs in _data["title_subscriptions"].items()}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PROFILE SECTION VISIBILITY  (per-user opt-out for /profile fields that
-# don't apply to them — e.g. someone who never touches the music cog can
-# hide the "Songs Played" / "Favorite Song" fields so their card isn't
-# cluttered with zeroes)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def get_hidden_sections(user_id: int) -> list[str]:
-    return list(_data["profile_hidden"].get(str(user_id), []))
-
-
-def set_section_hidden(user_id: int, section: str, hidden: bool) -> None:
-    """Add/remove `section` from the user's hidden-sections list. Safe to
-    call redundantly (hiding an already-hidden section, or showing an
-    already-visible one) — only schedules a save when something changes."""
-    uid = str(user_id)
-    hidden_list = _data["profile_hidden"].setdefault(uid, [])
-    if hidden:
-        if section not in hidden_list:
-            hidden_list.append(section)
-            _schedule_save("profile_hidden")
-    else:
-        if section in hidden_list:
-            hidden_list.remove(section)
-            _schedule_save("profile_hidden")
-
-
-def is_section_hidden(user_id: int, section: str) -> bool:
-    return section in _data["profile_hidden"].get(str(user_id), [])
