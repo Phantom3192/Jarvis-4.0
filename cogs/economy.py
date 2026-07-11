@@ -18,7 +18,8 @@ from cogs.state import (
     spend_credits, bump_streak, get_streak, STREAK_MILESTONES,
     get_or_create_referral_code, redeem_referral_code, is_new_user, mark_seen,
     get_equipped_title, grant_title, get_titles, grant_banner, get_banners,
-    get_all_subscriptions, set_subscription, clear_subscription, revoke_title,
+    get_all_subscriptions, get_subscriptions, set_subscription, clear_subscription, revoke_title,
+    revoke_banner, equip_title, get_auto_renew, set_auto_renew, clear_auto_renew,
 )
 from cogs.achievements import TITLE_LABELS
 
@@ -61,9 +62,9 @@ MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 # Higher-tier Mystery Box: pricier, better base payouts, and the only box
 # that VIP/Elite's mystery_box_multiplier perk applies to. The plain Mystery
 # Box above always pays out its normal range, no title bonus involved.
-DELUXE_MYSTERY_BOX_COST = 500  # JC to open a Deluxe Mystery Box
-DELUXE_MYSTERY_BOX_MIN  = 250   # min payout
-DELUXE_MYSTERY_BOX_MAX  = 600  # max payout — equal chance across the whole range
+DELUXE_MYSTERY_BOX_COST = 1000  # JC to open a Deluxe Mystery Box
+DELUXE_MYSTERY_BOX_MIN  = 100   # min payout
+DELUXE_MYSTERY_BOX_MAX  = 2000  # max payout — equal chance across the whole range
 
 # Profile banner colors — shown as the /profile embed color once equipped.
 # Keyed by the same id used in SHOP_ITEMS/grant_banner/equip_banner.
@@ -72,6 +73,9 @@ BANNER_COLORS: dict[str, tuple[str, int]] = {
     "banner_royal":    ("👑 Royal Banner",    0x9B59B6),
     "banner_midnight": ("🌌 Midnight Banner", 0x2C3E50),
     "banner_emerald":  ("🟢 Emerald Banner",  0x2ECC71),
+    # Exclusive to VIP/Elite subscribers — auto-granted in _purchase_item on
+    # subscribe, deliberately NOT in SHOP_ITEMS so it can't be bought directly.
+    "banner_prestige": ("💠 Prestige Banner", 0x00CFFF),
 }
 
 # Weekly billing period for subscription-style shop items.
@@ -106,6 +110,39 @@ def _availability_note(item: dict) -> str:
     date = datetime.fromtimestamp(until, tz=timezone.utc).strftime("%b %d, %Y")
     return f"\n⏳ **Limited time** — available until {date} UTC"
 
+
+def _format_time_left(seconds: float) -> str:
+    """'3d 4h', '5h 12m', or '<1m' style compact countdown string."""
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m"
+    return "<1m"
+
+
+def _subscription_note(item_id: str, item: dict, user_id: int | None) -> str:
+    """A '🔄 Renews in ...' / '⚠️ Renewal failing' line for shop embeds,
+    shown only for `subscription_title` items the given user currently
+    owns. Deliberately keyed off `item["kind"]` rather than a specific
+    item id, so it applies uniformly to VIP, Elite, or any subscription
+    title added later — not just the first one that happened to get it."""
+    if item.get("kind") != "subscription_title" or user_id is None:
+        return ""
+    next_charge = get_subscriptions(user_id).get(item_id)
+    if next_charge is None:
+        return ""  # user doesn't currently own/subscribe to this title
+    remaining = next_charge - time.time()
+    if remaining <= 0:
+        # Billing task hasn't swept yet, but the renewal is due/overdue.
+        return "\n🔄 **Renews any moment now**"
+    return f"\n🔄 **Renews in {_format_time_left(remaining)}** (next charge: {item['price']:,} {JC_EMOJI})"
+
 # Gameplay perks tied to an EQUIPPED title id. Only applies while the title
 # is actually equipped (not just owned) — gives equipping a premium title
 # an actual reason beyond cosmetics.
@@ -117,6 +154,11 @@ TITLE_PERKS: dict[str, dict] = {
         "referral_bonus_multiplier": 1.25, # +25% JC per successful referral
         "weekly_loyalty_bonus": 100,      # free JC every week the sub renews
         "leaderboard_flair": "\u001b[1;36m",  # bold cyan name on !leaderboard
+        "reset_cost_multiplier": 0.75,    # 25% off AI daily-limit resets
+        "hint_cost_multiplier": 0.5,      # 50% off extra chess hints
+        "daily_bonus_multiplier": 1.25,   # +25% JC from the daily check-in bonus
+        "daily_ai_limit_bonus": 50,       # +50 AI messages/day (100 -> 150)
+        "cooldown_multiplier": 0.5,       # half the normal command cooldown
     },
     "title_elite": {
         "chat_jc_multiplier": 1.5,        # +50% JC from AI chat
@@ -127,6 +169,9 @@ TITLE_PERKS: dict[str, dict] = {
         "referral_bonus_multiplier": 1.5, # +50% JC per successful referral
         "weekly_loyalty_bonus": 250,      # free JC every week the sub renews
         "leaderboard_flair": "\u001b[1;33m",  # bold gold name on !leaderboard
+        "daily_bonus_multiplier": 1.5,    # +50% JC from the daily check-in bonus
+        "daily_ai_limit_bonus": 150,      # +150 AI messages/day (100 -> 250)
+        "cooldown_multiplier": 0.2,       # nearly instant command cooldown
     },
 }
 
@@ -146,6 +191,13 @@ _PERK_LABELS = {
     "referral_bonus_multiplier": lambda v: f"+{round((v - 1) * 100)}% {JC_NAME}s per successful referral",
     "weekly_loyalty_bonus":   lambda v: f"+{v} {JC_NAME}s free every week your subscription renews",
     "leaderboard_flair":      lambda v: "✨ Highlighted name on !leaderboard" if v else None,
+    "hint_cost_multiplier":   lambda v: (
+        "Free extra chess hints" if v <= 0
+        else f"{round((1 - v) * 100)}% off extra chess hints"
+    ),
+    "daily_bonus_multiplier": lambda v: f"+{round((v - 1) * 100)}% {JC_NAME}s from your daily check-in bonus",
+    "daily_ai_limit_bonus":   lambda v: f"+{v} AI messages per day",
+    "cooldown_multiplier":    lambda v: f"{round((1 - v) * 100)}% shorter command cooldown",
 }
 
 
@@ -170,13 +222,27 @@ def get_active_perks(user_id: int) -> dict:
     return TITLE_PERKS.get(equipped, {})
 
 
+# Labels for titles that used to be purchasable in SHOP_ITEMS but have since
+# been pulled (event ended, retired, etc). Anyone who already owns one keeps
+# it — this just keeps it displaying nicely on /profile, /titles, and the
+# leaderboard instead of falling back to the raw item id. Move an entry here
+# whenever you remove something from SHOP_ITEMS that people may already own.
+_RETIRED_TITLE_LABELS: dict[str, str] = {
+    "title_founder": "🎗️ Founder",
+    "title_legend": "🔥 Legend",
+}
+
+
 def get_title_label(title_id: str) -> str:
     """Resolve a stored title id back to its display label — checks shop
-    items first, then achievement-granted titles. Falls back to the raw id
-    if somehow neither catalog has it (shouldn't normally happen)."""
+    items first, then achievement-granted titles, then retired shop titles.
+    Falls back to the raw id if somehow none of those have it (shouldn't
+    normally happen)."""
     if title_id in SHOP_ITEMS:
         return SHOP_ITEMS[title_id]["name"]
-    return TITLE_LABELS.get(title_id, title_id)
+    if title_id in TITLE_LABELS:
+        return TITLE_LABELS[title_id]
+    return _RETIRED_TITLE_LABELS.get(title_id, title_id)
 
 
 # Shop catalog. Keys are stable item ids (used by !shop buy <id>).
@@ -218,24 +284,6 @@ SHOP_ITEMS: dict[str, dict] = {
         ),
         "kind": "subscription_title",
         "announce": True,
-    },
-    "title_legend": {
-        "name": "🔥 Legend",
-        "price": 1200,
-        "description": "An equippable Legend title, shown on your /profile and the leaderboard.",
-        "kind": "title",
-        "announce": True,
-    },
-    "title_founder": {
-        "name": "🎗️ Founder",
-        "price": 1500,
-        "description": (
-            "A one-time-only equippable title for early supporters. Once this window "
-            "closes, it's gone for good — no re-runs."
-        ),
-        "kind": "title",
-        "announce": True,
-        "available_until": _until("2026-07-25"),  # ~2 weeks — adjust the date to run a new event
     },
     "banner_gold": {
         "name": "🥇 Gold Banner",
@@ -590,10 +638,12 @@ def _banner_shop_items() -> list[tuple[str, dict]]:
     ]
 
 
-def _shop_page_embed(page: int) -> discord.Embed:
+def _shop_page_embed(page: int, user_id: int | None = None) -> discord.Embed:
     """Build one page of the paginated shop embed. `page` is 0-indexed.
     Banners are excluded here — they have their own sub-menu, opened via
-    the 🎨 Banners button."""
+    the 🎨 Banners button. When `user_id` is given, subscription titles
+    the user already owns (VIP, Elite, or any future subscription_title
+    item) show a live 'Renews in ...' countdown."""
     items = _main_shop_items()
     total_pages = max(1, (len(items) + SHOP_PAGE_SIZE - 1) // SHOP_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
@@ -608,7 +658,12 @@ def _shop_page_embed(page: int) -> discord.Embed:
     for item_id, item in chunk:
         embed.add_field(
             name=f"{item['name']} — {item['price']} {JC_EMOJI}",
-            value=f"{item['description']}{_availability_note(item)}\n`!shop buy {item_id}`",
+            value=(
+                f"{item['description']}"
+                f"{_availability_note(item)}"
+                f"{_subscription_note(item_id, item, user_id)}"
+                f"\n`!shop buy {item_id}`"
+            ),
             inline=False,
         )
     embed.set_footer(text=f"Page {page + 1}/{total_pages} • Buy with !shop buy <item_id> or the dropdown below")
@@ -658,9 +713,15 @@ async def _purchase_item(
     user: discord.User | discord.Member,
     item_id: str,
     channel: discord.abc.Messageable | None = None,
+    *,
+    auto_renew: bool = True,
 ) -> tuple[bool, str | None]:
     """
     Attempt to purchase `item_id` for `user`. Returns (success, fallback_message).
+
+    `auto_renew` only matters for `subscription_title` items — whether the
+    weekly billing should keep renewing automatically once this period ends,
+    or let it lapse gracefully on its own. Ignored for every other kind.
 
     If the item is meant to announce publicly and `channel` is provided, the
     public embed/message is sent directly to `channel` and fallback_message
@@ -723,11 +784,29 @@ async def _purchase_item(
 
     elif kind == "subscription_title":
         grant_title(user.id, item_id)
+        grant_banner(user.id, "banner_prestige")  # exclusive VIP/Elite perk, not shop-buyable
         set_subscription(user.id, item_id, time.time() + SUBSCRIPTION_PERIOD_SECONDS)
+        set_auto_renew(user.id, item_id, auto_renew)
+        previously_equipped = get_equipped_title(user.id)
+        equip_title(user.id, item_id)  # subscribing activates it immediately — no separate equip step
+        swap_note = (
+            f" (swapped out of **{get_title_label(previously_equipped)}**)"
+            if previously_equipped and previously_equipped != item_id else ""
+        )
+        renew_note = (
+            f"🔁 Auto-renew is **ON** — it'll keep billing **{item['price']:,} {JC_NAME}s/week** "
+            f"until you turn it off with `!autorenew {item_id.split('_')[1]} off`."
+            if auto_renew else
+            f"🔂 Auto-renew is **OFF** — this runs for exactly one week and then ends on its own, "
+            f"no further charges. Turn it back on anytime with `!autorenew {item_id.split('_')[1]} on`."
+        )
         fallback_msg = (
-            f"✅ **{user.display_name}** subscribed to **{item['name']}**! "
-            f"Billed **{item['price']:,} JC/week** — first payment taken now. "
-            f"Equip it with `/title {item['name']}` to activate its perks."
+            f"✅ **{user.display_name}** subscribed to **{item['name']}** and it's now active{swap_note}! "
+            f"First payment of **{item['price']:,} {JC_NAME}s** taken now, perks are live immediately. "
+            f"You've also unlocked the exclusive 💠 **Prestige Banner** — equip it with `/banner Prestige`. "
+            f"{renew_note} "
+            f"Heads up: perks only apply while **{item['name']}** stays equipped — switching to another "
+            f"title with `/title` turns them off again."
         )
         public_msg = f"🛍️ **{user.display_name}** just subscribed to **{item['name']}**!"
 
@@ -806,6 +885,103 @@ async def _handle_redeem(
     )
 
 
+class SubscribeChoiceView(discord.ui.View):
+    """
+    Shown before finalizing a `subscription_title` purchase (VIP/Elite) — asks
+    whether it should auto-renew weekly or run for exactly one week and stop.
+    Nothing is charged until one of these buttons is pressed.
+    """
+
+    def __init__(self, user_id: int, item_id: str, item: dict, channel, *, timeout: float = 30):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.item_id = item_id
+        self.item = item
+        self.channel = channel
+        self.message: discord.Message | None = None
+        self._resolved = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This prompt isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    async def _finalize(self, interaction: discord.Interaction, auto_renew: bool) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        self._disable()
+        success, msg = await _purchase_item(
+            interaction.user, self.item_id, channel=self.channel, auto_renew=auto_renew
+        )
+        if msg is None:
+            await interaction.response.edit_message(
+                content="✅ Purchased! Check the channel for the announcement.", embed=None, view=self
+            )
+        else:
+            await interaction.response.edit_message(content=msg, embed=None, view=self)
+        self.stop()
+
+    @discord.ui.button(label="Auto-renew ON", style=discord.ButtonStyle.success, emoji="🔁")
+    async def renew_on(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finalize(interaction, auto_renew=True)
+
+    @discord.ui.button(label="Auto-renew OFF (one week only)", style=discord.ButtonStyle.secondary, emoji="🔂")
+    async def renew_off(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._finalize(interaction, auto_renew=False)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._resolved:
+            return
+        self._resolved = True
+        self._disable()
+        await interaction.response.edit_message(
+            content="❌ Cancelled — nothing was charged.", embed=None, view=self
+        )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        self._disable()
+        if self.message:
+            try:
+                await self.message.edit(
+                    content="⏰ This prompt expired — nothing was charged. Run `!shop` again to subscribe.",
+                    embed=None, view=self,
+                )
+            except discord.HTTPException:
+                pass
+
+
+def _subscribe_choice_embed(item_id: str, item: dict, user_id: int) -> discord.Embed:
+    swap_note = ""
+    currently_equipped = get_equipped_title(user_id)
+    if currently_equipped and currently_equipped != item_id:
+        swap_note = (
+            f"\n\n⚠️ You currently have **{get_title_label(currently_equipped)}** equipped — "
+            f"subscribing will swap you into **{item['name']}** immediately."
+        )
+    return discord.Embed(
+        title=f"{item['name']} — {item['price']:,} {JC_NAME}s/week",
+        description=(
+            f"Should this **auto-renew** every week, or run for **one week only** and then end "
+            f"on its own with no further charges?\n\nYou can change this anytime later with `!autorenew`."
+            f"{swap_note}"
+        ),
+        color=discord.Color.blurple(),
+    )
+
+
 class _BuySelect(discord.ui.Select):
     """One dropdown covering every item passed in, used instead of a Buy
     button per item — keeps the shop tidy no matter how many items a
@@ -816,15 +992,39 @@ class _BuySelect(discord.ui.Select):
 
     def __init__(self, items: list[tuple[str, dict]], *, placeholder: str, owner_id: int):
         self.owner_id = owner_id
+        self._items = items  # kept so this select can rebuild an identical fresh copy of itself
+        self._placeholder = placeholder
         options = [
             discord.SelectOption(
-                label=f"Buy {item['name'].split(' ', 1)[-1]} — {item['price']} {JC_NAME}s",
+                label=(
+                    f"Subscribe & Activate {item['name'].split(' ', 1)[-1]} — {item['price']} {JC_NAME}s/wk"
+                    if item["kind"] == "subscription_title"
+                    else f"Buy {item['name'].split(' ', 1)[-1]} — {item['price']} {JC_NAME}s"
+                ),
                 emoji=item["name"].split(" ", 1)[0],
                 value=item_id,
             )
             for item_id, item in items
         ] or [discord.SelectOption(label="Nothing here yet", value="__none__")]
         super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1, row=1)
+
+    def _reset_in_view(self) -> None:
+        """Swap this select out for a fresh, identical copy of itself in its
+        parent view. Needed because Discord keeps showing the just-picked
+        option as the select's displayed label until the message's
+        components are re-sent by the bot — left alone, this both looks
+        stuck and, on some clients, blocks picking that same option again.
+
+        Returns the parent view. Important: we capture it BEFORE removing
+        self — `View.remove_item()` detaches the item (self.view becomes
+        None afterward), so reading self.view again after this runs would
+        silently edit the message with a `None` view, wiping every
+        component (buttons included), not just resetting the select."""
+        view: discord.ui.View = self.view
+        fresh = _BuySelect(self._items, placeholder=self._placeholder, owner_id=self.owner_id)
+        view.remove_item(self)
+        view.add_item(fresh)
+        return view
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.owner_id:
@@ -836,13 +1036,28 @@ class _BuySelect(discord.ui.Select):
         if item_id == "__none__":
             await interaction.response.defer()
             return
+
+        # Always reset the dropdown first, before anything else — this is
+        # the interaction's primary response; everything below uses a
+        # followup message instead.
+        parent_view = self._reset_in_view()
+        await interaction.response.edit_message(view=parent_view)
+
+        item = SHOP_ITEMS.get(item_id)
+        if item is not None and item["kind"] == "subscription_title":
+            view = SubscribeChoiceView(interaction.user.id, item_id, item, interaction.channel)
+            msg = await interaction.followup.send(
+                embed=_subscribe_choice_embed(item_id, item, interaction.user.id), view=view, ephemeral=True
+            )
+            view.message = msg
+            return
         success, msg = await _purchase_item(interaction.user, item_id, channel=interaction.channel)
         if msg is None:
             # Public announcement already posted to the channel — just
             # quietly confirm to the buyer so we don't double-post.
-            await interaction.response.send_message("✅ Purchased!", ephemeral=True)
+            await interaction.followup.send("✅ Purchased!", ephemeral=True)
         else:
-            await interaction.response.send_message(msg, ephemeral=not success)
+            await interaction.followup.send(msg, ephemeral=not success)
 
 
 class ShopView(discord.ui.View):
@@ -880,7 +1095,7 @@ class ShopView(discord.ui.View):
 
     async def _refresh(self, interaction: discord.Interaction) -> None:
         self._rebuild_select()
-        await interaction.response.edit_message(embed=_shop_page_embed(self.page), view=self)
+        await interaction.response.edit_message(embed=_shop_page_embed(self.page, self.user_id), view=self)
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=0)
     async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -933,7 +1148,7 @@ class BannerShopView(discord.ui.View):
     @discord.ui.button(label="◀ Back to Shop", style=discord.ButtonStyle.secondary, row=0)
     async def back_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = ShopView(self.user_id)
-        await interaction.response.edit_message(embed=_shop_page_embed(0), view=view)
+        await interaction.response.edit_message(embed=_shop_page_embed(0, self.user_id), view=view)
         view.message = interaction.message
 
     async def on_timeout(self) -> None:
@@ -1074,6 +1289,133 @@ class TransferRequestView(discord.ui.View):
                 pass
 
 
+_pending_sub_gifts: dict[tuple[int, int, str], dict] = {}  # (sender_id, recipient_id, item_id) -> {}
+
+
+class GiftSubRequestView(discord.ui.View):
+    """
+    Shown to the *recipient* of a gifted VIP/Elite subscription.
+    Two buttons: Accept ✅  |  Decline ❌.  Auto-times out after 60 seconds.
+
+    Mirrors TransferRequestView's key property: the sender's JC is only
+    deducted at Accept time, not when the gift is sent — so a decline or
+    timeout never needs a refund because nothing was ever charged.
+    """
+
+    def __init__(
+        self,
+        sender: discord.User | discord.Member,
+        recipient: discord.User | discord.Member,
+        item_id: str,
+        item: dict,
+        *,
+        timeout: float = 60,
+    ):
+        super().__init__(timeout=timeout)
+        self.sender = sender
+        self.recipient = recipient
+        self.item_id = item_id
+        self.item = item
+        self.message: discord.Message | None = None
+        self._resolved = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.recipient.id:
+            await interaction.response.send_message(
+                "This gift isn't for you!", ephemeral=True
+            )
+            return False
+        return True
+
+    def _disable(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    async def _resolve(self, interaction: discord.Interaction, accepted: bool) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        self._disable()
+        key = (self.sender.id, self.recipient.id, self.item_id)
+        _pending_sub_gifts.pop(key, None)
+
+        if accepted:
+            if not spend_credits(self.sender.id, self.item["price"]):
+                embed = discord.Embed(
+                    description=(
+                        f"❌ Gift failed — **{self.sender.display_name}** no longer has enough "
+                        f"{JC_EMOJI} to cover this gift."
+                    ),
+                    color=discord.Color.red(),
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+                return
+
+            grant_title(self.recipient.id, self.item_id)
+            grant_banner(self.recipient.id, "banner_prestige")
+            # Extend from their current expiry if they already have this
+            # subscription active, otherwise start a fresh week from now.
+            existing = get_subscriptions(self.recipient.id).get(self.item_id)
+            base = existing if existing and existing > time.time() else time.time()
+            new_next_charge = base + SUBSCRIPTION_PERIOD_SECONDS
+            set_subscription(self.recipient.id, self.item_id, new_next_charge)
+            new_sender_bal = get_credits(self.sender.id)
+
+            embed = discord.Embed(
+                title=f"{JC_EMOJI} Gift Accepted!",
+                description=(
+                    f"🎁 **{self.recipient.display_name}** accepted **{self.item['name']}** "
+                    f"from **{self.sender.display_name}**!\n\n"
+                    f"**{self.sender.display_name}**'s new balance: **{new_sender_bal}** {JC_EMOJI}\n\n"
+                    f"It's active for the next 7 days, and the exclusive 💠 **Prestige Banner** "
+                    f"has been unlocked too. Run `/title {self.item['name']}` to turn its perks on.\n\n"
+                    f"Heads up: this gift only covers the current week — future weekly renewals "
+                    f"bill **{self.recipient.display_name}**'s own {JC_EMOJI} balance, not the gifter's."
+                ),
+                color=discord.Color.green(),
+            )
+        else:
+            embed = discord.Embed(
+                title=f"{JC_EMOJI} Gift Declined",
+                description=(
+                    f"❌ **{self.recipient.display_name}** declined the **{self.item['name']}** gift "
+                    f"from **{self.sender.display_name}**. Nothing was charged."
+                ),
+                color=discord.Color.red(),
+            )
+
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._resolve(interaction, accepted=True)
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._resolve(interaction, accepted=False)
+
+    async def on_timeout(self) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        _pending_sub_gifts.pop((self.sender.id, self.recipient.id, self.item_id), None)
+        self._disable()
+        if self.message:
+            try:
+                embed = discord.Embed(
+                    title=f"{JC_EMOJI} Gift Expired",
+                    description=(
+                        f"⏰ The **{self.item['name']}** gift from **{self.sender.display_name}** to "
+                        f"**{self.recipient.display_name}** expired with no response. Nothing was charged."
+                    ),
+                    color=discord.Color.dark_gray(),
+                )
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
+
+
 class Economy(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1086,8 +1428,33 @@ class Economy(commands.Cog):
     async def bill_subscriptions(self):
         """Charge the weekly fee for every active title subscription. If a
         user can't cover the renewal, the title is revoked entirely (and
-        unequipped if it was equipped) rather than left in limbo."""
+        unequipped if it was equipped) rather than left in limbo. Subscriptions
+        with auto-renew turned off skip the charge entirely and just expire
+        on schedule instead."""
         now = time.time()
+
+        async def _end_subscription(uid: int, title_id: str, item: dict, *, reason: str) -> None:
+            """Shared cleanup for a subscription that's ending (whether from
+            a failed charge or auto-renew being off) — revoke the title,
+            clear the subscription + auto-renew flag, and strip the shared
+            Prestige banner only if no other subscription_title remains."""
+            revoke_title(uid, title_id)
+            clear_subscription(uid, title_id)
+            clear_auto_renew(uid, title_id)
+            remaining_subs = get_subscriptions(uid)
+            still_has_sub_title = any(
+                SHOP_ITEMS.get(tid, {}).get("kind") == "subscription_title"
+                for tid in remaining_subs
+            )
+            if not still_has_sub_title:
+                revoke_banner(uid, "banner_prestige")
+            user = self.bot.get_user(uid)
+            if user:
+                try:
+                    await user.send(reason)
+                except discord.HTTPException:
+                    pass
+
         for uid_str, subs in get_all_subscriptions().items():
             uid = int(uid_str)
             for title_id, next_charge in subs.items():
@@ -1096,7 +1463,19 @@ class Economy(commands.Cog):
                 item = SHOP_ITEMS.get(title_id)
                 if item is None:
                     clear_subscription(uid, title_id)
+                    clear_auto_renew(uid, title_id)
                     continue
+
+                if not get_auto_renew(uid, title_id):
+                    await _end_subscription(
+                        uid, title_id, item,
+                        reason=(
+                            f"🔂 Your **{item['name']}** subscription has ended (auto-renew was off) — "
+                            f"no charge was made. You can subscribe again anytime from `/shop`."
+                        ),
+                    )
+                    continue
+
                 if spend_credits(uid, item["price"]):
                     set_subscription(uid, title_id, now + SUBSCRIPTION_PERIOD_SECONDS)
                     bonus = TITLE_PERKS.get(title_id, {}).get("weekly_loyalty_bonus")
@@ -1112,18 +1491,14 @@ class Economy(commands.Cog):
                             except discord.HTTPException:
                                 pass
                 else:
-                    revoke_title(uid, title_id)
-                    clear_subscription(uid, title_id)
-                    user = self.bot.get_user(uid)
-                    if user:
-                        try:
-                            await user.send(
-                                f"⚠️ Your **{item['name']}** subscription lapsed — you didn't have "
-                                f"enough {JC_EMOJI} for the **{item['price']:,} JC/week** renewal, "
-                                f"so it's been removed. You can buy it again anytime from `/shop`."
-                            )
-                        except discord.HTTPException:
-                            pass
+                    await _end_subscription(
+                        uid, title_id, item,
+                        reason=(
+                            f"⚠️ Your **{item['name']}** subscription lapsed — you didn't have "
+                            f"enough {JC_EMOJI} for the **{item['price']:,} JC/week** renewal, "
+                            f"so it's been removed. You can buy it again anytime from `/shop`."
+                        ),
+                    )
 
     @bill_subscriptions.before_loop
     async def _before_bill_subscriptions(self):
@@ -1275,7 +1650,14 @@ class Economy(commands.Cog):
             if not item_id:
                 await ctx.reply("**Usage:** `!shop buy <item_id>` — see `!shop` for item ids.")
                 return
-            success, msg = await _purchase_item(ctx.author, item_id.lower(), channel=ctx.channel)
+            item_id = item_id.lower()
+            item = SHOP_ITEMS.get(item_id)
+            if item is not None and item["kind"] == "subscription_title":
+                view = SubscribeChoiceView(ctx.author.id, item_id, item, ctx.channel)
+                msg = await ctx.reply(embed=_subscribe_choice_embed(item_id, item, ctx.author.id), view=view)
+                view.message = msg
+                return
+            success, msg = await _purchase_item(ctx.author, item_id, channel=ctx.channel)
             if msg is None:
                 await ctx.message.add_reaction("✅")  # public announcement already posted above
             else:
@@ -1283,13 +1665,13 @@ class Economy(commands.Cog):
             return
 
         view = ShopView(ctx.author.id)
-        msg = await ctx.reply(embed=_shop_page_embed(0), view=view)
+        msg = await ctx.reply(embed=_shop_page_embed(0, ctx.author.id), view=view)
         view.message = msg
 
     @app_commands.command(name="shop", description="Browse the Jarvis Credit shop")
     async def slash_shop(self, interaction: discord.Interaction):
         view = ShopView(interaction.user.id)
-        await interaction.response.send_message(embed=_shop_page_embed(0), view=view)
+        await interaction.response.send_message(embed=_shop_page_embed(0, interaction.user.id), view=view)
         view.message = await interaction.original_response()
 
     @prefix_shop.error
@@ -1465,6 +1847,397 @@ class Economy(commands.Cog):
                 "❌ Invalid arguments. Make sure you @mention a valid user and provide a whole number.\n"
                 "**Usage:** `!transferjc @user <amount>`"
             )
+
+    # ── !giftsub ─────────────────────────────────────────────────────────────
+
+    @commands.command(name="giftsub", aliases=["giftvip", "giftelite", "gift"])
+    async def prefix_giftsub(
+        self,
+        ctx: commands.Context,
+        recipient: discord.User = None,
+        tier: str = None,
+    ):
+        """!giftsub @user <vip|elite> — pay for someone else's VIP/Elite subscription
+        (or extend theirs by a week) using your own JC. They must accept first —
+        nothing is charged unless they do."""
+        sender = ctx.author
+
+        if recipient is None or tier is None:
+            await ctx.reply("**Usage:** `!giftsub @user <vip|elite>`\n**Example:** `!giftsub @user vip`")
+            return
+
+        if recipient.id == sender.id:
+            await ctx.reply("❌ You can't gift a subscription to yourself — just buy it with `!shop`.")
+            return
+        if recipient.bot:
+            await ctx.reply("❌ You can't gift a subscription to a bot.")
+            return
+
+        item_id = {"vip": "title_vip", "elite": "title_elite"}.get(tier.strip().lower().lstrip("!/"))
+        if item_id is None:
+            await ctx.reply("❌ Unknown tier — use `vip` or `elite`. **Example:** `!giftsub @user elite`")
+            return
+
+        item = SHOP_ITEMS[item_id]
+        if not _item_available(item):
+            await ctx.reply(f"❌ **{item['name']}** isn't currently available.")
+            return
+
+        sender_balance = get_credits(sender.id)
+        if sender_balance < item["price"]:
+            await ctx.reply(
+                f"❌ Insufficient balance. You have **{sender_balance}** {JC_EMOJI} but "
+                f"**{item['name']}** costs **{item['price']:,}** {JC_NAME}s/week."
+            )
+            return
+
+        key = (sender.id, recipient.id, item_id)
+        if key in _pending_sub_gifts:
+            await ctx.reply(
+                f"⚠️ You already have a pending **{item['name']}** gift to **{recipient.display_name}**. "
+                f"Wait for them to respond first."
+            )
+            return
+
+        _pending_sub_gifts[key] = {}
+
+        request_embed = discord.Embed(
+            title=f"{JC_EMOJI} Incoming Subscription Gift",
+            description=(
+                f"**{sender.display_name}** wants to gift you **{item['name']}** "
+                f"(**{item['price']:,} {JC_NAME}s**, one week) — use `/titleperks` to see what it grants.\n\n"
+                f"Note: only this first week is a gift — if you keep it past that, future weekly "
+                f"renewals come out of **your own** {JC_EMOJI} balance.\n\nDo you accept?"
+            ),
+            color=discord.Color.blurple(),
+        )
+        request_embed.set_footer(text="This request expires in 60 seconds. Nothing is charged unless you accept.")
+        request_embed.set_thumbnail(url=sender.display_avatar.url)
+
+        view = GiftSubRequestView(sender=sender, recipient=recipient, item_id=item_id, item=item)
+        msg = await ctx.send(
+            content=f"{recipient.mention}, you've got a gift!",
+            embed=request_embed,
+            view=view,
+        )
+        view.message = msg
+        await ctx.message.add_reaction("🎁")
+
+    @prefix_giftsub.error
+    async def giftsub_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.reply("**Usage:** `!giftsub @user <vip|elite>`\n**Example:** `!giftsub @user vip`")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.reply(
+                "❌ Invalid arguments. Make sure you @mention a valid user.\n"
+                "**Usage:** `!giftsub @user <vip|elite>`"
+            )
+
+    @app_commands.command(name="giftsub", description="Gift someone a week of VIP/Elite using your own JC (they must accept)")
+    @app_commands.describe(recipient="Who to gift the subscription to", tier="vip or elite")
+    async def slash_giftsub(self, interaction: discord.Interaction, recipient: discord.User, tier: str):
+        sender = interaction.user
+
+        if recipient.id == sender.id:
+            await interaction.response.send_message(
+                "❌ You can't gift a subscription to yourself — just buy it with `/shop`.", ephemeral=True
+            )
+            return
+        if recipient.bot:
+            await interaction.response.send_message("❌ You can't gift a subscription to a bot.", ephemeral=True)
+            return
+
+        item_id = {"vip": "title_vip", "elite": "title_elite"}.get(tier.strip().lower())
+        if item_id is None:
+            await interaction.response.send_message("❌ Unknown tier — use `vip` or `elite`.", ephemeral=True)
+            return
+
+        item = SHOP_ITEMS[item_id]
+        if not _item_available(item):
+            await interaction.response.send_message(f"❌ **{item['name']}** isn't currently available.", ephemeral=True)
+            return
+
+        sender_balance = get_credits(sender.id)
+        if sender_balance < item["price"]:
+            await interaction.response.send_message(
+                f"❌ Insufficient balance. You have **{sender_balance}** {JC_EMOJI} but "
+                f"**{item['name']}** costs **{item['price']:,}** {JC_NAME}s/week.",
+                ephemeral=True,
+            )
+            return
+
+        key = (sender.id, recipient.id, item_id)
+        if key in _pending_sub_gifts:
+            await interaction.response.send_message(
+                f"⚠️ You already have a pending **{item['name']}** gift to **{recipient.display_name}**. "
+                f"Wait for them to respond first.",
+                ephemeral=True,
+            )
+            return
+
+        _pending_sub_gifts[key] = {}
+
+        request_embed = discord.Embed(
+            title=f"{JC_EMOJI} Incoming Subscription Gift",
+            description=(
+                f"**{sender.display_name}** wants to gift you **{item['name']}** "
+                f"(**{item['price']:,} {JC_NAME}s**, one week) — use `/titleperks` to see what it grants.\n\n"
+                f"Note: only this first week is a gift — if you keep it past that, future weekly "
+                f"renewals come out of **your own** {JC_EMOJI} balance.\n\nDo you accept?"
+            ),
+            color=discord.Color.blurple(),
+        )
+        request_embed.set_footer(text="This request expires in 60 seconds. Nothing is charged unless you accept.")
+        request_embed.set_thumbnail(url=sender.display_avatar.url)
+
+        view = GiftSubRequestView(sender=sender, recipient=recipient, item_id=item_id, item=item)
+        # Deliberately NOT ephemeral — the recipient needs to see and click
+        # these buttons too, and an ephemeral response is only visible to
+        # the person who ran the command (the sender), not the recipient.
+        await interaction.response.send_message(
+            content=f"{recipient.mention}, you've got a gift!",
+            embed=request_embed,
+            view=view,
+        )
+        view.message = await interaction.original_response()
+
+    @slash_giftsub.autocomplete("tier")
+    async def giftsub_tier_autocomplete(self, interaction: discord.Interaction, current: str):
+        return [
+            app_commands.Choice(name=label, value=value)
+            for value, label in (("vip", "VIP"), ("elite", "Elite"))
+            if current.lower() in value
+        ]
+
+    # ── !autorenew ───────────────────────────────────────────────────────────
+
+    @commands.command(name="autorenew", aliases=["renew"])
+    async def prefix_autorenew(
+        self,
+        ctx: commands.Context,
+        tier: str = None,
+        state_arg: str = None,
+    ):
+        """!autorenew <vip|elite> <on|off> — toggle auto-renew for your own
+        active subscription. With no on/off given, shows its current state."""
+        item_id = {"vip": "title_vip", "elite": "title_elite"}.get(
+            (tier or "").strip().lower().lstrip("!/")
+        )
+        if item_id is None:
+            await ctx.reply(
+                "**Usage:** `!autorenew <vip|elite> [on|off]`\n"
+                "**Example:** `!autorenew vip off`"
+            )
+            return
+
+        item = SHOP_ITEMS[item_id]
+        next_charge = get_subscriptions(ctx.author.id).get(item_id)
+        if not next_charge or next_charge <= time.time():
+            await ctx.reply(f"❌ You don't have an active **{item['name']}** subscription right now.")
+            return
+
+        if state_arg is None:
+            current = get_auto_renew(ctx.author.id, item_id)
+            ts = int(next_charge)
+            await ctx.reply(
+                f"🔁 Auto-renew for **{item['name']}** is currently **{'ON' if current else 'OFF'}**.\n"
+                f"{'Next renewal' if current else 'Ends'}: <t:{ts}:f> (<t:{ts}:R>)\n"
+                f"Use `!autorenew {tier} on` or `!autorenew {tier} off` to change it."
+            )
+            return
+
+        state_key = state_arg.strip().lower()
+        if state_key not in ("on", "off"):
+            await ctx.reply("❌ Use `on` or `off` — **Example:** `!autorenew vip off`")
+            return
+
+        new_value = state_key == "on"
+        set_auto_renew(ctx.author.id, item_id, new_value)
+        ts = int(next_charge)
+        if new_value:
+            await ctx.reply(
+                f"✅ Auto-renew turned **ON** for **{item['name']}** — next renewal <t:{ts}:f> "
+                f"(<t:{ts}:R>) will bill **{item['price']:,} {JC_NAME}s** as usual."
+            )
+        else:
+            await ctx.reply(
+                f"✅ Auto-renew turned **OFF** for **{item['name']}** — it'll run until <t:{ts}:f> "
+                f"(<t:{ts}:R>) and then end on its own, no further charges."
+            )
+
+    @app_commands.command(name="autorenew", description="Check or toggle auto-renew for your VIP/Elite subscription")
+    @app_commands.describe(tier="vip or elite", state="on or off — leave empty to just check the current setting")
+    async def slash_autorenew(self, interaction: discord.Interaction, tier: str, state: str = None):
+        item_id = {"vip": "title_vip", "elite": "title_elite"}.get(tier.strip().lower())
+        if item_id is None:
+            await interaction.response.send_message("❌ Unknown tier — use `vip` or `elite`.", ephemeral=True)
+            return
+        item = SHOP_ITEMS[item_id]
+        next_charge = get_subscriptions(interaction.user.id).get(item_id)
+        if not next_charge or next_charge <= time.time():
+            await interaction.response.send_message(
+                f"❌ You don't have an active **{item['name']}** subscription right now.", ephemeral=True
+            )
+            return
+
+        ts = int(next_charge)
+        if state is None:
+            current = get_auto_renew(interaction.user.id, item_id)
+            await interaction.response.send_message(
+                f"🔁 Auto-renew for **{item['name']}** is currently **{'ON' if current else 'OFF'}**.\n"
+                f"{'Next renewal' if current else 'Ends'}: <t:{ts}:f> (<t:{ts}:R>)",
+                ephemeral=True,
+            )
+            return
+
+        state_key = state.strip().lower()
+        if state_key not in ("on", "off"):
+            await interaction.response.send_message("❌ Use `on` or `off`.", ephemeral=True)
+            return
+
+        new_value = state_key == "on"
+        set_auto_renew(interaction.user.id, item_id, new_value)
+        if new_value:
+            await interaction.response.send_message(
+                f"✅ Auto-renew turned **ON** for **{item['name']}** — next renewal <t:{ts}:f> (<t:{ts}:R>)."
+            )
+        else:
+            await interaction.response.send_message(
+                f"✅ Auto-renew turned **OFF** for **{item['name']}** — ends <t:{ts}:f> (<t:{ts}:R>), no further charges."
+            )
+
+    @slash_autorenew.autocomplete("tier")
+    async def autorenew_tier_autocomplete(self, interaction: discord.Interaction, current: str):
+        return [
+            app_commands.Choice(name=label, value=value)
+            for value, label in (("vip", "VIP"), ("elite", "Elite"))
+            if current.lower() in value
+        ]
+
+    @slash_autorenew.autocomplete("state")
+    async def autorenew_state_autocomplete(self, interaction: discord.Interaction, current: str):
+        return [
+            app_commands.Choice(name=label, value=value)
+            for value, label in (("on", "On"), ("off", "Off"))
+            if current.lower() in value
+        ]
+
+    # ── !grantsub (owner only) ──────────────────────────────────────────────
+
+    def _resolve_sub_tier(self, tier: str) -> tuple[str, dict] | tuple[None, None]:
+        item_id = {"vip": "title_vip", "elite": "title_elite"}.get(tier.strip().lower().lstrip("!/"))
+        if item_id is None:
+            return None, None
+        return item_id, SHOP_ITEMS[item_id]
+
+    def _grant_or_extend_sub(self, user_id: int, item_id: str, days: float) -> tuple[float, bool]:
+        """Shared logic for owner grants: extend from current expiry if the
+        subscription is already active, otherwise start fresh from now.
+        Returns (new_next_charge_epoch, was_extended)."""
+        existing = get_subscriptions(user_id).get(item_id)
+        extended = bool(existing and existing > time.time())
+        base = existing if extended else time.time()
+        new_next_charge = base + days * 86400
+        grant_title(user_id, item_id)
+        grant_banner(user_id, "banner_prestige")
+        set_subscription(user_id, item_id, new_next_charge)
+        return new_next_charge, extended
+
+    @commands.command(name="grantsub", aliases=["givesub", "grantvip"])
+    @commands.is_owner()
+    async def prefix_grantsub(
+        self,
+        ctx: commands.Context,
+        user: discord.User = None,
+        tier: str = None,
+        days: str = "7",
+    ):
+        """Bot owner only: grant or extend a VIP/Elite subscription for free,
+        no JC charged to anyone. Extends from the current expiry if the user
+        already has it active, otherwise starts fresh from now.
+        Usage: !grantsub @user <vip|elite> [days]   (days default: 7)"""
+        if user is None or tier is None:
+            await ctx.reply("**Usage:** `!grantsub @user <vip|elite> [days]`\n**Example:** `!grantsub @user elite 30`")
+            return
+
+        item_id, item = self._resolve_sub_tier(tier)
+        if item_id is None:
+            await ctx.reply("❌ Unknown tier — use `vip` or `elite`.")
+            return
+
+        try:
+            days_f = float(days)
+            if days_f <= 0:
+                raise ValueError
+        except ValueError:
+            await ctx.reply("❌ `days` must be a positive number.")
+            return
+
+        new_next_charge, extended = self._grant_or_extend_sub(user.id, item_id, days_f)
+        verb = "Extended" if extended else "Granted"
+        ts = int(new_next_charge)
+
+        await ctx.reply(
+            f"✅ {verb} **{item['name']}** for **{user}** — free of charge, no JC deducted from anyone. "
+            f"Active until <t:{ts}:f> (<t:{ts}:R>). "
+            f"They'll still need to run `/title {item['name']}` to turn its perks on."
+        )
+        try:
+            await user.send(
+                f"🎁 The bot owner {verb.lower()} you **{item['name']}** — it's good until "
+                f"<t:{ts}:f>. Run `/title {item['name']}` to activate its perks!"
+            )
+        except discord.HTTPException:
+            pass
+
+    @prefix_grantsub.error
+    async def grantsub_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.NotOwner):
+            await ctx.reply("🚫 Only the bot owner can use this command.")
+        elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+            await ctx.reply("**Usage:** `!grantsub @user <vip|elite> [days]`\n**Example:** `!grantsub @user vip 14`")
+
+    @app_commands.command(name="grantsub", description="(Owner only) Grant or extend a VIP/Elite subscription for free")
+    @app_commands.describe(user="User to grant/extend", tier="vip or elite", days="Number of days to grant/extend (default 7)")
+    async def slash_grantsub(self, interaction: discord.Interaction, user: discord.User, tier: str, days: int = 7):
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
+            return
+        item_id, item = self._resolve_sub_tier(tier)
+        if item_id is None:
+            await interaction.response.send_message("❌ Unknown tier — use `vip` or `elite`.", ephemeral=True)
+            return
+        if days <= 0:
+            await interaction.response.send_message("❌ `days` must be a positive number.", ephemeral=True)
+            return
+
+        new_next_charge, extended = self._grant_or_extend_sub(user.id, item_id, days)
+        verb = "Extended" if extended else "Granted"
+        ts = int(new_next_charge)
+        embed = discord.Embed(
+            description=(
+                f"✅ {verb} **{item['name']}** for **{user.display_name}** — free of charge. "
+                f"Active until <t:{ts}:f> (<t:{ts}:R>). "
+                f"They'll still need to run `/title {item['name']}` to turn its perks on."
+            ),
+            color=discord.Color.gold(),
+        )
+        await interaction.response.send_message(embed=embed)
+        try:
+            await user.send(
+                f"🎁 The bot owner {verb.lower()} you **{item['name']}** — it's good until "
+                f"<t:{ts}:f>. Run `/title {item['name']}` to activate its perks!"
+            )
+        except discord.HTTPException:
+            pass
+
+    @slash_grantsub.autocomplete("tier")
+    async def grantsub_tier_autocomplete(self, interaction: discord.Interaction, current: str):
+        return [
+            app_commands.Choice(name=label, value=value)
+            for value, label in (("vip", "VIP"), ("elite", "Elite"))
+            if current.lower() in value
+        ]
 
 
 async def setup(bot: commands.Bot):

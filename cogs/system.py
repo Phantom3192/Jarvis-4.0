@@ -95,7 +95,7 @@ COGS = [
     "cogs.summary",
     "cogs.presence",
     "cogs.youtube",
-    "cogs.music",
+    # "cogs.music",  # TEMPORARILY DISABLED — kept in sync with main.py's COGS list.
     "cogs.economy",
     "cogs.status",
 ]

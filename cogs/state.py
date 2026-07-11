@@ -52,6 +52,7 @@ _data: dict[str, Any] = {
     "titles":         {},    # str(user_id) → {"owned": [title_id,...], "equipped": title_id|None}
     "banners":        {},    # str(user_id) → {"owned": [banner_id,...], "equipped": banner_id|None}
     "title_subscriptions": {}, # str(user_id) → {title_id: next_charge_epoch}
+    "title_autorenew": {},  # str(user_id) → {title_id: bool} — missing entry defaults to True
     "profile_privacy": {}, # str(user_id) → list[str] of field keys hidden from OTHER viewers (owner always sees all)
 }
 
@@ -80,6 +81,7 @@ _SERIALISE: dict[str, Any] = {
     "titles":          lambda: _data["titles"],
     "banners":         lambda: _data["banners"],
     "title_subscriptions": lambda: _data["title_subscriptions"],
+    "title_autorenew":     lambda: _data["title_autorenew"],
     "profile_privacy":     lambda: _data["profile_privacy"],
 }
 
@@ -148,6 +150,7 @@ async def init_db():
     if "titles"         in db: _data["titles"]          = db["titles"]
     if "banners"        in db: _data["banners"]         = db["banners"]
     if "title_subscriptions" in db: _data["title_subscriptions"] = db["title_subscriptions"]
+    if "title_autorenew" in db: _data["title_autorenew"] = db["title_autorenew"]
     if "profile_privacy" in db: _data["profile_privacy"] = db["profile_privacy"]
 
     print("✅ Turso state DB connected")
@@ -432,13 +435,16 @@ def increment_ai_usage(user_id: int) -> int:
     _schedule_save("rate_limits")
     return entry["count"]
 
-def get_ai_limit() -> int:
+def get_ai_limit(bonus: int = 0) -> int:
     # Enforce the single source of truth for daily AI usage limits.
-    return DAILY_AI_LIMIT
+    # `bonus` lets callers (cogs/ai.py) add a perk-driven extra allowance
+    # (e.g. VIP/Elite) without this module importing cogs.economy — keeps
+    # state.py free of a circular dependency on the cog that imports it.
+    return DAILY_AI_LIMIT + bonus
 
-def is_ai_rate_limited(user_id: int) -> bool:
+def is_ai_rate_limited(user_id: int, bonus: int = 0) -> bool:
     count, _ = get_ai_usage(user_id)
-    return count >= get_ai_limit()
+    return count >= get_ai_limit(bonus)
 
 def reset_ai_usage(user_id: int) -> None:
     uid = str(user_id)
@@ -707,13 +713,15 @@ def record_mention(invoker_id: int, target_id: int) -> tuple[bool, float | None]
 
 _last_command_time: dict[int, float] = {}
 
-def check_cooldown(user_id: int) -> bool:
+def check_cooldown(user_id: int, cooldown_multiplier: float = 1.0) -> bool:
     """Check if user has waited long enough since last command/message.
     Returns True if cooldown passed, False if still cooling down.
+    `cooldown_multiplier` lets callers (cogs/ai.py) shrink the wait for a
+    perk-driven title (VIP/Elite) without this module importing cogs.economy.
     """
     now = time.monotonic()
     last = _last_command_time.get(user_id)
-    cooldown = float(get_setting("user_command_cooldown", 2.0))
+    cooldown = float(get_setting("user_command_cooldown", 2.0)) * cooldown_multiplier
     if last is None or (now - last) >= cooldown:
         _last_command_time[user_id] = now
         return True
@@ -1149,6 +1157,18 @@ def get_equipped_banner(user_id: int) -> str | None:
     return _cosmetic_entry("banners", user_id).get("equipped")
 
 
+def revoke_banner(user_id: int, banner_id: str) -> None:
+    """Remove an owned banner entirely — used when a paid subscription that
+    grants an exclusive banner (e.g. the VIP/Elite Prestige banner) lapses.
+    Safe to call even if the user doesn't own it. Mirrors revoke_title."""
+    entry = _cosmetic_entry("banners", user_id)
+    if banner_id in entry["owned"]:
+        entry["owned"].remove(banner_id)
+        if entry["equipped"] == banner_id:
+            entry["equipped"] = None
+        _schedule_save("banners")
+
+
 PROFILE_FIELDS = {
     "balance":  "Balance",
     "streak":   "Streak",
@@ -1221,3 +1241,28 @@ def clear_subscription(user_id: int, title_id: str) -> None:
 def get_all_subscriptions() -> dict[str, dict[str, float]]:
     """Return a copy of every user's subscriptions, keyed by str(user_id)."""
     return {uid: dict(subs) for uid, subs in _data["title_subscriptions"].items()}
+
+
+def get_auto_renew(user_id: int, title_id: str) -> bool:
+    """Whether a subscription renews automatically when its current period
+    ends. Defaults to True (the original always-renew behavior) for any
+    subscription that never had this explicitly set — so existing/older
+    subscribers aren't silently switched to non-renewing."""
+    return _data["title_autorenew"].get(str(user_id), {}).get(title_id, True)
+
+
+def set_auto_renew(user_id: int, title_id: str, value: bool) -> None:
+    uid = str(user_id)
+    entry = _data["title_autorenew"].setdefault(uid, {})
+    entry[title_id] = value
+    _schedule_save("title_autorenew")
+
+
+def clear_auto_renew(user_id: int, title_id: str) -> None:
+    """Drop the stored flag entirely (back to the True default) — used when
+    a subscription lapses/ends so stale flags don't pile up."""
+    uid = str(user_id)
+    entry = _data["title_autorenew"].get(uid)
+    if entry and title_id in entry:
+        del entry[title_id]
+        _schedule_save("title_autorenew")

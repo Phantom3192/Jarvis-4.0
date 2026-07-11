@@ -2750,9 +2750,13 @@ class Fun(commands.Cog):
 
         hints_used = game.setdefault("hints_used", {})
         used = hints_used.get(str(user.id), 0)
+        perks = get_active_perks(user.id)
 
-        if used >= 1 and not get_active_perks(user.id).get("free_hints"):
+        if used >= 1 and not perks.get("free_hints"):
             # Free hint already used this turn — offer to spend JC for another.
+            # hint_cost_multiplier (e.g. VIP) discounts this; Elite skips the
+            # branch entirely via free_hints above.
+            hint_cost = round(EXTRA_HINT_COST * perks.get("hint_cost_multiplier", 1.0))
             balance = get_credits(user.id)
 
             async def on_confirm(interaction: discord.Interaction, view: SpendCreditsView):
@@ -2760,23 +2764,23 @@ class Fun(commands.Cog):
                 hints_used[str(user.id)] = used + 1
                 embed = discord.Embed(
                     title="💡 Chess Hint",
-                    description=f"{JC_EMOJI} **{EXTRA_HINT_COST} {JC_NAME}** spent.\n\n{hint}",
+                    description=f"{JC_EMOJI} **{hint_cost} {JC_NAME}** spent.\n\n{hint}",
                     color=discord.Color.blue(),
                 )
                 await interaction.response.edit_message(embed=embed, view=view)
 
             async def on_decline(interaction: discord.Interaction, view: SpendCreditsView, reason: str):
                 if reason == "insufficient":
-                    text = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{EXTRA_HINT_COST}**)."
+                    text = f"❌ Not enough {JC_EMOJI} {JC_NAME}s (you have **{balance}**, need **{hint_cost}**)."
                 else:
                     text = "❌ No extra hint this turn."
                 await interaction.response.edit_message(content=text, embed=None, view=view)
 
-            view = SpendCreditsView(user.id, EXTRA_HINT_COST, on_confirm, on_decline, timeout=30)
+            view = SpendCreditsView(user.id, hint_cost, on_confirm, on_decline, timeout=30)
             embed = discord.Embed(
                 description=(
                     f"You've already used your free hint for this turn.\n"
-                    f"Spend **{EXTRA_HINT_COST}** {JC_EMOJI} {JC_NAME} for another hint? "
+                    f"Spend **{hint_cost}** {JC_EMOJI} {JC_NAME} for another hint? "
                     f"(you have **{balance}** {JC_EMOJI})"
                 ),
                 color=discord.Color.orange(),

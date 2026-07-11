@@ -1256,11 +1256,11 @@ async def _try_intent_intercept(
         re.IGNORECASE,
     )
     if _INTENT_PLAY.search(user_text) and message.guild and not _GAME_INTENT.search(user_text):
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             # Strip common prefixes to extract the actual song query
             query = re.sub(
                 r"^\s*(?:can\s+you\s+)?(?:please\s+)?"
@@ -1277,55 +1277,55 @@ async def _try_intent_intercept(
 
     # ── music: skip ───────────────────────────────────────────────────────────
     if _INTENT_SKIP.search(user_text) and message.guild:
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_skip(message.guild, send_fn)
             return True
 
     # ── music: stop ───────────────────────────────────────────────────────────
     if _INTENT_STOP_MUSIC.search(user_text) and message.guild:
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_stop(message.guild, send_fn)
             return True
 
     # ── music: pause / resume ─────────────────────────────────────────────────
     if _INTENT_PAUSE_MUSIC.search(user_text) and message.guild:
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_pause(message.guild, send_fn)
             return True
 
     # ── music: queue ──────────────────────────────────────────────────────────
     if _INTENT_QUEUE.search(user_text) and message.guild:
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_queue(message.guild, send_fn)
             return True
 
     # ── music: now playing ────────────────────────────────────────────────────
     if _INTENT_NOWPLAYING.search(user_text) and message.guild:
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._do_np(message.guild, send_fn)
             return True
@@ -1351,11 +1351,11 @@ async def _try_intent_intercept(
 
     # ── music controls panel ──────────────────────────────────────────────────
     if _INTENT_CONTROLS.search(user_text) and message.guild:
+        if _music_module.MUSIC_FEATURE_DOWN:
+            await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
+            return True
         music_cog = bot.cogs.get("Music")
         if music_cog:
-            if _music_module.MUSIC_FEATURE_DOWN:
-                await safe_reply(message, embed=_music_module.MUSIC_DOWN_EMBED)
-                return True
             send_fn = lambda *a, **kw: safe_reply(message, *a, **kw)
             await music_cog._send_controls(message.guild, send_fn)
             return True
@@ -1453,8 +1453,8 @@ async def _offer_ai_limit_reset(send_fn, user_id: int) -> bool:
     Always returns True: the current request isn't fulfilled this turn either way
     (the user must resend their message after a reset).
     """
-    limit = get_ai_limit()
     perks = get_active_perks(user_id)
+    limit = get_ai_limit(perks.get("daily_ai_limit_bonus", 0))
     reset_cost = round(AI_LIMIT_RESET_COST * perks.get("reset_cost_multiplier", 1.0))
 
     if get_credits(user_id) < reset_cost:
@@ -1507,8 +1507,9 @@ async def generate_ai_response(
     reply_context: list[dict] | None = None,
     thread_root_id: int | None = None,
 ) -> str:
-    if is_ai_rate_limited(user_id):
-        limit = get_ai_limit()
+    _ai_limit_bonus = get_active_perks(user_id).get("daily_ai_limit_bonus", 0)
+    if is_ai_rate_limited(user_id, _ai_limit_bonus):
+        limit = get_ai_limit(_ai_limit_bonus)
         return DAILY_LIMIT_MSG.format(limit=limit)
 
     # Prevent abusive repeat/spam requests that ask Jarvis to output a phrase
@@ -1741,8 +1742,13 @@ async def generate_ai_response(
     perks = get_active_perks(user_id)
     chat_reward = round(AI_CHAT_REWARD * perks.get("chat_jc_multiplier", 1))
     earn_chat_credits(user_id, chat_reward, AI_CHAT_REWARD_DAILY_CAP)
-    if new_count == WARN_AT:
-        limit = get_ai_limit()
+    ai_limit_bonus = perks.get("daily_ai_limit_bonus", 0)
+    limit = get_ai_limit(ai_limit_bonus)
+    # Keep the same fixed "warn N messages before the cap" buffer regardless
+    # of a perk-boosted limit, rather than always warning at the flat WARN_AT
+    # (which would fire way too early for VIP/Elite's higher ceiling).
+    warn_at = limit - (DAILY_AI_LIMIT - WARN_AT)
+    if new_count == warn_at:
         remaining = limit - new_count
         reply += f"\n\n{WARN_LIMIT_MSG.format(count=new_count, limit=limit, remaining=remaining)}"
 
@@ -1767,7 +1773,7 @@ async def generate_ai_response(
 
 def _build_mylimit_embed(user_id: int) -> discord.Embed:
     count, day = get_ai_usage(user_id)
-    limit = get_ai_limit()
+    limit = get_ai_limit(get_active_perks(user_id).get("daily_ai_limit_bonus", 0))
     remaining  = max(0, limit - count)
     pct        = count / limit if limit else 1
 
@@ -1945,7 +1951,7 @@ class AI(commands.Cog):
             await _log_new_user(interaction.user)
             grant_onboarding_bonus(interaction.user.id, ONBOARDING_BONUS)
 
-        if is_ai_rate_limited(interaction.user.id):
+        if is_ai_rate_limited(interaction.user.id, get_active_perks(interaction.user.id).get("daily_ai_limit_bonus", 0)):
             await _offer_ai_limit_reset(interaction.followup.send, interaction.user.id)
             return
 
@@ -2027,19 +2033,21 @@ class AI(commands.Cog):
                 )
                 return
 
-            if not check_cooldown(message.author.id):
+            cd_multiplier = get_active_perks(message.author.id).get("cooldown_multiplier", 1.0)
+            if not check_cooldown(message.author.id, cd_multiplier):
                 await message.add_reaction("⏳")
                 return
 
         if is_new_user(message.author.id):
             grant_onboarding_bonus(message.author.id, ONBOARDING_BONUS)
 
-        claimed, _ = claim_daily_credits(message.author.id, DAILY_CHECKIN_REWARD)
+        daily_reward = round(DAILY_CHECKIN_REWARD * get_active_perks(message.author.id).get("daily_bonus_multiplier", 1.0))
+        claimed, _ = claim_daily_credits(message.author.id, daily_reward)
         if claimed:
             # Fire-and-forget — don't block the AI reply pipeline on this send.
             asyncio.create_task(message.channel.send(
                 f"{JC_EMOJI} **{message.author.display_name}** claimed their daily check-in bonus: "
-                f"**+{DAILY_CHECKIN_REWARD} {JC_NAME}**!",
+                f"**+{daily_reward} {JC_NAME}**!",
                 delete_after=10,
             ))
             # Streak only advances once per day, at the same moment the daily
@@ -2057,7 +2065,7 @@ class AI(commands.Cog):
                     unlocked_announcement(message.author.display_name, new_achievements)
                 ))
 
-        if is_ai_rate_limited(message.author.id):
+        if is_ai_rate_limited(message.author.id, get_active_perks(message.author.id).get("daily_ai_limit_bonus", 0)):
             await _offer_ai_limit_reset(message.reply, message.author.id)
             return
 

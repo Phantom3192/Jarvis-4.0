@@ -59,9 +59,6 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
 
     balance = get_credits(uid)
     streak = get_streak(uid)
-    stats = get_game_stats(uid)
-    songs = get_songs_played(uid)
-    favorite = get_favorite_song(uid)
     message_stats = get_stats(uid) or {}
     messages = message_stats.get("messages", 0)
     level, into_level, per_level = _level_for_messages(messages)
@@ -89,37 +86,6 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
             inline=True,
         )
 
-    if "chess" not in hidden:
-        embed.add_field(
-            name="♟️ Chess",
-            value=f"{stats['chess_wins']}W – {stats['chess_losses']}L",
-            inline=True,
-        )
-    if "mafia" not in hidden:
-        embed.add_field(
-            name="🎭 Mafia",
-            value=f"{stats['mafia_wins']}W – {stats['mafia_losses']}L",
-            inline=True,
-        )
-    if "hangman" not in hidden:
-        embed.add_field(
-            name="🪢 Hangman",
-            value=f"{stats['hangman_wins']} solved",
-            inline=True,
-        )
-
-    if "songs" not in hidden:
-        embed.add_field(name="🎵 Songs Played", value=str(songs), inline=True)
-    if "favorite" not in hidden:
-        embed.add_field(name="🎧 Favorite Song", value=favorite or "—", inline=True)
-
-    # Spacer only makes sense once we know how many real fields landed in
-    # this row group — skip it entirely rather than leaving a lone blank
-    # tile when the owner has hidden most of the row.
-    trailing_row = sum(f not in hidden for f in ("songs", "favorite"))
-    if trailing_row and trailing_row % 3 != 0:
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
-
     if "badges" not in hidden:
         badge_ids = get_badges(uid)
         if badge_ids:
@@ -130,11 +96,77 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
         else:
             embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
 
-    footer = "Use /titles and /banners to see what you own and can equip."
+    footer = "Use /titles and /banners to see what you own and can equip. Tap 🎮 Game Stats below for game records."
     if is_owner and get_hidden_fields(uid):
         footer = "Some fields are hidden from other viewers. " + footer
     embed.set_footer(text=footer)
     return embed
+
+
+def _game_stats_embed(user: discord.User | discord.Member, viewer: discord.User | discord.Member = None) -> discord.Embed:
+    """Build the standalone game-stats card for `user` (chess/mafia/hangman
+    records, songs played, favorite song) — shown via the 🎮 Game Stats
+    button on /profile instead of cluttering the main rank card. Respects
+    the same per-field privacy settings as the main profile embed."""
+    uid = user.id
+    is_owner = viewer is None or viewer.id == uid
+    hidden = set() if is_owner else set(get_hidden_fields(uid))
+
+    stats = get_game_stats(uid)
+    songs = get_songs_played(uid)
+    favorite = get_favorite_song(uid)
+
+    embed = discord.Embed(title=f"🎮 {user.display_name}'s Game Stats", color=discord.Color.blurple())
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    any_shown = False
+    if "chess" not in hidden:
+        embed.add_field(
+            name="♟️ Chess",
+            value=f"{stats['chess_wins']}W – {stats['chess_losses']}L",
+            inline=True,
+        )
+        any_shown = True
+    if "mafia" not in hidden:
+        embed.add_field(
+            name="🎭 Mafia",
+            value=f"{stats['mafia_wins']}W – {stats['mafia_losses']}L",
+            inline=True,
+        )
+        any_shown = True
+    if "hangman" not in hidden:
+        embed.add_field(
+            name="🪢 Hangman",
+            value=f"{stats['hangman_wins']} solved",
+            inline=True,
+        )
+        any_shown = True
+    if "songs" not in hidden:
+        embed.add_field(name="🎵 Songs Played", value=str(songs), inline=True)
+        any_shown = True
+    if "favorite" not in hidden:
+        embed.add_field(name="🎧 Favorite Song", value=favorite or "—", inline=True)
+        any_shown = True
+
+    if not any_shown:
+        embed.description = "This user has hidden all of their game stats."
+
+    return embed
+
+
+class GameStatsButton(discord.ui.View):
+    """Attached to /profile — lets the viewer pull up the profile owner's
+    game stats (chess/mafia/hangman/songs/favorite) in a separate ephemeral
+    card instead of always showing them on the main rank card."""
+
+    def __init__(self, target: discord.User | discord.Member, *, timeout: float = 180):
+        super().__init__(timeout=timeout)
+        self.target = target
+
+    @discord.ui.button(label="Game Stats", style=discord.ButtonStyle.secondary, emoji="🎮")
+    async def game_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = _game_stats_embed(self.target, viewer=interaction.user)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 def _titles_embed(user: discord.User | discord.Member) -> discord.Embed:
@@ -150,7 +182,7 @@ def _titles_embed(user: discord.User | discord.Member) -> discord.Embed:
         marker = "✅ (equipped)" if t == equipped else ""
         lines.append(f"{get_title_label(t)} {marker}")
     embed.description = "\n".join(lines)
-    embed.set_footer(text="Equip one with /title <name>, or /title none to unequip.")
+    embed.set_footer(text="Equip one with /title <name>. Unequip your current one with /title none before switching.")
     return embed
 
 
@@ -182,13 +214,13 @@ class Profile(commands.Cog):
     async def prefix_profile(self, ctx: commands.Context, user: discord.User = None):
         """!profile — view your (or someone else's) rank card."""
         target = user or ctx.author
-        await ctx.reply(embed=_profile_embed(target, viewer=ctx.author))
+        await ctx.reply(embed=_profile_embed(target, viewer=ctx.author), view=GameStatsButton(target))
 
     @app_commands.command(name="profile", description="View your (or someone else's) Jarvis profile card")
     @app_commands.describe(user="User to look up (optional — leave empty for yourself)")
     async def slash_profile(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
-        await interaction.response.send_message(embed=_profile_embed(target, viewer=interaction.user))
+        await interaction.response.send_message(embed=_profile_embed(target, viewer=interaction.user), view=GameStatsButton(target))
 
     # ── !titles / /titles ───────────────────────────────────────────────────
 
@@ -223,11 +255,6 @@ class Profile(commands.Cog):
             equip_title(user.id, None)
             return "✅ Title unequipped."
         owned = get_titles(user.id)["owned"]
-        # Accept the raw stored id (chess_master, title_vip), the full display
-        # label (🏆 Chess Master, 💎 VIP), or the label with its leading emoji
-        # left off (Chess Master, VIP) — all matched case-insensitively, so
-        # a user typing just the plain name doesn't have to hunt down and
-        # retype the emoji for it to resolve correctly.
         target = _normalize_text(name)
         match = None
         for owned_id in owned:
@@ -237,6 +264,16 @@ class Profile(commands.Cog):
                 break
         if match is None:
             return f"❌ You don't own a title called **{name}**. Check `/titles` for your list."
+
+        current = get_titles(user.id).get("equipped")
+        if current == match:
+            return f"**{get_title_label(match)}** is already equipped."
+        if current:
+            return (
+                f"❌ You already have **{get_title_label(current)}** equipped. "
+                "Unequip it first with `/title none` (or `/unequip title`) before equipping another."
+            )
+
         equip_title(user.id, match)
         return f"✅ Equipped title: {get_title_label(match)}"
 
