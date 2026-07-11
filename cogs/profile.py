@@ -18,6 +18,7 @@ from cogs.state import (
     get_favorite_song, get_stats, get_badges, get_titles, get_banners,
     equip_title, equip_banner, PROFILE_FIELDS, get_hidden_fields,
     set_field_hidden, get_referral_count, get_lifetime_earned, get_ai_usage,
+    get_first_interaction,
 )
 from cogs.achievements import ACHIEVEMENTS
 from cogs.economy import JC_EMOJI, JC_NAME, BANNER_COLORS, get_title_label
@@ -80,7 +81,13 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
     messages = message_stats.get("messages", 0)
     level, into_level, per_level = _level_for_messages(messages)
 
-    first_seen = message_stats.get("first_seen")
+    # Use the true "first ever interaction" timestamp (any command/message),
+    # not message_stats["first_seen"] — that one is only stamped the first
+    # time a message goes through the AI chat pipeline specifically, which
+    # can be long after the user's actual first interaction with Jarvis.
+    # Fall back to the AI-chat timestamp for older users who were marked
+    # seen before first_interaction tracking existed.
+    first_seen = get_first_interaction(uid) or message_stats.get("first_seen")
 
     equipped_title_id = get_titles(uid).get("equipped")
     equipped_title = get_title_label(equipped_title_id) if equipped_title_id else None

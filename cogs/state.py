@@ -31,6 +31,7 @@ _db: TursoConnection | None = None  # set in init_db()
 _data: dict[str, Any] = {
     "bans":           {},    # str(user_id) → {"reason": str, "expires": float|None}
     "seen":           set(), # set of int user_ids
+    "first_interaction": {}, # str(user_id) → epoch float of the FIRST ever interaction with Jarvis (set once, in mark_seen)
     "stats":          {},    # str(user_id) → {"messages", "tokens_est", "first_seen", "last_seen"}
     "prompts":        {},    # str(guild_id) → prompt string
     "rate_limits":    {},    # str(user_id)  → {"count": int, "day": "YYYY-MM-DD"}
@@ -62,6 +63,7 @@ _data: dict[str, Any] = {
 _SERIALISE: dict[str, Any] = {
     "bans":            lambda: _data["bans"],
     "seen":            lambda: [str(uid) for uid in _data["seen"]],
+    "first_interaction": lambda: _data["first_interaction"],
     "stats":           lambda: _data["stats"],
     "prompts":         lambda: _data["prompts"],
     "rate_limits":     lambda: _data["rate_limits"],
@@ -133,6 +135,7 @@ async def init_db():
 
     if "bans"           in db: _data["bans"]           = db["bans"]
     if "seen"           in db: _data["seen"]           = set(int(uid) for uid in db["seen"])
+    if "first_interaction" in db: _data["first_interaction"] = db["first_interaction"]
     if "stats"          in db: _data["stats"]          = db["stats"]
     if "prompts"        in db: _data["prompts"]        = db["prompts"]
     if "settings"       in db: _data["settings"]       = db["settings"]
@@ -311,9 +314,26 @@ def mark_seen(user_id: int) -> None:
     if user_id not in _data["seen"]:
         _data["seen"].add(user_id)
         _schedule_save("seen")
+        # Stamp the FIRST ever interaction here — this is the single call site
+        # that fires exactly once per user, regardless of whether their first
+        # touch was a chat message, a slash command, or a referral redemption.
+        # (record_message()'s "first_seen" is NOT a substitute: it's only set
+        # the first time a message goes through the AI chat pipeline, which
+        # can happen long after a user's true first interaction.)
+        uid = str(user_id)
+        if uid not in _data["first_interaction"]:
+            _data["first_interaction"][uid] = time.time()
+            _schedule_save("first_interaction")
 
 def is_new_user(user_id: int) -> bool:
     return user_id not in _data["seen"]
+
+def get_first_interaction(user_id: int) -> float | None:
+    """Epoch timestamp of the user's first-ever interaction with Jarvis, or
+    None if unknown (e.g. the user was marked seen before this field existed).
+    This is what /profile should use for "First Interaction" / "Account Age" —
+    not stats["first_seen"], which only reflects first AI chat message."""
+    return _data["first_interaction"].get(str(user_id))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1347,4 +1367,4 @@ def has_used_bot_before(user_id: int) -> bool:
         return True
     if _data["banners"].get(uid, {}).get("owned"):
         return True
-    return False
+    return False        
