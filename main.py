@@ -107,8 +107,15 @@ async def global_ban_check(ctx: commands.Context) -> bool:
 
     # Terms & Conditions gate — applies even to the bot owner, so testing
     # the flow behaves the same for everyone. There's no standalone !tos
-    # command; this is the only place the prompt appears.
-    if not await ensure_tos(ctx.author.id, lambda **kw: ctx.reply(**kw)):
+    # command; this is the only place the prompt appears. on_accept
+    # re-dispatches the original message through the command processor once
+    # they hit Accept, so the command they typed still runs instead of
+    # silently vanishing.
+    if not await ensure_tos(
+        ctx.author.id,
+        lambda **kw: ctx.reply(**kw),
+        on_accept=lambda: bot.process_commands(ctx.message),
+    ):
         return False
 
     if await bot.is_owner(ctx.author):

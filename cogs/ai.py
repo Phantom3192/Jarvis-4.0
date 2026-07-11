@@ -2029,8 +2029,15 @@ class AI(commands.Cog):
             return
 
         # Terms & Conditions gate — applies even to the bot owner, so
-        # testing the flow behaves the same for everyone.
-        if not await ensure_tos(message.author.id, lambda **kw: message.reply(**kw)):
+        # testing the flow behaves the same for everyone. on_accept replays
+        # this exact message through on_message once they hit Accept, so
+        # whatever they originally asked still gets answered instead of
+        # being silently dropped.
+        if not await ensure_tos(
+            message.author.id,
+            lambda **kw: message.reply(**kw),
+            on_accept=lambda: self.on_message(message),
+        ):
             return
 
         if not await self.bot.is_owner(message.author):

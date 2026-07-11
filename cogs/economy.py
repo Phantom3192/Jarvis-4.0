@@ -48,7 +48,11 @@ STREAK_MILESTONE_LABELS = {
 }
 
 # ── Referrals ────────────────────────────────────────────────────────────────
-REFERRER_BONUS  = 50   # JC paid to whoever's code was redeemed
+# The referrer's reward is a free Referral Mystery Box (same payout range as
+# the regular Mystery Box, MYSTERY_BOX_MIN–MYSTERY_BOX_MAX below) instead of
+# a flat amount — see _handle_redeem(). REFERRER_BONUS is kept only as the
+# historical/legacy flat value and is no longer used for the payout itself.
+REFERRER_BONUS  = 50   # legacy — superseded by the Referral Mystery Box payout
 REFERRED_BONUS  = 0    # JC paid to the new user who redeemed a code (none — they still
                         # get the standard ONBOARDING_BONUS separately, just no extra on top)
 # (separate from, and stacks with, ONBOARDING_BONUS — the new user still
@@ -143,7 +147,7 @@ def _subscription_note(item_id: str, item: dict, user_id: int | None) -> str:
         return "\n🔄 **Renews any moment now**"
     return f"\n🔄 **Renews in {_format_time_left(remaining)}** (next charge: {item['price']:,} {JC_EMOJI})"
 
-# Gameplay perks tied to an EQUIPPED title id. Only applies while the title
+#Bot perks tied to an EQUIPPED title id. Only applies while the title
 # is actually equipped (not just owned) — gives equipping a premium title
 # an actual reason beyond cosmetics.
 TITLE_PERKS: dict[str, dict] = {
@@ -203,7 +207,7 @@ _PERK_LABELS = {
 
 def describe_perks(title_id: str) -> list[str]:
     """Return a list of human-readable perk bullet strings for `title_id`,
-    or an empty list if it grants no gameplay perks."""
+    or an empty list if it grants no bot perks."""
     lines = []
     for key, value in TITLE_PERKS.get(title_id, {}).items():
         label_fn = _PERK_LABELS.get(key)
@@ -269,7 +273,7 @@ SHOP_ITEMS: dict[str, dict] = {
         "name": "💎 VIP",
         "price": 2000,
         "description": (
-            "Billed **2,000 JC/week**. An equippable VIP title with gameplay perks — "
+            "Billed **2,000 JC/week**. An equippable VIP title with bot perks — "
             "tap **🔍 View Perks** below to see what it grants."
         ),
         "kind": "subscription_title",
@@ -279,7 +283,7 @@ SHOP_ITEMS: dict[str, dict] = {
         "name": "🌟 Elite",
         "price": 3500,
         "description": (
-            "Billed **3,500 JC/week**. An equippable Elite title with gameplay perks — "
+            "Billed **3,500 JC/week**. An equippable Elite title with bot perks — "
             "tap **🔍 View Perks** below to see what it grants."
         ),
         "kind": "subscription_title",
@@ -511,7 +515,8 @@ def _invite_embed(user: discord.User | discord.Member, code: str) -> discord.Emb
     embed.add_field(
         name="You get",
         value=(
-            f"**+{REFERRER_BONUS} {JC_NAME}** per successful referral "
+            f"A free 🎁 **Referral Mystery Box** per successful referral — "
+            f"random reward of **{MYSTERY_BOX_MIN}–{MYSTERY_BOX_MAX} {JC_NAME}** "
             f"(more with an equipped VIP/Elite title — see `!titleperks`)"
         ),
         inline=True,
@@ -520,12 +525,37 @@ def _invite_embed(user: discord.User | discord.Member, code: str) -> discord.Emb
     return embed
 
 
-def referral_success_announcement(referred_user: discord.User | discord.Member, referrer_id: int, bonus: int) -> str:
-    """Public chat message announcing a successful referral redemption."""
-    return (
-        f"🎟️ **{referred_user.display_name}** joined Jarvis via referral! "
-        f"<@{referrer_id}> earned **+{bonus} {JC_NAME}**! {JC_EMOJI}"
+def referral_success_announcement(
+    referred_user: discord.User | discord.Member,
+    referrer_id: int,
+    bonus: int,
+    *,
+    jackpot_threshold: int = 250,
+    nice_threshold: int = 100,
+) -> discord.Embed:
+    """Public chat message announcing a successful referral redemption.
+
+    The referrer's reward is a free Referral Mystery Box rather than a flat
+    payout, so this reuses the same jackpot/nice-pull/not-bad flavor text as
+    mystery_box_result_embed() to make it feel like the same kind of pull.
+    """
+    if bonus >= jackpot_threshold:
+        flavor, color = "🤯 JACKPOT!", discord.Color.gold()
+    elif bonus >= nice_threshold:
+        flavor, color = "🎉 Nice pull!", discord.Color.green()
+    else:
+        flavor, color = "📦 Not bad.", discord.Color.blurple()
+
+    embed = discord.Embed(
+        title="🎁 Referral Mystery Box",
+        description=(
+            f"🎟️ **{referred_user.display_name}** joined Jarvis via referral!\n\n"
+            f"{flavor} <@{referrer_id}> opened a free Referral Mystery Box and won "
+            f"**+{bonus} {JC_NAME}**! {JC_EMOJI}"
+        ),
+        color=color,
     )
+    return embed
 
 
 _REDEEM_FAILURE_MESSAGES = {
@@ -703,7 +733,7 @@ def _title_perks_embed() -> discord.Embed:
         if item["kind"] not in ("title", "subscription_title"):
             continue
         lines = describe_perks(item_id)
-        value = "\n".join(lines) if lines else "Cosmetic only — no gameplay perks."
+        value = "\n".join(lines) if lines else "Cosmetic only — no bot perks."
         embed.add_field(name=item["name"], value=value, inline=False)
     embed.set_footer(text="Buy a title in the shop, then equip it with !title <name> to activate its perks.")
     return embed
@@ -869,13 +899,18 @@ async def _handle_redeem(
         grant_onboarding_bonus(user.id, ONBOARDING_BONUS)
     if REFERRED_BONUS:
         add_credits(user.id, REFERRED_BONUS)
-    referrer_bonus = round(REFERRER_BONUS * get_active_perks(referrer_id).get("referral_bonus_multiplier", 1.0))
+
+    # Referrer's payout is a free Referral Mystery Box — same range as the
+    # regular Mystery Box — rather than a flat amount, so each referral is
+    # its own little surprise instead of always paying out the same number.
+    box_reward = random.randint(MYSTERY_BOX_MIN, MYSTERY_BOX_MAX)
+    referrer_bonus = round(box_reward * get_active_perks(referrer_id).get("referral_bonus_multiplier", 1.0))
     add_credits(referrer_id, referrer_bonus)
     new_user_balance = get_credits(user.id)
 
     if channel is not None:
         try:
-            await channel.send(referral_success_announcement(user, referrer_id, referrer_bonus))
+            await channel.send(embed=referral_success_announcement(user, referrer_id, referrer_bonus))
         except discord.HTTPException:
             pass
 
@@ -1683,10 +1718,10 @@ class Economy(commands.Cog):
 
     @commands.command(name="titleperks", aliases=["perks"])
     async def prefix_titleperks(self, ctx: commands.Context):
-        """!titleperks — see what gameplay perks each shop title grants."""
+        """!titleperks — see what bot perks each shop title grants."""
         await ctx.reply(embed=_title_perks_embed())
 
-    @app_commands.command(name="titleperks", description="See what gameplay perks each shop title grants")
+    @app_commands.command(name="titleperks", description="See what bot perks each shop title grants")
     async def slash_titleperks(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=_title_perks_embed())
 

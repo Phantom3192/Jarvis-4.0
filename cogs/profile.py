@@ -7,6 +7,7 @@ a Discord role or permission, so it looks and behaves identically no matter
 which of the bot's servers someone is in.
 """
 import math
+import time
 
 import discord
 from discord.ext import commands
@@ -16,7 +17,7 @@ from cogs.state import (
     get_credits, get_streak, get_game_stats, get_songs_played,
     get_favorite_song, get_stats, get_badges, get_titles, get_banners,
     equip_title, equip_banner, PROFILE_FIELDS, get_hidden_fields,
-    set_field_hidden,
+    set_field_hidden, get_referral_count, get_lifetime_earned, get_ai_usage,
 )
 from cogs.achievements import ACHIEVEMENTS
 from cogs.economy import JC_EMOJI, JC_NAME, BANNER_COLORS, get_title_label
@@ -46,6 +47,22 @@ def _normalize_text(s: str) -> str:
     both title and banner name matching so neither requires typing the
     emoji back."""
     return " ".join("".join(ch for ch in s if ch.isalnum() or ch.isspace()).lower().split())
+
+
+def _format_duration(seconds: float) -> str:
+    """Render a duration as a friendly 'N days' / 'N months' string for the
+    account-age field. Kept coarse (days → months → years) since profile
+    flex doesn't need hour/minute precision."""
+    days = int(seconds // 86400)
+    if days < 1:
+        return "Less than a day"
+    if days < 60:
+        return f"{days} day{'s' if days != 1 else ''}"
+    if days < 365:
+        months = days // 30
+        return f"{months} month{'s' if months != 1 else ''}"
+    years = days // 365
+    return f"{years} year{'s' if years != 1 else ''}"
 
 
 def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | discord.Member = None) -> discord.Embed:
@@ -92,6 +109,34 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
         joined_value = f"<t:{int(first_seen)}:D>" if first_seen else "Not yet interacted"
         embed.add_field(name="📅 First Interaction", value=joined_value, inline=True)
 
+    if "account_age" not in hidden:
+        age_value = _format_duration(time.time() - first_seen) if first_seen else "Not yet interacted"
+        embed.add_field(name="🧓 Account Age", value=age_value, inline=True)
+
+    if "referrals" not in hidden:
+        referral_count = get_referral_count(uid)
+        embed.add_field(
+            name="🎟️ Referred",
+            value=f"**{referral_count}** friend{'s' if referral_count != 1 else ''}",
+            inline=True,
+        )
+
+    # AI Messages + Lifetime Earned share one full-width field instead of
+    # each being their own inline column — with an odd number of inline
+    # fields above, two more inline fields here would leave a lone
+    # half-empty row in Discord's 3-per-row grid. A merged full-width field
+    # sidesteps that regardless of how many fields end up hidden.
+    activity_lines = []
+    if "ai_messages" not in hidden:
+        today_count, _ = get_ai_usage(uid)
+        lifetime_count = message_stats.get("messages", 0)
+        activity_lines.append(f"🧠 **AI Messages:** {lifetime_count:,} total • {today_count} today")
+    if "lifetime_earned" not in hidden:
+        earned = get_lifetime_earned(uid)
+        activity_lines.append(f"💰 **Lifetime {JC_NAME}s Earned:** {earned:,}")
+    if activity_lines:
+        embed.add_field(name="📊 Activity", value="\n".join(activity_lines), inline=False)
+
     if "badges" not in hidden:
         badge_ids = get_badges(uid)
         if badge_ids:
@@ -102,9 +147,11 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
         else:
             embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
 
+    footer = None
     if is_owner and get_hidden_fields(uid):
         footer = "Some fields are hidden from other viewers. "
-    embed.set_footer(text=footer)
+    if footer:
+        embed.set_footer(text=footer)
     return embed
 
 

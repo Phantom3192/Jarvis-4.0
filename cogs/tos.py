@@ -67,10 +67,19 @@ def build_tos_embed(existing_user: bool) -> discord.Embed:
 class TOSView(discord.ui.View):
     """Persistent view (no timeout, fixed custom_ids) so Accept/Decline keep
     working even if the bot restarts between sending this and the user
-    tapping a button."""
+    tapping a button.
 
-    def __init__(self):
+    `on_accept`, if given, is an async, no-arg callable that replays whatever
+    triggered the prompt (a chat message / command) once the user accepts,
+    so their original request doesn't just get silently dropped. It's only
+    ever set on the one-off view instance created inline by ensure_tos() for
+    a specific message — the generic instance registered in setup() (for
+    persistence across restarts) has none, since there's nothing left to
+    replay once the bot has restarted."""
+
+    def __init__(self, on_accept=None):
         super().__init__(timeout=None)
+        self.on_accept = on_accept
         self.add_item(discord.ui.Button(label="Read the Terms", url=_tos_url(), style=discord.ButtonStyle.link, emoji="🔗"))
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", custom_id="jarvis_tos_accept")
@@ -87,6 +96,15 @@ class TOSView(discord.ui.View):
             # Original message may not be editable by this interaction
             # (e.g. it was a message.reply(), not an interaction response).
             await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        if self.on_accept is not None:
+            try:
+                await self.on_accept()
+            except Exception:
+                # Never let a replay failure break the Accept flow itself —
+                # the user has already been told they're accepted.
+                import traceback
+                traceback.print_exc()
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="✖️", custom_id="jarvis_tos_decline")
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -105,11 +123,16 @@ class TOSView(discord.ui.View):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-async def ensure_tos(user_id: int, send) -> bool:
+async def ensure_tos(user_id: int, send, on_accept=None) -> bool:
     """Gate helper shared by every entry point (prefix commands, slash
     commands, free-text chat). `send` is an async callable accepting
     (embed=..., view=...) that posts the prompt however fits that context
     (ctx.reply, interaction.response.send_message, message.reply, ...).
+
+    `on_accept`, if given, is an async no-arg callable that re-runs whatever
+    triggered this prompt (e.g. re-dispatching the same on_message call)
+    once the user taps Accept, so their original request still gets
+    answered instead of silently vanishing.
 
     Returns True if the user has already accepted and the caller should
     proceed normally. Returns False if the prompt was just shown — the
@@ -118,7 +141,7 @@ async def ensure_tos(user_id: int, send) -> bool:
     if has_accepted_tos(user_id):
         return True
     existing_user = has_used_bot_before(user_id)
-    await send(embed=build_tos_embed(existing_user), view=TOSView())
+    await send(embed=build_tos_embed(existing_user), view=TOSView(on_accept=on_accept))
     return False
 
 

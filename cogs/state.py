@@ -55,6 +55,7 @@ _data: dict[str, Any] = {
     "title_autorenew": {},  # str(user_id) → {title_id: bool} — missing entry defaults to True
     "profile_privacy": {}, # str(user_id) → list[str] of field keys hidden from OTHER viewers (owner always sees all)
     "tos_accepted":    {}, # str(user_id) → {"version": int, "accepted_at": float}
+    "lifetime_earned": {}, # str(user_id) → int, cumulative JC ever gained via add_credits (never decreases)
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -85,6 +86,7 @@ _SERIALISE: dict[str, Any] = {
     "title_autorenew":     lambda: _data["title_autorenew"],
     "profile_privacy":     lambda: _data["profile_privacy"],
     "tos_accepted":        lambda: _data["tos_accepted"],
+    "lifetime_earned":     lambda: _data["lifetime_earned"],
 }
 
 
@@ -155,6 +157,7 @@ async def init_db():
     if "title_autorenew" in db: _data["title_autorenew"] = db["title_autorenew"]
     if "profile_privacy" in db: _data["profile_privacy"] = db["profile_privacy"]
     if "tos_accepted"    in db: _data["tos_accepted"]    = db["tos_accepted"]
+    if "lifetime_earned" in db: _data["lifetime_earned"] = db["lifetime_earned"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -761,7 +764,18 @@ def add_credits(user_id: int, amount: int) -> int:
         bal = 0
     _data["credits"][uid] = bal
     _schedule_save("credits")
+    if amount > 0:
+        _data["lifetime_earned"][uid] = _data["lifetime_earned"].get(uid, 0) + amount
+        _schedule_save("lifetime_earned")
     return bal
+
+
+def get_lifetime_earned(user_id: int) -> int:
+    """Cumulative JC ever gained via add_credits() — a 'net worth' style
+    stat that only ever goes up, unlike the spendable balance. Doesn't
+    include amounts moved purely via spend_credits() (which only deducts,
+    never grants), so it reflects earnings only."""
+    return int(_data["lifetime_earned"].get(str(user_id), 0))
 
 
 def spend_credits(user_id: int, amount: int) -> bool:
@@ -938,6 +952,12 @@ def get_referrer_id_for_code(code: str) -> int | None:
 def has_been_referred(user_id: int) -> bool:
     """True if this user has already redeemed a referral code (ever)."""
     return str(user_id) in _data["referred_by"]
+
+
+def get_referral_count(user_id: int) -> int:
+    """How many people this user has successfully referred (i.e. how many
+    entries in referred_by point back to them). Used on /profile."""
+    return sum(1 for referrer_id in _data["referred_by"].values() if referrer_id == user_id)
 
 
 def redeem_referral_code(user_id: int, code: str) -> tuple[bool, str, int | None]:
@@ -1183,6 +1203,10 @@ PROFILE_FIELDS = {
     "favorite": "Favorite song",
     "badges":   "Badges",
     "joined":   "First interaction date",
+    "referrals":      "Referral count",
+    "ai_messages":    "AI messages sent",
+    "lifetime_earned": "Lifetime JC earned",
+    "account_age":    "Account age",
 }
 
 
