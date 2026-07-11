@@ -15,7 +15,7 @@ from cogs.tos import ensure_tos
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
-from scripts.backfill_first_interaction import run_backfill
+from cogs.backfill_first_interaction import run_backfill
 import uvicorn
 from web.app import create_app
 
