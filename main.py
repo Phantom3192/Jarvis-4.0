@@ -15,6 +15,7 @@ from cogs.tos import ensure_tos
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
+from scripts.backfill_first_interaction import run_backfill
 import uvicorn
 from web.app import create_app
 
@@ -269,6 +270,13 @@ async def main():
             async with bot:
                 await http_session.create_session()
                 await init_db()
+                # One-off historical fix: applies whatever is in
+                # scripts/backfill_first_interaction.py's ENTRIES (if any)
+                # against the state that was just loaded. No-op once ENTRIES
+                # is empty, so safe to leave wired in permanently.
+                _backfilled = run_backfill()
+                if _backfilled:
+                    print(f"✅ backfillfirst: applied {_backfilled} entr{'y' if _backfilled == 1 else 'ies'} on startup")
                 await init_history()
                 await init_memory()
 
