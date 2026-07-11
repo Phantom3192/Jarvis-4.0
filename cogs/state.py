@@ -162,6 +162,23 @@ async def init_db():
     if "tos_accepted"    in db: _data["tos_accepted"]    = db["tos_accepted"]
     if "lifetime_earned" in db: _data["lifetime_earned"] = db["lifetime_earned"]
 
+    # ── One-time migration: back-fill first_interaction for users who were
+    # already marked "seen" before this table existed. mark_seen() only
+    # stamps first_interaction for users NOT already in "seen", so anyone
+    # who joined pre-migration would otherwise show "Not yet interacted"
+    # forever — which is wrong, they've clearly interacted. Best available
+    # guess is their AI-chat first_seen timestamp, if they have one.
+    backfilled = False
+    for uid in _data["seen"]:
+        key = str(uid)
+        if key not in _data["first_interaction"]:
+            legacy_first_seen = _data["stats"].get(key, {}).get("first_seen")
+            if legacy_first_seen:
+                _data["first_interaction"][key] = legacy_first_seen
+                backfilled = True
+    if backfilled:
+        _schedule_save("first_interaction")
+
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
 
@@ -1367,4 +1384,4 @@ def has_used_bot_before(user_id: int) -> bool:
         return True
     if _data["banners"].get(uid, {}).get("owned"):
         return True
-    return False        
+    return False

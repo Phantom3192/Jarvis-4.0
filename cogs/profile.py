@@ -18,7 +18,7 @@ from cogs.state import (
     get_favorite_song, get_stats, get_badges, get_titles, get_banners,
     equip_title, equip_banner, PROFILE_FIELDS, get_hidden_fields,
     set_field_hidden, get_referral_count, get_lifetime_earned, get_ai_usage,
-    get_first_interaction,
+    get_first_interaction, is_new_user,
 )
 from cogs.achievements import ACHIEVEMENTS
 from cogs.economy import JC_EMOJI, JC_NAME, BANNER_COLORS, get_title_label
@@ -113,11 +113,24 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
         )
 
     if "joined" not in hidden:
-        joined_value = f"<t:{int(first_seen)}:D>" if first_seen else "Not yet interacted"
+        if first_seen:
+            joined_value = f"<t:{int(first_seen)}:D>"
+        elif is_new_user(uid):
+            joined_value = "Not yet interacted"
+        else:
+            # Seen before, but no timestamp survived (pre-dates tracking and
+            # has no AI-chat fallback either). Don't claim "not yet
+            # interacted" — that's false; be honest that it's just unknown.
+            joined_value = "Unknown (before tracking)"
         embed.add_field(name="📅 First Interaction", value=joined_value, inline=True)
 
     if "account_age" not in hidden:
-        age_value = _format_duration(time.time() - first_seen) if first_seen else "Not yet interacted"
+        if first_seen:
+            age_value = _format_duration(time.time() - first_seen)
+        elif is_new_user(uid):
+            age_value = "Not yet interacted"
+        else:
+            age_value = "Unknown"
         embed.add_field(name="🧓 Account Age", value=age_value, inline=True)
 
     if "referrals" not in hidden:
