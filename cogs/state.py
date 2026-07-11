@@ -54,6 +54,7 @@ _data: dict[str, Any] = {
     "title_subscriptions": {}, # str(user_id) → {title_id: next_charge_epoch}
     "title_autorenew": {},  # str(user_id) → {title_id: bool} — missing entry defaults to True
     "profile_privacy": {}, # str(user_id) → list[str] of field keys hidden from OTHER viewers (owner always sees all)
+    "tos_accepted":    {}, # str(user_id) → {"version": int, "accepted_at": float}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -83,6 +84,7 @@ _SERIALISE: dict[str, Any] = {
     "title_subscriptions": lambda: _data["title_subscriptions"],
     "title_autorenew":     lambda: _data["title_autorenew"],
     "profile_privacy":     lambda: _data["profile_privacy"],
+    "tos_accepted":        lambda: _data["tos_accepted"],
 }
 
 
@@ -152,6 +154,7 @@ async def init_db():
     if "title_subscriptions" in db: _data["title_subscriptions"] = db["title_subscriptions"]
     if "title_autorenew" in db: _data["title_autorenew"] = db["title_autorenew"]
     if "profile_privacy" in db: _data["profile_privacy"] = db["profile_privacy"]
+    if "tos_accepted"    in db: _data["tos_accepted"]    = db["tos_accepted"]
 
     print("✅ Turso state DB connected")
     asyncio.create_task(_db.keepalive_loop())
@@ -1179,6 +1182,7 @@ PROFILE_FIELDS = {
     "songs":    "Songs played",
     "favorite": "Favorite song",
     "badges":   "Badges",
+    "joined":   "First interaction date",
 }
 
 
@@ -1266,3 +1270,57 @@ def clear_auto_renew(user_id: int, title_id: str) -> None:
     if entry and title_id in entry:
         del entry[title_id]
         _schedule_save("title_autorenew")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TERMS & CONDITIONS
+# ══════════════════════════════════════════════════════════════════════════════
+# Every user — brand new, or already using Jarvis before this feature shipped —
+# must accept the Terms & Conditions once before Jarvis will respond to any
+# command or chat message. Bumping TOS_VERSION re-prompts EVERYONE (including
+# users who accepted an older version), which is how a material wording change
+# would be rolled out in future.
+
+TOS_VERSION = 1
+
+
+def has_accepted_tos(user_id: int) -> bool:
+    entry = _data["tos_accepted"].get(str(user_id))
+    return bool(entry) and entry.get("version", 0) >= TOS_VERSION
+
+
+def accept_tos(user_id: int) -> None:
+    _data["tos_accepted"][str(user_id)] = {
+        "version":     TOS_VERSION,
+        "accepted_at": time.time(),
+    }
+    _schedule_save("tos_accepted")
+
+
+def get_tos_status(user_id: int) -> dict | None:
+    """Return {'version': int, 'accepted_at': float} or None if never accepted."""
+    return _data["tos_accepted"].get(str(user_id))
+
+
+def has_used_bot_before(user_id: int) -> bool:
+    """Best-effort check for 'this person was already using Jarvis before
+    the Terms & Conditions gate shipped' — used to show existing users a
+    different framing ('we've introduced new Terms & Conditions') instead
+    of the brand-new-user welcome prompt. Checks every table someone could
+    already have a footprint in, since seen_users alone only gets marked on
+    a first AI chat/referral redemption and would miss command-only users."""
+    uid = str(user_id)
+    if user_id in _data["seen"]:
+        return True
+    if uid in _data["stats"]:
+        return True
+    if _data["credits"].get(uid):
+        return True
+    if uid in _data["game_stats"]:
+        return True
+    if _data["badges"].get(uid):
+        return True
+    if _data["titles"].get(uid, {}).get("owned"):
+        return True
+    if _data["banners"].get(uid, {}).get("owned"):
+        return True
+    return False

@@ -6,15 +6,18 @@ import logging
 import signal
 import time
 from dotenv import load_dotenv
+
+load_dotenv()  # must run before any `cogs.*` import — several read env vars at import time
+
 from cogs.errorhandler import install_stdout_error_forwarding, install_view_error_suppression
 from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown, flush_all_saves
+from cogs.tos import ensure_tos
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
 from cogs.memory import init_memory
 import uvicorn
 from web.app import create_app
 
-load_dotenv()
 install_stdout_error_forwarding()   # forward ❌/error-looking print() lines to the webhook too
 install_view_error_suppression()    # silence harmless expired-interaction noise from button clicks
 
@@ -57,6 +60,7 @@ COGS = [
     "cogs.economy",
     "cogs.profile",
     "cogs.status",
+    "cogs.tos",
 ]
 
 # Track users we've already DM'd about their ban this session — avoid spamming
@@ -101,6 +105,12 @@ async def global_ban_check(ctx: commands.Context) -> bool:
         await _notify_banned(ctx.author)
         return False
 
+    # Terms & Conditions gate — applies even to the bot owner, so testing
+    # the flow behaves the same for everyone. There's no standalone !tos
+    # command; this is the only place the prompt appears.
+    if not await ensure_tos(ctx.author.id, lambda **kw: ctx.reply(**kw)):
+        return False
+
     if await bot.is_owner(ctx.author):
         return True
 
@@ -134,6 +144,14 @@ async def slash_interaction_check(interaction: discord.Interaction) -> bool:
         return False
 
     if not await slash_ban_check(interaction):
+        return False
+
+    # Terms & Conditions gate — applies even to the bot owner, so testing
+    # the flow behaves the same for everyone. There's no standalone /tos
+    # command; this is the only place the prompt appears.
+    async def _send_tos(**kw):
+        await interaction.response.send_message(**kw, ephemeral=True)
+    if not await ensure_tos(interaction.user.id, _send_tos):
         return False
 
     if await bot.is_owner(interaction.user):

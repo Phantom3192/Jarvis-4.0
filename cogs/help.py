@@ -1,6 +1,15 @@
+import os
+
 import discord
 from discord.ext import commands
 from discord import app_commands
+
+
+def _guide_url() -> str:
+    """Read lazily (not as a module-level constant) so it never depends on
+    import order relative to load_dotenv() — set via the JARVIS_WEBSITE_URL
+    env var, or edit the fallback string below."""
+    return os.getenv("JARVIS_WEBSITE_URL", "https://example.com/jarvis-guide")
 
 # ── Category definitions ──────────────────────────────────────────────────────
 # Each command is listed ONCE. Both ! and / variants are shown on one line.
@@ -18,6 +27,13 @@ CATEGORIES = {
             ("!mylimit  /mylimit",    "Check how many AI messages you have left today"),
             ("!summary  /summary",   "Summarise your chat — e.g. `!summary 1h`, `!summary 30m`"),
             ("!clearsummary  /clearsummary", "Clear your summary log"),
+        ],
+    },
+    "ℹ️ General": {
+        "description": "Getting started with Jarvis.",
+        "color": 0x2ECC71,
+        "commands": [
+            ("!guide  /guide", "Get a link to the full Jarvis guide website"),
         ],
     },
     "🧠 Memory": {
@@ -542,6 +558,30 @@ class Help(commands.Cog):
     async def slash_help(self, interaction: discord.Interaction):
         view = HelpView(author_id=interaction.user.id)
         await interaction.response.send_message(embed=_build_overview_embed(), view=view)
+
+    # ── !guide / /guide ──────────────────────────────────────────────────────
+
+    def _guide_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="📖 Jarvis Guide",
+            description=(
+                "Head over to the full Jarvis guide website for a complete, "
+                "up-to-date walkthrough of every feature:\n\n"
+                f"🔗 **[Open the Jarvis Guide]({_guide_url()})**"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Prefer Discord? Use !help / /help to browse commands right here.")
+        return embed
+
+    @commands.command(name="guide")
+    async def prefix_guide(self, ctx: commands.Context):
+        """!guide — get a link to the full Jarvis guide website."""
+        await ctx.reply(embed=self._guide_embed())
+
+    @app_commands.command(name="guide", description="Get a link to the full Jarvis guide website")
+    async def slash_guide(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=self._guide_embed())
 
 
 async def setup(bot: commands.Bot):

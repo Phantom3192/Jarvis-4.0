@@ -22,6 +22,7 @@ from collections import defaultdict
 import groq
 import importlib
 import base64
+from cogs.tos import ensure_tos
 from cogs.state import (
     is_bot_banned, is_new_user, mark_seen, record_message, get_guild_prompt,
     is_ai_rate_limited, increment_ai_usage, get_ai_usage, get_ai_limit,
@@ -2001,6 +2002,7 @@ class AI(commands.Cog):
 
         auto_respond = False
         restricted = False
+        in_dm = message.guild is None
         if message.guild is not None:
             auto_respond = bool(get_setting(f"auto_respond_channel_{message.channel.id}", False))
             restricted = bool(get_setting(f"restrict_channel_{message.channel.id}", False))
@@ -2008,7 +2010,8 @@ class AI(commands.Cog):
         if restricted:
             return
 
-        if not (mentioned or replied_to_me or named or auto_respond):
+        # A DM is unambiguously "talking to Jarvis" — no mention/keyword needed.
+        if not (mentioned or replied_to_me or named or auto_respond or in_dm):
             return
 
         # Guild-level ban check — on_message bypasses @bot.check so we must do this manually
@@ -2023,6 +2026,11 @@ class AI(commands.Cog):
 
         if is_bot_banned(message.author.id):
             await safe_reply(message, "🚫 You've been banned from Jarvis. Contact the bot owner if you think this is a mistake.")
+            return
+
+        # Terms & Conditions gate — applies even to the bot owner, so
+        # testing the flow behaves the same for everyone.
+        if not await ensure_tos(message.author.id, lambda **kw: message.reply(**kw)):
             return
 
         if not await self.bot.is_owner(message.author):

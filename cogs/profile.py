@@ -63,6 +63,8 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
     messages = message_stats.get("messages", 0)
     level, into_level, per_level = _level_for_messages(messages)
 
+    first_seen = message_stats.get("first_seen")
+
     equipped_title_id = get_titles(uid).get("equipped")
     equipped_title = get_title_label(equipped_title_id) if equipped_title_id else None
     equipped_banner = get_banners(uid).get("equipped")
@@ -86,6 +88,10 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
             inline=True,
         )
 
+    if "joined" not in hidden:
+        joined_value = f"<t:{int(first_seen)}:D>" if first_seen else "Not yet interacted"
+        embed.add_field(name="📅 First Interaction", value=joined_value, inline=True)
+
     if "badges" not in hidden:
         badge_ids = get_badges(uid)
         if badge_ids:
@@ -96,9 +102,8 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
         else:
             embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
 
-    footer = "Use /titles and /banners to see what you own and can equip. Tap 🎮 Game Stats below for game records."
     if is_owner and get_hidden_fields(uid):
-        footer = "Some fields are hidden from other viewers. " + footer
+        footer = "Some fields are hidden from other viewers. "
     embed.set_footer(text=footer)
     return embed
 
