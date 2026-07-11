@@ -30,47 +30,121 @@ mark_seen() in cogs/state.py stamps new users automatically — this file is
 only for fixing pre-existing data.
 """
 import json
+import re
 from datetime import datetime, timezone
 
-# ── Fill this in — one "user_id - DD/MM/YYYY" per line — leave empty ("") to
-#    skip entirely once you're done backfilling ──────────────────────────────
+# ── Fill this in — one line per user. Accepts either:
+#      user_id - DD/MM/YYYY
+#    or a straight paste of the log embed line:
+#      user_id - First ever interaction with Jarvis•DD/MM/YYYY HH:MM
+#    (any extra text/time around the date is ignored — only the date matters)
 ENTRIES = """
-1049677357927125012 - 02/04/2026
-707258471329955851 - 02/04/2026
-1146398794724941964 - 03/04/2026
-1196508345658523691 - 03/04/2026
-1398882668401135657 - 05/04/2026
-1316367195777011786 - 07/04/2026
-1413168299050532965 - 07/04/2026
-1113148246370562109 - 08/04/2026
-1433930959174242444 - 08/04/2026
-1060796603595767808 - 08/04/2026
-979993503058763776 - 08/04/2026
-561510329993920523 - 09/04/2026
-1446847412235927626 - 09/04/2026
-1120655318175715378 - 26/04/2026
-873549393985409034 - 27/04/2026
-1476242342901055591 - 27/04/2026
-909620128252067840 - 24/05/2026
-1239441913631871049 - 24/05/2026
-1165694877267402766 - 26/05/2026
-780789015837671445 - 26/05/2026
-1380843851077517332 - 26/05/2026
-1371537669774905354 - 26/05/2026
-1322175619597074582 -  27/05/2026
-1344457134750044180 - 27/05/2026
-1285397741798690849 - 27/05/2026
-1442805546196668459 - 27/05/2026
-1505519622764630136 - 27/05/2026
-1241639520751976470 - 27/05/2026
-821633464175558657 - 27/05/2026
-1042722447683768381 - 27/05/2026
-1478720092500918414 - 27/05/2026
-1336247895946690601 - 27/05/2026
-807306907261206569 - 27/05/2026
-1279086222173540464 - 27/05/2026
+1396510418834423951 - First ever interaction with Jarvis•27/05/2026 21:20
+1491388367978496191 - First ever interaction with Jarvis•27/05/2026 21:33
+910495965113368647 - First ever interaction with Jarvis•27/05/2026 22:22
+1223672283730677780 - First ever interaction with Jarvis•27/05/2026 23:45
+1331725906808410205 - First ever interaction with Jarvis•28/05/2026 02:44
+630122700391710721 - First ever interaction with Jarvis•28/05/2026 03:23
+1158795381971374141 - First ever interaction with Jarvis•28/05/2026 14:53
+1490796211802869971 - First ever interaction with Jarvis•28/05/2026 16:31
+374000725971304449 - First ever interaction with Jarvis•28/05/2026 17:14
+1015890547673673778 - First ever interaction with Jarvis•28/05/2026 22:56
+992753501316841604 - First ever interaction with Jarvis•29/05/2026 00:48
+656541631746539546 - First ever interaction with Jarvis•29/05/2026 03:15
+1498713491681447996 - First ever interaction with Jarvis•29/05/2026 03:24
+1305128004409757769 - First ever interaction with Jarvis•29/05/2026 17:46
+1146804428251332629 - First ever interaction with Jarvis•30/05/2026 01:00
+1391101897120682074 - First ever interaction with Jarvis•30/05/2026 03:10
+892584714710429716 - First ever interaction with Jarvis•02/06/2026 04:22
+1265963911816155177 - First ever interaction with Jarvis•02/06/2026 18:51
+1303344436809564181 - First ever interaction with Jarvis•02/06/2026 18:55
+674705713133780994 - First ever interaction with Jarvis•02/06/2026 19:39
+1411797620711751843 - First ever interaction with Jarvis•02/06/2026 19:43
+760720549092917248 - First ever interaction with Jarvis•02/06/2026 20:28
+1206221118411644970 - First ever interaction with Jarvis•04/06/2026 00:25
+1058253101737463870 -First ever interaction with Jarvis•05/06/2026 19:47
+1449622516321616032 - First ever interaction with Jarvis•06/06/2026 22:15
+1039612680014671931 - First ever interaction with Jarvis•07/06/2026 15:13
+621314645772337152 - First ever interaction with Jarvis•07/06/2026 15:23
+423359674465648660 - First ever interaction with Jarvis•07/06/2026 16:41
+955785232504717392 - First ever interaction with Jarvis•08/06/2026 00:15
+1478873443335147702 - First ever interaction with Jarvis•08/06/2026 01:40
+621314645772337152 - First ever interaction with Jarvis•09/06/2026 16:17
+304008330437853194 - First ever interaction with Jarvis•09/06/2026 22:21
+1421788632317952073 - First ever interaction with Jarvis•09/06/2026 23:54
+651721922777710622 - First ever interaction with Jarvis•10/06/2026 22:52
+1234410790069604465 - First ever interaction with Jarvis•11/06/2026 10:16
+308318060555534347 - First ever interaction with Jarvis•14/06/2026 03:25
+1140077841405448323 - First ever interaction with Jarvis•14/06/2026 03:26
+960015423481450506 - First ever interaction with Jarvis•14/06/2026 12:23
+1167653240352026624 - First ever interaction with Jarvis•14/06/2026 14:19
+1330932728362696805 - First ever interaction with Jarvis•14/06/2026 15:53
+1496035592411152445 - First ever interaction with Jarvis•14/06/2026 16:15
+915840911412428841 - First ever interaction with Jarvis•14/06/2026 18:49
+1386868860719861831 - First ever interaction with Jarvis•15/06/2026 06:57
+843791135424249857 - First ever interaction with Jarvis•15/06/2026 18:53
+1457646865666539643 - First ever interaction with Jarvis•15/06/2026 19:29
+930545363876712508 - First ever interaction with Jarvis•15/06/2026 21:40
+1487968733312848028 - First ever interaction with Jarvis•15/06/2026 22:47
+941570450184609822 - First ever interaction with Jarvis•16/06/2026 01:08
+1039612680014671931 - First ever interaction with Jarvis•16/06/2026 21:14
+1470567067638825165 - First ever interaction with Jarvis•16/06/2026 22:21
+1158004694703157308 - First ever interaction with Jarvis•16/06/2026 22:27
+1510854545528324156 - First ever interaction with Jarvis•16/06/2026 22:33
+1311250828362911765 - First ever interaction with Jarvis•18/06/2026 12:19
+785357401473286177 - First ever interaction with Jarvis•18/06/2026 21:47
+833953613638139955 - First ever interaction with Jarvis•18/06/2026 22:09
+1224488480122601532 - First ever interaction with Jarvis•18/06/2026 22:56
+345050089070395402 - First ever interaction with Jarvis•19/06/2026 01:59
+1059809449470083173 - First ever interaction with Jarvis•19/06/2026 11:43
+776462567073251379 - First ever interaction with Jarvis•19/06/2026 17:48
+1078713179728773205 - First ever interaction with Jarvis•19/06/2026 17:50
+1460221479995310090 - First ever interaction with Jarvis•19/06/2026 18:10
+1397635477728661566 - First ever interaction with Jarvis•20/06/2026 00:42
+1390731391171432468 - First ever interaction with Jarvis•20/06/2026 01:00
+840454767620915200 - First ever interaction with Jarvis•20/06/2026 02:04
+955785232504717392 - First ever interaction with Jarvis•20/06/2026 16:49
+1392251946374533232 - First ever interaction with Jarvis•20/06/2026 19:39
+1392895519784964166 - First ever interaction with Jarvis•20/06/2026 20:37
+1383570858261348437 - First ever interaction with Jarvis•20/06/2026 20:40
+545216491281448981 - First ever interaction with Jarvis•21/06/2026 08:47
+832641137293787210 - First ever interaction with Jarvis•21/06/2026 16:47
+897896149481050132 - First ever interaction with Jarvis•22/06/2026 17:52
+1062734724499513424 - First ever interaction with Jarvis•23/06/2026 15:38
+927680881626316851 - First ever interaction with Jarvis•24/06/2026 20:16
+1339340207454949426 - First ever interaction with Jarvis•26/06/2026 02:05
+768548512392020009 - First ever interaction with Jarvis•27/06/2026 09:51
+1362901984373510244- First ever interaction with Jarvis•27/06/2026 17:50
+809066800322576395 - First ever interaction with Jarvis•28/06/2026 01:51
+1446565627593621595 - First ever interaction with Jarvis•28/06/2026 18:31
+1056760648337457184 - First ever interaction with Jarvis•28/06/2026 18:31
+1376883695243493458 - First ever interaction with Jarvis•28/06/2026 19:53
+1454704363304910971 - First ever interaction with Jarvis•28/06/2026 22:30
+1449628612683890692 - First ever interaction with Jarvis•28/06/2026 22:36
+1380989333720268831 - First ever interaction with Jarvis•30/06/2026 22:20
+1438145490813325422 - First ever interaction with Jarvis•01/07/2026 11:45
+1496258962515820770 - First ever interaction with Jarvis•01/07/2026 20:40
+1116807828720590969 - First ever interaction with Jarvis•01/07/2026 21:11
+882282803813830697 - First ever interaction with Jarvis•03/07/2026 00:42
+844034964462108672 - First ever interaction with Jarvis•03/07/2026 13:08
+1127171386809536553 - First ever interaction with Jarvis•04/07/2026 01:45
+1396414611225313371 - First ever interaction with Jarvis•04/07/2026 22:02
+1431572123117420554 - First ever interaction with Jarvis•05/07/2026 23:34
+1282326149434834996 - First ever interaction with Jarvis•05/07/2026 23:53
+917607159871725639 - First ever interaction with Jarvis•07/07/2026 21:39
+1433832607786733729 - First ever interaction with Jarvis•08/07/2026 10:09
+871236678235353159 - First ever interaction with Jarvis•09/07/2026 11:53
+372456601266683914 - First ever interaction with Jarvis•10/07/2026 01:41
+1199405084321255565 - First ever interaction with Jarvis•10/07/2026 13:17
+851675873856716810 - First ever interaction with Jarvis•10/07/2026 18:48
+1424772930054656153 - First ever interaction with Jarvis•10/07/2026 18:50
+1504787040200294540 - First ever interaction with Jarvis•10/07/2026 20:49
+1467328283283816514 - First ever interaction with Jarvis•10/07/2026 20:52
 """
 # ──────────────────────────────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"(\d{2})/(\d{2})/(\d{4})")
+_UID_RE = re.compile(r"^\s*(\d+)")
 
 
 def _parse_entries(raw: str) -> list[tuple[str, float]]:
@@ -79,8 +153,13 @@ def _parse_entries(raw: str) -> list[tuple[str, float]]:
         line = line.strip()
         if not line:
             continue
-        uid_part, date_part = [p.strip() for p in line.split("-", 1)]
-        day, month, year = date_part.split("/")
+        uid_match = _UID_RE.match(line)
+        date_match = _DATE_RE.search(line)
+        if not uid_match or not date_match:
+            print(f"  ⚠️ skipped unparseable line: {line}")
+            continue
+        uid_part = uid_match.group(1)
+        day, month, year = date_match.groups()
         dt = datetime(int(year), int(month), int(day), tzinfo=timezone.utc)
         parsed.append((uid_part, dt.timestamp()))
     return parsed
