@@ -20,6 +20,7 @@ from cogs.state import (
     get_equipped_title, grant_title, get_titles, grant_banner, get_banners,
     get_all_subscriptions, get_subscriptions, set_subscription, clear_subscription, revoke_title,
     revoke_banner, equip_title, get_auto_renew, set_auto_renew, clear_auto_renew,
+    get_setting, set_setting,
 )
 from cogs.achievements import TITLE_LABELS
 
@@ -1467,6 +1468,31 @@ class Economy(commands.Cog):
         with auto-renew turned off skip the charge entirely and just expire
         on schedule instead."""
         now = time.time()
+
+        # ── Pause unequipped titles' billing clocks ─────────────────────
+        # Only ONE title can be equipped at a time, but a user can OWN
+        # several subscriptions at once. Rather than let every owned title
+        # count down concurrently (so buying two at once burns them both
+        # down together even though only one is ever worn), we freeze the
+        # next_charge of every subscription that ISN'T currently equipped
+        # by pushing it forward by exactly how much real time has passed
+        # since the last freeze tick — so its *remaining* time never moves
+        # while unequipped. The moment it's re-equipped, this loop simply
+        # stops pushing it forward and its countdown resumes for real from
+        # wherever it was frozen at.
+        last_tick = get_setting("title_pause_last_tick", now)
+        elapsed = max(0.0, now - last_tick)
+        set_setting("title_pause_last_tick", now)
+
+        if elapsed > 0:
+            for uid_str, subs in get_all_subscriptions().items():
+                uid = int(uid_str)
+                equipped = get_equipped_title(uid)
+                for title_id, next_charge in subs.items():
+                    if title_id == equipped:
+                        continue  # actively running — let it count down normally
+                    set_subscription(uid, title_id, next_charge + elapsed)
+
 
         async def _end_subscription(uid: int, title_id: str, item: dict, *, reason: str) -> None:
             """Shared cleanup for a subscription that's ending (whether from
