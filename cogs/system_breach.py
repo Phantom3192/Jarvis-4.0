@@ -1211,7 +1211,7 @@ FUSION_CURVE = [0.30, 0.55, 0.80, 0.95, 1.00]
 # SPAWN SETTINGS (UPDATED)
 # ══════════════════════════════════════════════════════════════════════════════
 
-SPAWN_CHANCE_PER_MESSAGE = 0.09
+SPAWN_CHANCE_PER_MESSAGE = 0.04
 SPAWN_CHANNEL_COOLDOWN = 0   
 SPAWN_LIFETIME = 60         
 
