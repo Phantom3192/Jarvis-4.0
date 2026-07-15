@@ -395,6 +395,51 @@ def get_raid_damage_bonus() -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CHANNEL WHITELIST FUNCTIONS (Per Server)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_spawn_channels(guild_id: int) -> list[int]:
+    """Get list of channel IDs where spawns are allowed for a specific guild."""
+    guild_data = _data.get("spawn_channels", {}).get(str(guild_id), {})
+    return guild_data.get("channels", [])
+
+def add_spawn_channel(guild_id: int, channel_id: int) -> None:
+    """Add a channel to the spawn whitelist for a specific guild."""
+    if "spawn_channels" not in _data:
+        _data["spawn_channels"] = {}
+    
+    guild_str = str(guild_id)
+    if guild_str not in _data["spawn_channels"]:
+        _data["spawn_channels"][guild_str] = {"channels": []}
+    
+    channels = _data["spawn_channels"][guild_str].get("channels", [])
+    if channel_id not in channels:
+        channels.append(channel_id)
+        _data["spawn_channels"][guild_str]["channels"] = channels
+        from cogs.state import _schedule_save
+        _schedule_save("spawn_channels")
+
+def remove_spawn_channel(guild_id: int, channel_id: int) -> None:
+    """Remove a channel from the spawn whitelist for a specific guild."""
+    guild_str = str(guild_id)
+    if guild_str in _data.get("spawn_channels", {}):
+        channels = _data["spawn_channels"][guild_str].get("channels", [])
+        if channel_id in channels:
+            channels.remove(channel_id)
+            _data["spawn_channels"][guild_str]["channels"] = channels
+            from cogs.state import _schedule_save
+            _schedule_save("spawn_channels")
+
+def is_spawn_channel(guild_id: int, channel_id: int) -> bool:
+    """Check if a channel is whitelisted for spawns in a specific guild."""
+    channels = get_spawn_channels(guild_id)
+    # If no channels are whitelisted, spawns work everywhere
+    if not channels:
+        return True
+    return channel_id in channels
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MID-BOSS FIGHT (Activates at 50% Power)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -806,9 +851,11 @@ COMBAT_QUESTS = [
 # ── RAID QUESTS (Global - Bot-wide progression) ──
 RAID_QUESTS = [
     "raid_damage_2500",
-    "raid_damage_5000", 
+    "raid_damage_5000",
     "raid_damage_7500",
+    "raid_damage_10000",
     "raid_defeat",
+    "raid_participate_25",
     "raid_participate_50",
 ]
 
@@ -994,31 +1041,42 @@ QUEST_DEFS = {
         "name": "Raid Damage (2,500)",
         "tier": "raid_global",
         "type": "raid_global",
-        "description": "Deal 6,000 total damage to the raid boss (global)",
+        "description": "Deal 2,500 total damage to the raid boss (global)",
         "goal": 2500,
-        "reward_jc": 100,
-        "reward_power": 2.0,
+        "reward_jc": 50,
+        "reward_power": 1.0,
         "unlock_power": 100,
-        "next_quest": "raid_damage_15000",
+        "next_quest": "raid_damage_5000",
     },
     "raid_damage_5000": {
         "name": "Raid Damage (5,000)",
         "tier": "raid_global",
         "type": "raid_global",
-        "description": "Deal 15,000 total damage to the raid boss (global)",
+        "description": "Deal 5,000 total damage to the raid boss (global)",
         "goal": 5000,
-        "reward_jc": 250,
-        "reward_power": 3.0,
+        "reward_jc": 100,
+        "reward_power": 2.0,
         "unlock_power": 100,
-        "next_quest": "raid_damage_30000",
+        "next_quest": "raid_damage_7500",
     },
     "raid_damage_7500": {
         "name": "Raid Damage (7,500)",
         "tier": "raid_global",
         "type": "raid_global",
-        "description": "Deal 30,000 total damage to the raid boss (global)",
-        "goal": 30000,
-        "reward_jc": 500,
+        "description": "Deal 7,500 total damage to the raid boss (global)",
+        "goal": 7500,
+        "reward_jc": 200,
+        "reward_power": 3.0,
+        "unlock_power": 100,
+        "next_quest": "raid_damage_10000",
+    },
+    "raid_damage_10000": {
+        "name": "Raid Damage (10,000)",
+        "tier": "raid_global",
+        "type": "raid_global",
+        "description": "Deal 10,000 total damage to the raid boss (global)",
+        "goal": 10000,
+        "reward_jc": 400,
         "reward_power": 5.0,
         "unlock_power": 100,
         "next_quest": "raid_defeat",
@@ -1031,6 +1089,17 @@ QUEST_DEFS = {
         "goal": 1,
         "reward_jc": 1000,
         "reward_power": 10.0,
+        "unlock_power": 100,
+        "next_quest": "raid_participate_25",
+    },
+    "raid_participate_25": {
+        "name": "Raid Participation (25)",
+        "tier": "raid_global",
+        "type": "raid_global",
+        "description": "25 unique players must participate in the raid (global)",
+        "goal": 25,
+        "reward_jc": 1000,
+        "reward_power": 8.0,
         "unlock_power": 100,
         "next_quest": "raid_participate_50",
     },
@@ -1211,10 +1280,9 @@ FUSION_CURVE = [0.30, 0.55, 0.80, 0.95, 1.00]
 # SPAWN SETTINGS (UPDATED)
 # ══════════════════════════════════════════════════════════════════════════════
 
-SPAWN_CHANCE_PER_MESSAGE = 0.04
-SPAWN_CHANNEL_COOLDOWN = 0   
+SPAWN_CHANCE_PER_MESSAGE = 0.05
+SPAWN_CHANNEL_COOLDOWN = 60   
 SPAWN_LIFETIME = 60         
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -2024,6 +2092,17 @@ class SystemBreach(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         
+        # ── Initialize event data if not exists ──
+        if "event_data" not in _data:
+            _data["event_data"] = {
+                "active": False,
+                "ends_at": 0,
+                "start_time": 0,
+                "dip_count": 0
+            }
+            from cogs.state import _schedule_save
+            _schedule_save("event_data")
+        
         # ── Initialize raid state if not exists ──
         if "raid_state" not in _data:
             _data["raid_state"] = {
@@ -2070,23 +2149,48 @@ class SystemBreach(commands.Cog):
             from cogs.state import _schedule_save
             _schedule_save("stabilizer_used")
         
+        # ── Initialize spawn channels if not exists ──
+        if "spawn_channels" not in _data:
+            _data["spawn_channels"] = {}
+            from cogs.state import _schedule_save
+            _schedule_save("spawn_channels")
+        
         self.raid_task = bot.loop.create_task(self._raid_auto_end_check())
         self.raid_regeneration_task = bot.loop.create_task(self._raid_regeneration_loop())
 
     async def cog_load(self):
         """Called when the cog is loaded - restore state if needed."""
-        # ── Restore raid state ──
-        state = get_raid_state()
-        if state.get("active", False):
-            hp = state.get("hp", RAID_BOSS_HP)
-            if hp <= 0:
-                # Boss was defeated - deactivate
-                set_raid_active(False)
-        
-        # ── Restore mid-boss state ──
-        mid_state = get_mid_boss_state()
-        if mid_state.get("defeated", False) or mid_state.get("hp", MID_BOSS_HP) <= 0:
-            set_mid_boss_defeated(True)
+        # ── Check if event was active before restart ──
+        event = get_event_data()
+        if event.get("active", False):
+            print(f"[SystemBreach] Event was active before restart. Resuming...")
+            
+            # Check if event has expired
+            ends_at = event.get("ends_at", 0)
+            if ends_at > 0 and time.time() > ends_at:
+                print("[SystemBreach] Event has expired. Ending...")
+                set_event_active(False)
+                return
+            
+            # ── Restore raid state ──
+            state = get_raid_state()
+            if state.get("active", False):
+                hp = state.get("hp", RAID_BOSS_HP)
+                if hp <= 0:
+                    set_raid_active(False)
+                else:
+                    print(f"[SystemBreach] Raid active with {hp} HP remaining")
+            
+            # ── Restore mid-boss state ──
+            mid_state = get_mid_boss_state()
+            if mid_state.get("defeated", False) or mid_state.get("hp", MID_BOSS_HP) <= 0:
+                set_mid_boss_defeated(True)
+            elif mid_state.get("active", False):
+                print(f"[SystemBreach] Mid-boss active with {mid_state.get('hp', MID_BOSS_HP)} HP remaining")
+            
+            print("[SystemBreach] Event resumed successfully!")
+        else:
+            print("[SystemBreach] No active event found on startup.")
 
     # ── Global Cog Check ──────────────────────────────────────────────────────
 
@@ -2095,7 +2199,8 @@ class SystemBreach(commands.Cog):
         Owner commands (startbreach, endbreach, etc.) bypass this check."""
         if ctx.command and ctx.command.name in [
             "startbreach", "endbreach", "spawndaemon", "powertest", 
-            "raidreset", "raidactivate", "midreset", "setpower"
+            "raidreset", "raidactivate", "midreset", "setpower",
+            "spawnchannel"
         ]:
             return True
         
@@ -2103,6 +2208,14 @@ class SystemBreach(commands.Cog):
         if not event.get("active"):
             await ctx.reply("❌ The System Breach event is not active.")
             return False
+        
+        # ── Check if event has expired ──
+        ends_at = event.get("ends_at", 0)
+        if ends_at > 0 and time.time() > ends_at:
+            set_event_active(False)
+            await ctx.reply("❌ The System Breach event has ended.")
+            return False
+        
         return True
 
     # ── Quest Completion Check Helper ──────────────────────────────────────
@@ -2120,11 +2233,11 @@ class SystemBreach(commands.Cog):
         
         # ── For global raid quests, use global progress ──
         if quest.get("type") == "raid_global":
-            if quest_id in ["raid_damage_6000", "raid_damage_15000", "raid_damage_30000"]:
+            if quest_id in ["raid_damage_2500", "raid_damage_5000", "raid_damage_7500", "raid_damage_10000"]:
                 progress = get_raid_global_progress().get("total_damage", 0)
             elif quest_id == "raid_defeat":
                 progress = 1 if get_raid_defeated() else 0
-            elif quest_id == "raid_participate_50":
+            elif quest_id in ["raid_participate_25", "raid_participate_50"]:
                 progress = get_raid_participant_count()
         
         # ── For personal raid quests ──
@@ -2145,6 +2258,184 @@ class SystemBreach(commands.Cog):
             await self._send_quest_completion_notification(message, user_id, quest_id)
 
     # ── Quest Embed Builders ─────────────────────────────────────────────────
+
+    def _build_quest_menu_embed(self, user_id: int) -> discord.Embed:
+        """Build the quest menu embed."""
+        power = get_jarvis_power()
+        
+        embed = discord.Embed(
+            title="📜 System Breach — Quests",
+            description=(
+                "Complete quests to earn **Jarvis Credits** and **Power**!\n\n"
+                f"⚡ **Current Power:** `{round(power)}%`"
+            ),
+            color=discord.Color.blurple(),
+        )
+        
+        user_quests = get_daemon_quest(user_id)
+        
+        if power >= 100:
+            # ── RAID PHASE ──
+            embed.description += "\n💥 **RAID PHASE ACTIVE!**"
+            embed.color = 0xFF6B00
+            
+            # Individual Raid Quests progress
+            individual_done = sum(1 for qid in INDIVIDUAL_RAID_QUESTS if user_quests.get(qid, {}).get("claimed", False))
+            individual_total = len(INDIVIDUAL_RAID_QUESTS)
+            
+            # Global Raid Quests progress
+            global_done = sum(1 for qid in RAID_QUESTS if user_quests.get(qid, {}).get("claimed", False))
+            global_total = len(RAID_QUESTS)
+            
+            embed.add_field(
+                name="📊 Your Raid Progress",
+                value=f"🎯 **Individual Raid Quests:** {individual_done}/{individual_total} claimed\n"
+                      f"🌍 **Global Raid Quests:** {global_done}/{global_total} claimed",
+                inline=False,
+            )
+            
+            # Raid status
+            raid_active = get_raid_active()
+            raid_defeated = get_raid_defeated()
+            raid_hp = get_raid_hp()
+            
+            if raid_defeated or raid_hp <= 0:
+                raid_status = "✅ Defeated!"
+            elif raid_active and raid_hp > 0:
+                raid_status = f"⚔️ Active! ({raid_hp:,} HP remaining)"
+            else:
+                raid_status = "🔄 Preparing..."
+            
+            embed.add_field(
+                name="⚔️ Raid Status",
+                value=raid_status,
+                inline=False,
+            )
+            
+        else:
+            # ── Normal phase ──
+            power_done = sum(1 for qid in POWER_QUESTS if user_quests.get(qid, {}).get("claimed", False))
+            combat_done = sum(1 for qid in COMBAT_QUESTS if user_quests.get(qid, {}).get("claimed", False))
+            
+            embed.add_field(
+                name="📊 Your Progress",
+                value=f"⚡ **Power Quests:** {power_done}/{len(POWER_QUESTS)} claimed\n"
+                      f"⚔️ **Combat Quests:** {combat_done}/{len(COMBAT_QUESTS)} claimed",
+                inline=False,
+            )
+            
+            # Show unlock progress
+            if power < 25:
+                embed.add_field(
+                    name="🔒 Combat Quests Locked",
+                    value=f"Reach **25% Power** to unlock Combat Quests!\nCurrent: {round(power)}%",
+                    inline=False,
+                )
+            elif power < 100:
+                embed.add_field(
+                    name="💥 RAID Phase",
+                    value=f"Reach **100% Power** to unlock the RAID PHASE!\nCurrent: {round(power)}%",
+                    inline=False,
+                )
+        
+        embed.set_footer(text="Choose a category below to see detailed quests")
+        return embed
+
+    def _build_power_quests_embed(self, user_id: int) -> discord.Embed:
+        """Build the Power Quests embed."""
+        _check_invite_quest(user_id)
+        user_quests = get_daemon_quest(user_id)
+        
+        embed = discord.Embed(
+            title="⚡ Power Quests (Always Available)",
+            description="Complete these to stabilize Jarvis and unlock Combat Quests!",
+            color=0xF39C12,
+        )
+        
+        for quest_id in POWER_QUESTS:
+            quest = QUEST_DEFS[quest_id]
+            progress = user_quests.get(quest_id, {}).get("progress", 0)
+            claimed = user_quests.get(quest_id, {}).get("claimed", False)
+            
+            status = "✅" if claimed else f"{progress}/{quest['goal']}"
+            embed.add_field(
+                name=f"{status} {quest['name']}",
+                value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
+                inline=False,
+            )
+        
+        embed.set_footer(text="Use !claimquest <quest_id> to claim completed quests")
+        return embed
+
+    def _build_combat_quests_embed(self, user_id: int) -> discord.Embed:
+        """Build the Combat Quests embed with progressive chain."""
+        user_quests = get_daemon_quest(user_id)
+        total_catches = user_quests.get("total_catches", {}).get("progress", 0)
+        
+        embed = discord.Embed(
+            title="⚔️ Combat Quests",
+            description="Jarvis is stable enough for combat operations! Push back the Daemon incursion!",
+            color=0xE74C3C,
+        )
+        
+        # ── Define the chain progression ──
+        chain_order = [
+            {"id": "catch_chain_1", "goal": 1, "display": "Catch 1 Daemon (Chain 1/3)"},
+            {"id": "catch_chain_2", "goal": 5, "display": "Catch 5 Daemons (Chain 2/3)"},
+            {"id": "catch_chain_3", "goal": 10, "display": "Catch 10 Daemons (Chain 3/3)"},
+            {"id": "catch_chain_4", "goal": 25, "display": "Catch 25 Daemons"},
+            {"id": "catch_chain_5", "goal": 50, "display": "Catch 50 Daemons"},
+            {"id": "catch_chain_6", "goal": 100, "display": "Catch 100 Daemons"},
+        ]
+        
+        # ── Find which chain quest is active ──
+        active_chain = None
+        for chain in chain_order:
+            if user_quests.get(chain["id"], {}).get("claimed", False):
+                continue
+            if total_catches >= chain["goal"]:
+                active_chain = chain["id"]
+                break
+        
+        if active_chain is None:
+            has_any = any(user_quests.get(c["id"], {}).get("claimed", False) for c in chain_order)
+            if has_any:
+                active_chain = "catch_chain_6"
+            else:
+                active_chain = "catch_chain_1"
+        
+        # ── Build quest list ──
+        for quest_id in COMBAT_QUESTS:
+            quest = QUEST_DEFS[quest_id]
+            is_chain = quest_id in [c["id"] for c in chain_order]
+            if is_chain and quest_id != active_chain:
+                continue
+            
+            progress = user_quests.get(quest_id, {}).get("progress", 0)
+            claimed = user_quests.get(quest_id, {}).get("claimed", False)
+            
+            if quest_id == active_chain:
+                chain_info = next((c for c in chain_order if c["id"] == quest_id), None)
+                if chain_info:
+                    progress_display = min(total_catches, chain_info["goal"])
+                    status = "✅" if claimed else f"{progress_display}/{chain_info['goal']}"
+                else:
+                    status = "✅" if claimed else f"{progress}/{quest['goal']}"
+            else:
+                status = "✅" if claimed else f"{progress}/{quest['goal']}"
+            
+            extra_req = quest.get("unlock_power", 25)
+            if extra_req > 25 and get_jarvis_power() < extra_req:
+                status = f"🔒 (needs {extra_req}% Power)"
+            
+            embed.add_field(
+                name=f"{status} {quest['name']}",
+                value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
+                inline=False,
+            )
+        
+        embed.set_footer(text="Use !claimquest <quest_id> to claim completed quests")
+        return embed
 
     def _build_individual_raid_quests_embed(self, user_id: int) -> discord.Embed:
         """Build the Individual Raid Quests embed."""
@@ -2229,11 +2520,11 @@ class SystemBreach(commands.Cog):
             claimed = user_quests.get(quest_id, {}).get("claimed", False)
             
             # Get global progress for this quest
-            if quest_id in ["raid_damage_6000", "raid_damage_15000", "raid_damage_30000"]:
+            if quest_id in ["raid_damage_2500", "raid_damage_5000", "raid_damage_7500", "raid_damage_10000"]:
                 progress = global_damage
             elif quest_id == "raid_defeat":
                 progress = 1 if raid_defeated else 0
-            elif quest_id == "raid_participate_50":
+            elif quest_id in ["raid_participate_25", "raid_participate_50"]:
                 progress = participants
             else:
                 progress = 0
@@ -2253,299 +2544,7 @@ class SystemBreach(commands.Cog):
         
         embed.set_footer(text="Use !claimquest <quest_id> to claim completed quests")
         return embed
-    
-    def _build_quest_menu_embed(self, user_id: int) -> discord.Embed:
-        """Build the quest menu embed."""
-        power = get_jarvis_power()
-        
-        embed = discord.Embed(
-            title="📜 System Breach — Quests",
-            description=(
-                "Complete quests to earn **Jarvis Credits** and **Power**!\n\n"
-                f"⚡ **Current Power:** `{round(power)}%`"
-            ),
-            color=discord.Color.blurple(),
-        )
-        
-        user_quests = get_daemon_quest(user_id)
-        
-        if power >= 100:
-            # ── RAID PHASE ──
-            embed.description += "\n💥 **RAID PHASE ACTIVE!**"
-            embed.color = 0xFF6B00
-            
-            # Individual Raid Quests progress
-            individual_done = sum(1 for qid in INDIVIDUAL_RAID_QUESTS if user_quests.get(qid, {}).get("claimed", False))
-            individual_total = len(INDIVIDUAL_RAID_QUESTS)
-            
-            # Global Raid Quests progress
-            global_done = sum(1 for qid in RAID_QUESTS if user_quests.get(qid, {}).get("claimed", False))
-            global_total = len(RAID_QUESTS)
-            
-            embed.add_field(
-                name="📊 Your Raid Progress",
-                value=f"🎯 **Individual Raid Quests:** {individual_done}/{individual_total} claimed\n"
-                    f"🌍 **Global Raid Quests:** {global_done}/{global_total} claimed",
-                inline=False,
-            )
-            
-            # Raid status
-            raid_active = get_raid_active()
-            raid_defeated = get_raid_defeated()
-            raid_hp = get_raid_hp()
-            
-            if raid_defeated or raid_hp <= 0:
-                raid_status = "✅ Defeated!"
-            elif raid_active and raid_hp > 0:
-                raid_status = f"⚔️ Active! ({raid_hp:,} HP remaining)"
-            else:
-                raid_status = "🔄 Preparing..."
-            
-            embed.add_field(
-                name="⚔️ Raid Status",
-                value=raid_status,
-                inline=False,
-            )
-            
-        else:
-            # ── Normal phase ──
-            power_done = sum(1 for qid in POWER_QUESTS if user_quests.get(qid, {}).get("claimed", False))
-            combat_done = sum(1 for qid in COMBAT_QUESTS if user_quests.get(qid, {}).get("claimed", False))
-            
-            embed.add_field(
-                name="📊 Your Progress",
-                value=f"⚡ **Power Quests:** {power_done}/{len(POWER_QUESTS)} claimed\n"
-                    f"⚔️ **Combat Quests:** {combat_done}/{len(COMBAT_QUESTS)} claimed",
-                inline=False,
-            )
-            
-            # Show unlock progress
-            if power < 25:
-                embed.add_field(
-                    name="🔒 Combat Quests Locked",
-                    value=f"Reach **25% Power** to unlock Combat Quests!\nCurrent: {round(power)}%",
-                    inline=False,
-                )
-            elif power < 100:
-                embed.add_field(
-                    name="💥 RAID Phase",
-                    value=f"Reach **100% Power** to unlock the RAID PHASE!\nCurrent: {round(power)}%",
-                    inline=False,
-                )
-        
-        embed.set_footer(text="Choose a category below to see detailed quests")
-        return embed
 
-    def _build_power_quests_embed(self, user_id: int) -> discord.Embed:
-        """Build the Power Quests embed."""
-        _check_invite_quest(user_id)
-        user_quests = get_daemon_quest(user_id)
-        
-        embed = discord.Embed(
-            title="⚡ Power Quests (Always Available)",
-            description="Complete these to stabilize Jarvis and unlock Combat Quests!",
-            color=0xF39C12,
-        )
-        
-        for quest_id in POWER_QUESTS:
-            quest = QUEST_DEFS[quest_id]
-            progress = user_quests.get(quest_id, {}).get("progress", 0)
-            claimed = user_quests.get(quest_id, {}).get("claimed", False)
-            
-            status = "✅" if claimed else f"{progress}/{quest['goal']}"
-            embed.add_field(
-                name=f"{status} {quest['name']}",
-                value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
-                inline=False,
-            )
-        
-        embed.set_footer(text="Use !claimquest <quest_id> to claim completed quests")
-        return embed
-
-    def _build_combat_quests_embed(self, user_id: int) -> discord.Embed:
-        """Build the Combat Quests embed with progressive chain."""
-        user_quests = get_daemon_quest(user_id)
-        total_catches = user_quests.get("total_catches", {}).get("progress", 0)
-        power = get_jarvis_power()
-        
-        embed = discord.Embed(
-            title="⚔️ Combat Quests",
-            description="Jarvis is stable enough for combat operations! Push back the Daemon incursion!",
-            color=0xE74C3C,
-        )
-        
-        # ── Check if RAID PHASE is unlocked (power >= 100) ──
-        if power >= 100:
-            embed.description = "💥 **RAID PHASE UNLOCKED!**\nThe Architect is here! Complete raid quests to earn massive rewards!"
-            embed.color = 0xFF6B00
-            
-            # ── Get raid status ──
-            raid_active = get_raid_active()
-            raid_defeated = get_raid_defeated()
-            raid_hp = get_raid_hp()
-            
-            # ── Global Raid Quests ──
-            global_progress = get_raid_global_progress()
-            global_damage = global_progress.get("total_damage", 0)
-            participants = get_raid_participant_count()
-            
-            # Status message based on raid state
-            if raid_defeated or raid_hp <= 0:
-                status_msg = "✅ **Raid Defeated!** The Architect has been destroyed! 🎉"
-            elif raid_active and raid_hp > 0:
-                hp_percent = (raid_hp / RAID_BOSS_HP) * 100
-                status_msg = f"⚔️ **Raid Active!** HP: {raid_hp:,}/{RAID_BOSS_HP:,} ({round(hp_percent)}%)"
-            else:
-                status_msg = "🔄 **Raid Preparing...** The Architect will appear shortly!"
-            
-            embed.add_field(
-                name="🌍 Global Raid Progress",
-                value=f"{status_msg}\nTotal Damage: **{global_damage:,}**\nParticipants: **{participants}**",
-                inline=False,
-            )
-            
-            # ── Show Global Raid Quests ──
-            embed.add_field(
-                name="🌍 Global Raid Quests (All Players)",
-                value="Complete these together as a community!",
-                inline=False,
-            )
-            
-            for quest_id in RAID_QUESTS:
-                quest = QUEST_DEFS.get(quest_id)
-                if not quest:
-                    continue
-                claimed = user_quests.get(quest_id, {}).get("claimed", False)
-                
-                # Get global progress for this quest
-                if quest_id in ["raid_damage_6000", "raid_damage_15000", "raid_damage_30000"]:
-                    progress = global_damage
-                elif quest_id == "raid_defeat":
-                    progress = 1 if raid_defeated else 0
-                elif quest_id == "raid_participate_50":
-                    progress = participants
-                else:
-                    progress = 0
-                
-                status = "✅" if claimed else f"{progress}/{quest['goal']}"
-                embed.add_field(
-                    name=f"{status} {quest['name']}",
-                    value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
-                    inline=False,
-                )
-            
-            # ── Show Individual Raid Quests ──
-            embed.add_field(
-                name="🎯 Personal Raid Quests",
-                value="Your personal raid progression!",
-                inline=False,
-            )
-            
-            for quest_id in INDIVIDUAL_RAID_QUESTS:
-                quest = QUEST_DEFS.get(quest_id)
-                if not quest:
-                    continue
-                progress = user_quests.get(quest_id, {}).get("progress", 0)
-                claimed = user_quests.get(quest_id, {}).get("claimed", False)
-                
-                status = "✅" if claimed else f"{progress}/{quest['goal']}"
-                embed.add_field(
-                    name=f"{status} {quest['name']}",
-                    value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
-                    inline=False,
-                )
-            
-            # ── Show regular combat quests that are still available ──
-            embed.add_field(
-                name="📋 Regular Combat Quests (Still Available)",
-                value="These quests are still available to complete!",
-                inline=False,
-            )
-            
-            # Show non-chain combat quests that aren't claimed
-            for quest_id in COMBAT_QUESTS:
-                if quest_id.startswith("catch_chain_"):
-                    continue  # Skip chain quests
-                quest = QUEST_DEFS.get(quest_id)
-                if not quest:
-                    continue
-                progress = user_quests.get(quest_id, {}).get("progress", 0)
-                claimed = user_quests.get(quest_id, {}).get("claimed", False)
-                
-                if claimed:
-                    status = "✅"
-                else:
-                    status = f"{progress}/{quest['goal']}"
-                
-                embed.add_field(
-                    name=f"{status} {quest['name']}",
-                    value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
-                    inline=False,
-                )
-        
-        else:
-            # ── Regular combat quests (power < 100) ──
-            # ── Define the chain progression ──
-            chain_order = [
-                {"id": "catch_chain_1", "goal": 1, "display": "Catch 1 Daemon (Chain 1/3)"},
-                {"id": "catch_chain_2", "goal": 5, "display": "Catch 5 Daemons (Chain 2/3)"},
-                {"id": "catch_chain_3", "goal": 10, "display": "Catch 10 Daemons (Chain 3/3)"},
-                {"id": "catch_chain_4", "goal": 25, "display": "Catch 25 Daemons"},
-                {"id": "catch_chain_5", "goal": 50, "display": "Catch 50 Daemons"},
-                {"id": "catch_chain_6", "goal": 100, "display": "Catch 100 Daemons"},
-            ]
-            
-            # ── Find which chain quest is active ──
-            active_chain = None
-            for chain in chain_order:
-                if user_quests.get(chain["id"], {}).get("claimed", False):
-                    continue
-                if total_catches >= chain["goal"]:
-                    active_chain = chain["id"]
-                    break
-            
-            if active_chain is None:
-                has_any = any(user_quests.get(c["id"], {}).get("claimed", False) for c in chain_order)
-                if has_any:
-                    active_chain = "catch_chain_6"
-                else:
-                    active_chain = "catch_chain_1"
-            
-            # ── Build quest list ──
-            for quest_id in COMBAT_QUESTS:
-                quest = QUEST_DEFS.get(quest_id)
-                if not quest:
-                    continue
-                is_chain = quest_id in [c["id"] for c in chain_order]
-                if is_chain and quest_id != active_chain:
-                    continue
-                
-                progress = user_quests.get(quest_id, {}).get("progress", 0)
-                claimed = user_quests.get(quest_id, {}).get("claimed", False)
-                
-                if quest_id == active_chain:
-                    chain_info = next((c for c in chain_order if c["id"] == quest_id), None)
-                    if chain_info:
-                        progress_display = min(total_catches, chain_info["goal"])
-                        status = "✅" if claimed else f"{progress_display}/{chain_info['goal']}"
-                    else:
-                        status = "✅" if claimed else f"{progress}/{quest['goal']}"
-                else:
-                    status = "✅" if claimed else f"{progress}/{quest['goal']}"
-                
-                extra_req = quest.get("unlock_power", 25)
-                if extra_req > 25 and get_jarvis_power() < extra_req:
-                    status = f"🔒 (needs {extra_req}% Power)"
-                
-                embed.add_field(
-                    name=f"{status} {quest['name']}",
-                    value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
-                    inline=False,
-                )
-        
-        embed.set_footer(text="Use !claimquest <quest_id> to claim completed quests")
-        return embed
-    
     # ── Spawning ──────────────────────────────────────────────────────────────
 
     @commands.Cog.listener()
@@ -2555,6 +2554,7 @@ class SystemBreach(commands.Cog):
 
         content = message.content.strip().lower()
         user_id = message.author.id
+        guild_id = message.guild.id
 
         # ── #2: !catch with no spawn ──
         if content == "!catch":
@@ -2609,6 +2609,10 @@ class SystemBreach(commands.Cog):
         if "system breach" in content:
             bump_daemon_quest(message.author.id, "say_breach", 1)
             await self._check_quest_completion(message, message.author.id, "say_breach")
+
+        # ── CHECK IF CHANNEL IS WHITELISTED FOR SPAWNS ──
+        if not is_spawn_channel(guild_id, message.channel.id):
+            return
 
         now = time.time()
         last = _last_spawn_attempt.get(message.channel.id, 0)
@@ -2856,11 +2860,11 @@ class SystemBreach(commands.Cog):
         
         # ── For global raid quests, use global progress ──
         if quest.get("type") == "raid_global":
-            if quest_id in ["raid_damage_6000", "raid_damage_15000", "raid_damage_30000"]:
+            if quest_id in ["raid_damage_2500", "raid_damage_5000", "raid_damage_7500", "raid_damage_10000"]:
                 progress = get_raid_global_progress().get("total_damage", 0)
             elif quest_id == "raid_defeat":
                 progress = 1 if get_raid_defeated() else 0
-            elif quest_id == "raid_participate_50":
+            elif quest_id in ["raid_participate_25", "raid_participate_50"]:
                 progress = get_raid_participant_count()
         
         # ── For personal raid quests ──
@@ -3600,7 +3604,7 @@ class SystemBreach(commands.Cog):
         
         # ── Special handling for global raid quests ──
         if quest.get("type") == "raid_global":
-            if quest_id in ["raid_damage_6000", "raid_damage_15000", "raid_damage_30000"]:
+            if quest_id in ["raid_damage_2500", "raid_damage_5000", "raid_damage_7500", "raid_damage_10000"]:
                 actual_progress = get_raid_global_progress().get("total_damage", 0)
                 if actual_progress < quest["goal"]:
                     await ctx.reply(f"❌ **{quest['name']}** global progress: {actual_progress}/{quest['goal']}. Not completed yet.")
@@ -3609,9 +3613,9 @@ class SystemBreach(commands.Cog):
                 if not get_raid_defeated():
                     await ctx.reply(f"❌ **{quest['name']}** - The raid has not been defeated yet!")
                     return
-            elif quest_id == "raid_participate_50":
+            elif quest_id in ["raid_participate_25", "raid_participate_50"]:
                 if get_raid_participant_count() < quest["goal"]:
-                    await ctx.reply(f"❌ **{quest['name']}** - Only {get_raid_participant_count()}/50 players have participated!")
+                    await ctx.reply(f"❌ **{quest['name']}** - Only {get_raid_participant_count()}/{quest['goal']} players have participated!")
                     return
         
         # ── For personal raid quests, check progress normally ──
@@ -3623,11 +3627,11 @@ class SystemBreach(commands.Cog):
         
         # For global quests, use the actual progress we already calculated
         if quest.get("type") == "raid_global":
-            if quest_id in ["raid_damage_6000", "raid_damage_15000", "raid_damage_30000"]:
+            if quest_id in ["raid_damage_2500", "raid_damage_5000", "raid_damage_7500", "raid_damage_10000"]:
                 progress = get_raid_global_progress().get("total_damage", 0)
             elif quest_id == "raid_defeat":
                 progress = 1 if get_raid_defeated() else 0
-            elif quest_id == "raid_participate_50":
+            elif quest_id in ["raid_participate_25", "raid_participate_50"]:
                 progress = get_raid_participant_count()
         
         if progress < quest["goal"]:
@@ -3890,6 +3894,122 @@ class SystemBreach(commands.Cog):
         
         msg = await ctx.reply(embed=embed, view=view)
         _event_hub_messages[ctx.channel.id] = msg.id
+
+    # ── PART 10: Spawn Channel Management ──────────────────────────────────
+
+    @commands.command(name="spawnchannel", aliases=["sc"])
+    async def spawn_channel(self, ctx: commands.Context, action: str = None, channel: discord.TextChannel = None):
+        """Manage spawn channels.
+        Usage: !spawnchannel list  (anyone)
+               !spawnchannel add #channel  (admin only)
+               !spawnchannel remove #channel  (admin only)
+               !spawnchannel reset  (admin only)
+        """
+        guild_id = ctx.guild.id
+        
+        # ── Check if user is admin for certain actions ──
+        is_admin = ctx.author.guild_permissions.administrator
+        
+        if action is None:
+            # ── Show current channels (anyone can use) ──
+            channels = get_spawn_channels(guild_id)
+            embed = discord.Embed(
+                title="📋 Spawn Channels",
+                description=(
+                    "**Commands:**\n"
+                    "`!spawnchannel list` - List all channels (anyone)\n"
+                    "`!spawnchannel add #channel` - Add a channel (admin only)\n"
+                    "`!spawnchannel remove #channel` - Remove a channel (admin only)\n"
+                    "`!spawnchannel reset` - Reset all channels (admin only)"
+                ),
+                color=discord.Color.blue(),
+            )
+            
+            if channels:
+                channel_list = []
+                for cid in channels:
+                    ch = ctx.guild.get_channel(cid)
+                    if ch:
+                        channel_list.append(f"#{ch.name}")
+                if channel_list:
+                    embed.add_field(
+                        name=f"✅ Active Channels ({len(channel_list)})",
+                        value="\n".join(channel_list[:15]) if channel_list else "None",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="⚠️ Status",
+                        value="⚠️ Some channels are missing or deleted.",
+                        inline=False
+                    )
+            else:
+                embed.add_field(
+                    name="ℹ️ Status",
+                    value="🌍 **Spawns work everywhere!**\nUse `!spawnchannel add #channel` to limit spawns to specific channels.",
+                    inline=False
+                )
+            
+            await ctx.reply(embed=embed)
+            return
+        
+        # ── ADMIN ONLY ACTIONS ──
+        if not is_admin:
+            await ctx.reply("❌ You need **Administrator** permissions to use this command.")
+            return
+        
+        if action.lower() == "add":
+            if channel is None:
+                await ctx.reply("❌ Please specify a channel: `!spawnchannel add #channel`")
+                return
+            
+            add_spawn_channel(guild_id, channel.id)
+            await ctx.reply(f"✅ Added #{channel.name} to spawn channels!")
+        
+        elif action.lower() == "remove":
+            if channel is None:
+                await ctx.reply("❌ Please specify a channel: `!spawnchannel remove #channel`")
+                return
+            
+            remove_spawn_channel(guild_id, channel.id)
+            await ctx.reply(f"✅ Removed #{channel.name} from spawn channels!")
+        
+        elif action.lower() == "reset":
+            _data["spawn_channels"][str(guild_id)] = {"channels": []}
+            from cogs.state import _schedule_save
+            _schedule_save("spawn_channels")
+            await ctx.reply("✅ Spawn channels reset! Spawns now work everywhere in this server.")
+        
+        elif action.lower() == "list":
+            # ── List channels (anyone can use, but handled here too) ──
+            channels = get_spawn_channels(guild_id)
+            embed = discord.Embed(
+                title="📋 Whitelisted Spawn Channels",
+                color=discord.Color.blue(),
+            )
+            
+            if not channels:
+                embed.description = "🌍 No channels whitelisted. Spawns work **everywhere**."
+            else:
+                channel_list = []
+                for cid in channels:
+                    ch = ctx.guild.get_channel(cid)
+                    if ch:
+                        channel_list.append(f"#{ch.name}")
+                    else:
+                        channel_list.append(f"❌ Unknown ({cid})")
+                
+                embed.description = "\n".join(channel_list) if channel_list else "None"
+                embed.add_field(
+                    name="Total Channels",
+                    value=str(len(channel_list)),
+                    inline=True
+                )
+            
+            await ctx.reply(embed=embed)
+
+        else:
+            await ctx.reply("❌ Unknown action. Use `add`, `remove`, `list`, or `reset`.")
 
     # ── PART 10: Mid-Boss (Corrupted Core) ──────────────────────────────────
 
