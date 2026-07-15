@@ -398,6 +398,10 @@ def get_raid_damage_bonus() -> float:
 # CHANNEL WHITELIST FUNCTIONS (Per Server)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CHANNEL WHITELIST FUNCTIONS (Per Server)
+# ══════════════════════════════════════════════════════════════════════════════
+
 def get_spawn_channels(guild_id: int) -> list[int]:
     """Get list of channel IDs where spawns are allowed for a specific guild."""
     guild_data = _data.get("spawn_channels", {}).get(str(guild_id), {})
@@ -431,13 +435,13 @@ def remove_spawn_channel(guild_id: int, channel_id: int) -> None:
             _schedule_save("spawn_channels")
 
 def is_spawn_channel(guild_id: int, channel_id: int) -> bool:
-    """Check if a channel is whitelisted for spawns in a specific guild."""
+    """Check if a channel is whitelisted for spawns in a specific guild.
+    If no channels are whitelisted, spawns are DISABLED."""
     channels = get_spawn_channels(guild_id)
-    # If no channels are whitelisted, spawns work everywhere
+    # If no channels are whitelisted, spawns are DISABLED
     if not channels:
-        return True
+        return False  # <- Changed from True to False
     return channel_id in channels
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MID-BOSS FIGHT (Activates at 50% Power)
@@ -3901,9 +3905,9 @@ class SystemBreach(commands.Cog):
     async def spawn_channel(self, ctx: commands.Context, action: str = None, channel: discord.TextChannel = None):
         """Manage spawn channels.
         Usage: !spawnchannel list  (anyone)
-               !spawnchannel add #channel  (admin only)
-               !spawnchannel remove #channel  (admin only)
-               !spawnchannel reset  (admin only)
+            !spawnchannel add #channel  (admin only)
+            !spawnchannel remove #channel  (admin only)
+            !spawnchannel reset  (admin only)
         """
         guild_id = ctx.guild.id
         
@@ -3937,6 +3941,11 @@ class SystemBreach(commands.Cog):
                         value="\n".join(channel_list[:15]) if channel_list else "None",
                         inline=False
                     )
+                    embed.add_field(
+                        name="ℹ️ Status",
+                        value="🟢 **Spawns are ACTIVE** in these channels!",
+                        inline=False
+                    )
                 else:
                     embed.add_field(
                         name="⚠️ Status",
@@ -3945,8 +3954,8 @@ class SystemBreach(commands.Cog):
                     )
             else:
                 embed.add_field(
-                    name="ℹ️ Status",
-                    value="🌍 **Spawns work everywhere!**\nUse `!spawnchannel add #channel` to limit spawns to specific channels.",
+                    name="🚫 Status",
+                    value="❌ **No channels set up!**\nSpawns are **DISABLED** everywhere.\n\nAdd a channel with `!spawnchannel add #channel` to enable spawns.",
                     inline=False
                 )
             
@@ -3964,7 +3973,9 @@ class SystemBreach(commands.Cog):
                 return
             
             add_spawn_channel(guild_id, channel.id)
-            await ctx.reply(f"✅ Added #{channel.name} to spawn channels!")
+            
+            channels = get_spawn_channels(guild_id)
+            await ctx.reply(f"✅ Added #{channel.name} to spawn channels! ({len(channels)} channel(s) total)")
         
         elif action.lower() == "remove":
             if channel is None:
@@ -3972,16 +3983,21 @@ class SystemBreach(commands.Cog):
                 return
             
             remove_spawn_channel(guild_id, channel.id)
-            await ctx.reply(f"✅ Removed #{channel.name} from spawn channels!")
+            channels = get_spawn_channels(guild_id)
+            
+            if not channels:
+                await ctx.reply(f"✅ Removed #{channel.name} from spawn channels! No channels left - spawns are now **DISABLED**.")
+            else:
+                await ctx.reply(f"✅ Removed #{channel.name} from spawn channels! ({len(channels)} channel(s) remaining)")
         
         elif action.lower() == "reset":
             _data["spawn_channels"][str(guild_id)] = {"channels": []}
             from cogs.state import _schedule_save
             _schedule_save("spawn_channels")
-            await ctx.reply("✅ Spawn channels reset! Spawns now work everywhere in this server.")
+            await ctx.reply("✅ Spawn channels reset! No channels set - spawns are now **DISABLED**.")
         
         elif action.lower() == "list":
-            # ── List channels (anyone can use, but handled here too) ──
+            # ── List channels (anyone can use) ──
             channels = get_spawn_channels(guild_id)
             embed = discord.Embed(
                 title="📋 Whitelisted Spawn Channels",
@@ -3989,7 +4005,7 @@ class SystemBreach(commands.Cog):
             )
             
             if not channels:
-                embed.description = "🌍 No channels whitelisted. Spawns work **everywhere**."
+                embed.description = "🚫 **No channels whitelisted. Spawns are DISABLED.**\nUse `!spawnchannel add #channel` to enable spawns."
             else:
                 channel_list = []
                 for cid in channels:
@@ -4005,11 +4021,17 @@ class SystemBreach(commands.Cog):
                     value=str(len(channel_list)),
                     inline=True
                 )
+                embed.add_field(
+                    name="Status",
+                    value="🟢 Spawns are **ACTIVE** in these channels",
+                    inline=True
+                )
             
             await ctx.reply(embed=embed)
 
         else:
             await ctx.reply("❌ Unknown action. Use `add`, `remove`, `list`, or `reset`.")
+        
 
     # ── PART 10: Mid-Boss (Corrupted Core) ──────────────────────────────────
 
