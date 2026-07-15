@@ -18,6 +18,7 @@ This is the main System Breach cog that consolidates all parts:
 
 import random
 import time
+import json
 import asyncio
 import re
 import discord
@@ -33,10 +34,123 @@ from cogs.state import (
     _data,
     grant_system_breach_badge,
     get_system_breach_badges,
+    _save_key as _sb_save_key_to_db,
 )
+# Module reference (NOT `from cogs.state import _db`) — _db is reassigned by
+# cogs.state.init_db() *after* this module is imported, so we must always
+# read it off the module (cogs.state._db) at call time, never bind it once.
+import cogs.state as _state_module
 
 # ── For emoji display ──
 JC_EMOJI = "🪙"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SYSTEM BREACH PERSISTENCE LAYER  (self-contained — does NOT touch cogs/state.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# cogs/state.py only knows how to save/load a fixed allow-list of keys
+# (_SERIALISE + the load block in init_db()). None of the System Breach keys
+# below were ever added to that allow-list, so every _schedule_save(key) call
+# for them was silently a no-op — the data only ever lived in the in-memory
+# `_data` dict and was lost on every restart. This block gives those same
+# keys their own save/load path, writing to the exact same Turso `state`
+# table cogs/state.py already creates, without requiring any edit to
+# cogs/state.py or any other cog.
+
+SB_PERSISTED_KEYS = [
+    "jarvis_power",
+    "event_data",
+    "daemons",
+    "daemon_quests",
+    "engagement_days",
+    "raid_stats",
+    "raid_state",
+    "fusion_streaks",
+    "stabilizer_used",
+    "spawn_channels",
+    "mid_boss_state",
+    "raid_global_progress",
+]
+
+_sb_save_tasks: dict[str, asyncio.Task] = {}
+
+
+def _schedule_save(key: str) -> None:
+    """Debounced save for System Breach state (waits 2s after the last
+    change before writing — same pattern as cogs.state._schedule_save).
+    No-op in memory-only mode (no TURSO_URL/TOKEN set), same as the rest
+    of the bot."""
+    if key not in SB_PERSISTED_KEYS:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = _sb_save_tasks.get(key)
+    if task and not task.done():
+        task.cancel()
+    _sb_save_tasks[key] = loop.create_task(_sb_debounced_save(key))
+
+
+async def _sb_debounced_save(key: str, delay: float = 2.0) -> None:
+    await asyncio.sleep(delay)
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_closed() or not loop.is_running():
+            return
+        await _sb_save_key_to_db(key, _data.get(key))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # Must never crash the Task silently or raise into the event loop.
+        print(f"❌ Unexpected error in System Breach debounced save ({key}): {e}")
+
+
+async def _sb_load_all_from_db() -> None:
+    """Load every System Breach key from Turso into `_data`. Call once at
+    cog setup, AFTER cogs.state.init_db() has already connected (main.py
+    calls init_db() before load_extension(), so this ordering already
+    holds). No-op in memory-only mode."""
+    db = _state_module._db
+    if db is None:
+        print(
+            "⚠️  System Breach: Turso not connected — event state "
+            "(power, daemons, quests, bosses, etc.) will NOT persist "
+            "across restarts. Add TURSO_URL/TURSO_TOKEN to persist it."
+        )
+        return
+
+    placeholders = ",".join("?" for _ in SB_PERSISTED_KEYS)
+    rows = await db.run(
+        lambda: db.conn.execute(
+            f"SELECT key, value FROM state WHERE key IN ({placeholders})",
+            tuple(SB_PERSISTED_KEYS),
+        ).fetchall(),
+        default=[],
+    )
+
+    loaded = 0
+    for key, raw_value in rows:
+        try:
+            _data[key] = json.loads(raw_value)
+            loaded += 1
+        except Exception as e:
+            print(f"❌ System Breach: failed to load '{key}' from DB: {e}")
+
+    print(f"✅ System Breach: restored {loaded}/{len(SB_PERSISTED_KEYS)} state key(s) from Turso.")
+
+
+async def flush_system_breach_saves() -> None:
+    """Immediately persist every key with a pending debounced save,
+    skipping the 2s wait. Available for a future SIGTERM hook; not wired
+    up automatically since that would require editing main.py."""
+    for key, task in list(_sb_save_tasks.items()):
+        if not task.done():
+            task.cancel()
+        try:
+            await _sb_save_key_to_db(key, _data.get(key))
+        except Exception as e:
+            print(f"❌ System Breach: failed to flush '{key}': {e}")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # POWER & EVENT CONTROL FUNCTIONS
@@ -65,13 +179,11 @@ def add_jarvis_power(amount: float) -> None:
         if get_mid_boss_defeated() or get_mid_boss_hp() <= 0:
             set_raid_active(True)
     
-    from cogs.state import _schedule_save
     _schedule_save("jarvis_power")
 
 def reset_jarvis_power() -> None:
     """Reset Jarvis Power to 0 (called when event starts)."""
     _data["jarvis_power"] = {"value": 0.0, "last_snapshot": 0.0, "last_snapshot_time": 0.0, "dip_count": 0}
-    from cogs.state import _schedule_save
     _schedule_save("jarvis_power")
 
 def set_event_active(active: bool, ends_at: float | None = None) -> None:
@@ -83,7 +195,6 @@ def set_event_active(active: bool, ends_at: float | None = None) -> None:
         "start_time": time.time() if active else old_event.get("start_time", 0.0),
         "dip_count": old_event.get("dip_count", 0),
     }
-    from cogs.state import _schedule_save
     _schedule_save("event_data")
 
 def get_event_data() -> dict:
@@ -108,7 +219,6 @@ def add_daemon(user_id: int, species_id: str) -> str:
     instance_id = str(entry["next_id"])
     entry["next_id"] += 1
     entry["owned"][instance_id] = {"species": species_id, "caught_at": time.time()}
-    from cogs.state import _schedule_save
     _schedule_save("daemons")
     return instance_id
 
@@ -122,7 +232,6 @@ def remove_daemon(user_id: int, instance_id: str) -> bool:
     if entry.get("equipped") == instance_id:
         entry["equipped"] = None
     entry["combine_slots"] = [slot if slot != instance_id else None for slot in entry.get("combine_slots", [None, None, None])]
-    from cogs.state import _schedule_save
     _schedule_save("daemons")
     return True
 
@@ -135,7 +244,6 @@ def equip_daemon(user_id: int, instance_id: str | None) -> bool:
     if instance_id is not None and instance_id not in entry.get("owned", {}):
         return False
     entry["equipped"] = instance_id
-    from cogs.state import _schedule_save
     _schedule_save("daemons")
     return True
 
@@ -160,7 +268,6 @@ def set_combine_slots(user_id: int, slot0: str | None, slot1: str | None, slot2:
         if slot is not None and slot not in entry.get("owned", {}):
             return False
     entry["combine_slots"] = [slot0, slot1, slot2]
-    from cogs.state import _schedule_save
     _schedule_save("daemons")
     return True
 
@@ -182,7 +289,6 @@ def bump_daemon_quest(user_id: int, quest_id: str, amount: int = 1) -> int:
     if quest_id not in q:
         q[quest_id] = {"progress": 0, "claimed": False}
     q[quest_id]["progress"] = q[quest_id].get("progress", 0) + amount
-    from cogs.state import _schedule_save
     _schedule_save("daemon_quests")
     return q[quest_id]["progress"]
 
@@ -197,7 +303,6 @@ def mark_engagement_action(user_id: int) -> None:
     if today not in entry["active_days"]:
         entry["active_days"].append(today)
     entry["last_action"] = time.time()
-    from cogs.state import _schedule_save
     _schedule_save("engagement_days")
 
 def get_engagement_days_count(user_id: int) -> int:
@@ -212,7 +317,6 @@ def add_raid_damage(user_id: int, damage: int) -> int:
         _data["raid_stats"] = {}
     stats = _data["raid_stats"].setdefault(uid, {"damage": 0})
     stats["damage"] = stats.get("damage", 0) + damage
-    from cogs.state import _schedule_save
     _schedule_save("raid_stats")
     return stats["damage"]
 
@@ -236,7 +340,6 @@ def clear_system_breach_data(user_id: int) -> None:
     _data.get("daemons", {}).pop(uid, None)
     _data.get("daemon_quests", {}).pop(uid, None)
     _data.get("engagement_days", {}).pop(uid, None)
-    from cogs.state import _schedule_save
     _schedule_save("daemons")
     _schedule_save("daemon_quests")
     _schedule_save("engagement_days")
@@ -297,7 +400,6 @@ def save_raid_state(hp: int, active: bool, last_hit: dict, start_time: int, fina
         "start_time": start_time,
         "final_blow_user": final_blow_user
     }
-    from cogs.state import _schedule_save
     _schedule_save("raid_state")
 
 def reset_raid_state() -> None:
@@ -309,7 +411,6 @@ def reset_raid_state() -> None:
         "start_time": 0,
         "final_blow_user": None
     }
-    from cogs.state import _schedule_save
     _schedule_save("raid_state")
 
 # ── Convenience functions for raid state ──
@@ -363,13 +464,11 @@ def set_fusion_streak(user_id: int, streak: int) -> None:
     if "fusion_streaks" not in _data:
         _data["fusion_streaks"] = {}
     _data["fusion_streaks"][str(user_id)] = streak
-    from cogs.state import _schedule_save
     _schedule_save("fusion_streaks")
 
 def reset_fusion_streak(user_id: int) -> None:
     if "fusion_streaks" in _data:
         _data["fusion_streaks"].pop(str(user_id), None)
-        from cogs.state import _schedule_save
     _schedule_save("fusion_streaks")
 
 # ── Stabilizer Used Persistence ──
@@ -380,7 +479,6 @@ def set_stabilizer_used(user_id: int, value: bool) -> None:
     if "stabilizer_used" not in _data:
         _data["stabilizer_used"] = {}
     _data["stabilizer_used"][str(user_id)] = value
-    from cogs.state import _schedule_save
     _schedule_save("stabilizer_used")
 
 # ── Raid Damage Bonus ──
@@ -420,7 +518,6 @@ def add_spawn_channel(guild_id: int, channel_id: int) -> None:
     if channel_id not in channels:
         channels.append(channel_id)
         _data["spawn_channels"][guild_str]["channels"] = channels
-        from cogs.state import _schedule_save
         _schedule_save("spawn_channels")
 
 def remove_spawn_channel(guild_id: int, channel_id: int) -> None:
@@ -431,7 +528,6 @@ def remove_spawn_channel(guild_id: int, channel_id: int) -> None:
         if channel_id in channels:
             channels.remove(channel_id)
             _data["spawn_channels"][guild_str]["channels"] = channels
-            from cogs.state import _schedule_save
             _schedule_save("spawn_channels")
 
 def is_spawn_channel(guild_id: int, channel_id: int) -> bool:
@@ -472,7 +568,6 @@ def save_mid_boss_state(hp: int, active: bool, defeated: bool, last_hit: dict, f
         "last_hit": last_hit,
         "final_blow_user": final_blow_user
     }
-    from cogs.state import _schedule_save
     _schedule_save("mid_boss_state")
 
 def reset_mid_boss_state() -> None:
@@ -484,7 +579,6 @@ def reset_mid_boss_state() -> None:
         "last_hit": {},
         "final_blow_user": None
     }
-    from cogs.state import _schedule_save
     _schedule_save("mid_boss_state")
 
 def get_mid_boss_hp() -> int:
@@ -547,7 +641,6 @@ def add_raid_global_damage(amount: int) -> int:
     progress = get_raid_global_progress()
     progress["total_damage"] = progress.get("total_damage", 0) + amount
     _data["raid_global_progress"] = progress
-    from cogs.state import _schedule_save
     _schedule_save("raid_global_progress")
     return progress["total_damage"]
 
@@ -559,7 +652,6 @@ def add_raid_participant(user_id: int) -> None:
     if user_id not in progress["participants"]:
         progress["participants"].append(user_id)
     _data["raid_global_progress"] = progress
-    from cogs.state import _schedule_save
     _schedule_save("raid_global_progress")
 
 def get_raid_participant_count() -> int:
@@ -572,7 +664,6 @@ def set_raid_defeated(value: bool) -> None:
     progress = get_raid_global_progress()
     progress["defeated"] = value
     _data["raid_global_progress"] = progress
-    from cogs.state import _schedule_save
     _schedule_save("raid_global_progress")
 
 def get_raid_defeated() -> bool:
@@ -2104,7 +2195,6 @@ class SystemBreach(commands.Cog):
                 "start_time": 0,
                 "dip_count": 0
             }
-            from cogs.state import _schedule_save
             _schedule_save("event_data")
         
         # ── Initialize raid state if not exists ──
@@ -2116,7 +2206,6 @@ class SystemBreach(commands.Cog):
                 "start_time": 0,
                 "final_blow_user": None
             }
-            from cogs.state import _schedule_save
             _schedule_save("raid_state")
         
         # ── Initialize mid-boss state if not exists ──
@@ -2128,7 +2217,6 @@ class SystemBreach(commands.Cog):
                 "last_hit": {},
                 "final_blow_user": None
             }
-            from cogs.state import _schedule_save
             _schedule_save("mid_boss_state")
         
         # ── Initialize global raid progress if not exists ──
@@ -2138,25 +2226,21 @@ class SystemBreach(commands.Cog):
                 "participants": [],
                 "defeated": False,
             }
-            from cogs.state import _schedule_save
             _schedule_save("raid_global_progress")
         
         # ── Initialize fusion streaks if not exists ──
         if "fusion_streaks" not in _data:
             _data["fusion_streaks"] = {}
-            from cogs.state import _schedule_save
             _schedule_save("fusion_streaks")
         
         # ── Initialize stabilizer_used if not exists ──
         if "stabilizer_used" not in _data:
             _data["stabilizer_used"] = {}
-            from cogs.state import _schedule_save
             _schedule_save("stabilizer_used")
         
         # ── Initialize spawn channels if not exists ──
         if "spawn_channels" not in _data:
             _data["spawn_channels"] = {}
-            from cogs.state import _schedule_save
             _schedule_save("spawn_channels")
         
         self.raid_task = bot.loop.create_task(self._raid_auto_end_check())
@@ -2256,7 +2340,6 @@ class SystemBreach(commands.Cog):
             if quest_id not in _data["daemon_quests"][user_key]:
                 _data["daemon_quests"][user_key][quest_id] = {}
             _data["daemon_quests"][user_key][quest_id]["notified"] = True
-            from cogs.state import _schedule_save
             _schedule_save("daemon_quests")
             
             await self._send_quest_completion_notification(message, user_id, quest_id)
@@ -2883,7 +2966,6 @@ class SystemBreach(commands.Cog):
             if quest_id not in _data["daemon_quests"][user_key]:
                 _data["daemon_quests"][user_key][quest_id] = {}
             _data["daemon_quests"][user_key][quest_id]["notified"] = True
-            from cogs.state import _schedule_save
             _schedule_save("daemon_quests")
             
             await self._send_quest_completion_notification(message, user_id, quest_id)
@@ -3992,7 +4074,6 @@ class SystemBreach(commands.Cog):
         
         elif action.lower() == "reset":
             _data["spawn_channels"][str(guild_id)] = {"channels": []}
-            from cogs.state import _schedule_save
             _schedule_save("spawn_channels")
             await ctx.reply("✅ Spawn channels reset! No channels set - spawns are now **DISABLED**.")
         
@@ -4519,12 +4600,10 @@ class SystemBreach(commands.Cog):
             "participants": [],
             "defeated": False,
         }
-        from cogs.state import _schedule_save
         _schedule_save("raid_global_progress")
         
         # Reset fusion streaks
         _data["fusion_streaks"] = {}
-        from cogs.state import _schedule_save
         _schedule_save("fusion_streaks")
 
     @commands.command(name="endbreach")
@@ -4559,12 +4638,10 @@ class SystemBreach(commands.Cog):
             "participants": [],
             "defeated": False,
         }
-        from cogs.state import _schedule_save
         _schedule_save("raid_global_progress")
         
         # Reset fusion streaks
         _data["fusion_streaks"] = {}
-        from cogs.state import _schedule_save
         _schedule_save("fusion_streaks")
         
         # Calculate end time
@@ -4626,7 +4703,6 @@ class SystemBreach(commands.Cog):
         else:
             # If lowering power, just set it directly
             _data["jarvis_power"]["value"] = power
-            from cogs.state import _schedule_save
             _schedule_save("jarvis_power")
         
         rates = {r: round(catch_success_rate(r, min(power, 100)) * 100) for r in ["common", "rare", "legendary"]}
@@ -4650,7 +4726,6 @@ class SystemBreach(commands.Cog):
         else:
             # If lowering power, just set it directly
             _data["jarvis_power"]["value"] = power
-            from cogs.state import _schedule_save
             _schedule_save("jarvis_power")
         
         bonus_percent = round((power - 100) * 2) if power > 100 else 0
@@ -5269,4 +5344,5 @@ class SystemBreach(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    await _sb_load_all_from_db()
     await bot.add_cog(SystemBreach(bot))
