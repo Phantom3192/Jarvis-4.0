@@ -57,6 +57,8 @@ _data: dict[str, Any] = {
     "profile_privacy": {}, # str(user_id) → list[str] of field keys hidden from OTHER viewers (owner always sees all)
     "tos_accepted":    {}, # str(user_id) → {"version": int, "accepted_at": float}
     "lifetime_earned": {}, # str(user_id) → int, cumulative JC ever gained via add_credits (never decreases)
+    # ── System Breach Event Badges (persist after event) ───────────────────
+    "system_breach_badges": {},  # str(user_id) → [badge_id, ...]
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -89,6 +91,7 @@ _SERIALISE: dict[str, Any] = {
     "profile_privacy":     lambda: _data["profile_privacy"],
     "tos_accepted":        lambda: _data["tos_accepted"],
     "lifetime_earned":     lambda: _data["lifetime_earned"],
+    "system_breach_badges": lambda: _data["system_breach_badges"],
 }
 
 
@@ -161,6 +164,7 @@ async def init_db():
     if "profile_privacy" in db: _data["profile_privacy"] = db["profile_privacy"]
     if "tos_accepted"    in db: _data["tos_accepted"]    = db["tos_accepted"]
     if "lifetime_earned" in db: _data["lifetime_earned"] = db["lifetime_earned"]
+    if "system_breach_badges" in db: _data["system_breach_badges"] = db["system_breach_badges"]
 
     # ── One-time migration: back-fill first_interaction for users who were
     # already marked "seen" before this table existed. mark_seen() only
@@ -1385,3 +1389,21 @@ def has_used_bot_before(user_id: int) -> bool:
     if _data["banners"].get(uid, {}).get("owned"):
         return True
     return False
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SYSTEM BREACH BADGES (persist after event)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_system_breach_badges(user_id: int) -> list[str]:
+    """Return list of System Breach badges earned by the user."""
+    return list(_data["system_breach_badges"].get(str(user_id), []))
+
+def grant_system_breach_badge(user_id: int, badge_id: str) -> bool:
+    """Grant a System Breach badge. Returns False if already granted."""
+    uid = str(user_id)
+    badges = _data["system_breach_badges"].setdefault(uid, [])
+    if badge_id in badges:
+        return False
+    badges.append(badge_id)
+    _schedule_save("system_breach_badges")
+    return True

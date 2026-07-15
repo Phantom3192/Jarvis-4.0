@@ -126,6 +126,23 @@ TITLE_LABELS: dict[str, str] = {
     badge_id: ach["title"] for badge_id, ach in ACHIEVEMENTS.items() if ach.get("title")
 }
 
+# ── System Breach Event Badge Titles ────────────────────────────────────────
+# These are added here so event badges display properly on /profile even when
+# the event cog is removed. The actual badge data is stored in state.py.
+
+SYSTEM_BREACH_BADGE_LABELS: dict[str, str] = {
+    "process_hunter": "🔎 Process Hunter",
+    "daemon_wrangler": "🧩 Daemon Wrangler",
+    "system_purger": "🔥 System Purger",
+    "core_guardian": "👑 Core Guardian",
+    "full_compliance": "📜 Full Compliance",
+    "registry_complete": "🗂️ Registry Complete",
+    "breach_contained": "🕸️ Breach Contained",
+}
+
+# Add to TITLE_LABELS so event titles resolve properly even without the cog
+TITLE_LABELS.update(SYSTEM_BREACH_BADGE_LABELS)
+
 
 def unlocked_announcement(user_display_name: str, achievements: list[dict]) -> str:
     """Build a short public message for newly unlocked achievements."""

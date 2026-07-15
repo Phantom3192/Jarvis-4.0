@@ -7,7 +7,7 @@ import signal
 import time
 from dotenv import load_dotenv
 
-load_dotenv()  # must run before any `cogs.*` import — several read env vars at import time
+load_dotenv()
 
 from cogs.errorhandler import install_stdout_error_forwarding, install_view_error_suppression
 from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown, flush_all_saves
@@ -18,8 +18,8 @@ from cogs.memory import init_memory
 import uvicorn
 from web.app import create_app
 
-install_stdout_error_forwarding()   # forward ❌/error-looking print() lines to the webhook too
-install_view_error_suppression()    # silence harmless expired-interaction noise from button clicks
+install_stdout_error_forwarding()
+install_view_error_suppression()  
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -58,7 +58,8 @@ COGS = [
     "cogs.youtube",
     # "cogs.music",
     "cogs.economy",
-    "cogs.profile",
+    "cogs.profile", 
+    "cogs.system_breach",
     "cogs.status",
     "cogs.tos",
 ]

@@ -221,10 +221,41 @@ def describe_perks(title_id: str) -> list[str]:
 
 
 def get_active_perks(user_id: int) -> dict:
-    """Return the perk dict for whatever title the user currently has
-    equipped, or {} if none/not a perk-granting title."""
+    """Return the merged perk dict from the user's equipped title AND their
+    equipped Daemon (System Breach event), or {} if neither grants perks.
+
+    Title perks always apply. Daemon perks only apply while they're "live"
+    (system_breach.is_daemon_perk_live handles the event-week / weekly-
+    upkeep-hours gating) — a Daemon with no live perk contributes nothing
+    here, same as an unequipped one. Numeric keys shared between a title and
+    a Daemon (e.g. chat_jc_multiplier) stack multiplicatively for
+    multipliers and additively for flat bonuses, so equipping both a title
+    and a Daemon is never worse than either alone.
+
+    Lazy-imports cogs.system_breach to avoid a circular import (that module
+    imports from cogs.economy at module load time).
+    """
     equipped = get_equipped_title(user_id)
-    return TITLE_PERKS.get(equipped, {})
+    perks = dict(TITLE_PERKS.get(equipped, {}))
+
+    try:
+        from cogs.system_breach import get_live_daemon_perks
+    except ImportError:
+        return perks  # System Breach cog not loaded — title perks only
+
+    for key, value in get_live_daemon_perks(user_id).items():
+        if key not in perks:
+            perks[key] = value
+        elif isinstance(value, bool) or isinstance(perks[key], bool):
+            perks[key] = perks[key] or value
+        elif isinstance(value, float) and value > 1 and isinstance(perks[key], float):
+            # multiplier-style perk (e.g. 1.25x) — stack multiplicatively
+            perks[key] = perks[key] * value
+        else:
+            # flat bonus (e.g. daily_ai_limit_bonus) — stack additively
+            perks[key] = perks[key] + value
+
+    return perks
 
 
 # Labels for titles that used to be purchasable in SHOP_ITEMS but have since
