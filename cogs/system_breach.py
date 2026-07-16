@@ -69,6 +69,7 @@ SB_PERSISTED_KEYS = [
     "spawn_channels",
     "mid_boss_state",
     "raid_global_progress",
+    "chat_streak_days",
 ]
 
 _sb_save_tasks: dict[str, asyncio.Task] = {}
@@ -291,6 +292,27 @@ def bump_daemon_quest(user_id: int, quest_id: str, amount: int = 1) -> int:
     q[quest_id]["progress"] = q[quest_id].get("progress", 0) + amount
     _schedule_save("daemon_quests")
     return q[quest_id]["progress"]
+
+def bump_chat_streak_day(user_id: int) -> bool:
+    """Record today (UTC) as a day this user chatted with Jarvis AI, and bump
+    the chat_streak_3 quest ('Chat with Jarvis AI on 3 different days') the
+    first time — and only the first time — a given day is recorded.
+
+    Returns True the first time a given UTC day is recorded for this user
+    (i.e. chat_streak_3 progress was just bumped), False if today was
+    already recorded (repeat messages on the same day don't over-count).
+    """
+    uid = str(user_id)
+    if "chat_streak_days" not in _data:
+        _data["chat_streak_days"] = {}
+    days = _data["chat_streak_days"].setdefault(uid, [])
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if today in days:
+        return False
+    days.append(today)
+    _schedule_save("chat_streak_days")
+    bump_daemon_quest(user_id, "chat_streak_3", 1)
+    return True
 
 def mark_engagement_action(user_id: int) -> None:
     """Record that the user did a daemon-related action today."""
@@ -2672,30 +2694,23 @@ class SystemBreach(commands.Cog):
             await self._attempt_catch(message)
             return
 
-        event = get_event_data()
-        if not event.get("active"):
-            return
-
-        # ── Track chat_ai quest (ONLY when replying to or mentioning Jarvis) ──
-        is_reply_to_bot = False
-        if message.reference and message.reference.message_id:
-            try:
-                referenced_msg = await message.channel.fetch_message(message.reference.message_id)
-                if referenced_msg and referenced_msg.author.id == self.bot.user.id:
-                    is_reply_to_bot = True
-            except:
-                pass
-        
-        mentions_bot = self.bot.user in message.mentions
-        
-        if is_reply_to_bot or mentions_bot:
-            bump_daemon_quest(message.author.id, "chat_ai", 1)
-            await self._check_quest_completion(message, message.author.id, "chat_ai")
-
-        # Track "system breach" phrase for quest
+        # "Power Quests" (chat_ai, say_breach, mystery_box, chat_streak_3,
+        # invite_user) are documented as "Always Available" and must NOT be
+        # gated behind the System Breach event's active flag — only the
+        # spawn/catch/raid gameplay below this point is event-gated.
+        #
+        # Track "system breach" phrase for quest — chat_ai itself is now
+        # tracked at the real AI-reply site in ai.py (see generate_ai_response
+        # call site), since that's the only place that knows a genuine Jarvis
+        # AI conversation actually happened (mention, reply, "jarvis" keyword,
+        # auto-respond channel, or DM all count there — not just mentions).
         if "system breach" in content:
             bump_daemon_quest(message.author.id, "say_breach", 1)
             await self._check_quest_completion(message, message.author.id, "say_breach")
+
+        event = get_event_data()
+        if not event.get("active"):
+            return
 
         # ── CHECK IF CHANNEL IS WHITELISTED FOR SPAWNS ──
         if not is_spawn_channel(guild_id, message.channel.id):
@@ -4585,6 +4600,8 @@ class SystemBreach(commands.Cog):
         _data["daemons"] = {}
         _data["daemon_quests"] = {}
         _data["engagement_days"] = {}
+        _data["chat_streak_days"] = {}
+        _schedule_save("chat_streak_days")
         reset_jarvis_power()
         set_event_active(False)
         

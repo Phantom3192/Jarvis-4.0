@@ -2279,6 +2279,22 @@ class AI(commands.Cog):
             bot_reply_msgs = await send_long_message(message, reply, ephemeral=False)
         finally:
             _processing_users.discard(message.author.id)
+
+        # ── System Breach quest tracking ─────────────────────────────────
+        # chat_ai ("Send 50 messages to Jarvis AI") and chat_streak_3
+        # ("Chat with Jarvis AI on 3 different days") both live in
+        # cogs/system_breach.py but must be bumped here — this is the only
+        # place that knows a genuine AI reply actually went out.
+        try:
+            breach_cog = self.bot.get_cog("SystemBreach")
+            if breach_cog is not None:
+                from cogs.system_breach import bump_daemon_quest, bump_chat_streak_day
+                bump_daemon_quest(message.author.id, "chat_ai", 1)
+                await breach_cog._check_quest_completion(message, message.author.id, "chat_ai")
+                if bump_chat_streak_day(message.author.id):
+                    await breach_cog._check_quest_completion(message, message.author.id, "chat_streak_3")
+        except Exception as e:
+            print(f"[Warning] Failed to update System Breach quest progress for {message.author.id}: {e}")
         # Register both the human message and Jarvis's reply → root so that
         # whoever replies next immediately resolves to the correct merge history.
         # For a fresh (non-reply) message, the message itself is the root.

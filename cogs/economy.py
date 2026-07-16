@@ -771,6 +771,22 @@ def _title_perks_embed() -> discord.Embed:
     return embed
 
 
+def _bump_mystery_box_quest(user_id: int) -> None:
+    """Progress the System Breach 'Open a Mystery Box' quest.
+
+    Imported lazily (not at module load time) since cogs.system_breach
+    imports cogs.state at import time too, and doing this import at the top
+    of the file would make economy.py's load order matter relative to
+    system_breach.py during cog setup. Doing it here means it only runs
+    once both modules are already fully loaded.
+    """
+    try:
+        from cogs.system_breach import bump_daemon_quest
+        bump_daemon_quest(user_id, "mystery_box", 1)
+    except Exception as e:
+        print(f"[Warning] Failed to bump mystery_box quest for {user_id}: {e}")
+
+
 async def _purchase_item(
     user: discord.User | discord.Member,
     item_id: str,
@@ -823,6 +839,7 @@ async def _purchase_item(
         new_balance = add_credits(user.id, reward)
         fallback_msg = f"🎰 You opened the Mystery Box and won **+{reward} {JC_NAME}**! New balance: **{new_balance}** {JC_EMOJI}"
         public_msg = mystery_box_result_embed(user, reward, new_balance)
+        _bump_mystery_box_quest(user.id)
 
     elif kind == "mystery_box_deluxe":
         reward = random.randint(DELUXE_MYSTERY_BOX_MIN, DELUXE_MYSTERY_BOX_MAX)
@@ -835,6 +852,7 @@ async def _purchase_item(
             box_name="Deluxe Mystery Box", box_emoji="🎆",
             jackpot_threshold=500, nice_threshold=350,
         )
+        _bump_mystery_box_quest(user.id)
 
     elif kind == "title":
         grant_title(user.id, item_id)
