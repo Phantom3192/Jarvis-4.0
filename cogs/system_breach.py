@@ -1053,7 +1053,7 @@ QUEST_DEFS = {
         "name": "Chat with Jarvis",
         "tier": "power",
         "type": "daily",
-        "description": "Send 50 messages to Jarvis AI",
+        "description": "Send 25 messages to Jarvis AI",
         "goal": 25,
         "reward_jc": 50,
         "reward_power": 0.1,
