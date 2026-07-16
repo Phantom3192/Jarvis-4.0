@@ -818,18 +818,23 @@ def get_lifetime_earned(user_id: int) -> int:
     never grants), so it reflects earnings only."""
     return int(_data["lifetime_earned"].get(str(user_id), 0))
 
-
 def spend_credits(user_id: int, amount: int) -> bool:
-    """Attempt to deduct `amount` JC. Returns False (no-op) if the balance
-    is insufficient, True if the deduction succeeded."""
+    """Attempt to deduct `amount` JC. Returns False if insufficient."""
     uid = str(user_id)
     bal = _data["credits"].get(uid, 0)
     if bal < amount:
         return False
     _data["credits"][uid] = bal - amount
     _schedule_save("credits")
+    
+    # ── Track for System Breach quest ──
+    try:
+        from cogs.system_breach import bump_jc_spent
+        bump_jc_spent(user_id, amount)
+    except Exception:
+        pass
+    
     return True
-
 
 def _credit_meta(user_id: int) -> dict:
     uid = str(user_id)

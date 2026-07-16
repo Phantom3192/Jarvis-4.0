@@ -321,6 +321,11 @@ class ImageSearch(commands.Cog):
                         return
                     idx    = max(1, min(index, len(results)))
                     embed  = _build_embed(query, results[idx - 1], idx, len(results), user)
+                    try:
+                        from cogs.system_breach import bump_daemon_quest
+                        bump_daemon_quest(user.id, "image_seeker", 1)
+                    except Exception:
+                        pass
                     _mark_searched(user.id)
                     await interaction.edit_original_response(content=None, embed=embed)
 
@@ -351,7 +356,7 @@ class ImageSearch(commands.Cog):
             return
 
         results = await _search_images(query, safe=safe_search)
-
+        
         if results is None:
             await error_fn(
                 embed=_error_embed("Serper.dev didn't respond. Please try again later.", user)
@@ -362,6 +367,12 @@ class ImageSearch(commands.Cog):
             await error_fn(embed=_no_results_embed(query, user))
             return
 
+        try:
+            from cogs.system_breach import bump_daemon_quest
+            bump_daemon_quest(user.id, "image_seeker", 1)
+        except Exception:
+            pass
+                
         index  = max(1, min(index, len(results)))
         result = results[index - 1]
         embed  = _build_embed(query, result, index, len(results), user)

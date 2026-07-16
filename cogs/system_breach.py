@@ -394,6 +394,66 @@ def get_time_remaining() -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# QUEST CONFIGURATION — Reset Set (NEW)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Quest set that resets together as a group (all must be completed)
+RESET_QUEST_SET = [
+    "chat_ai",
+    "mystery_box",
+    "image_seeker",
+    "jc_spender",
+]
+
+# Quests that are one-time only (never reset)
+ONE_TIME_QUESTS = [
+    "chat_streak_3",
+    "invite_user",
+    "say_breach",
+]
+
+# All Power Quests (combined)
+POWER_QUESTS = RESET_QUEST_SET + ONE_TIME_QUESTS
+
+
+def _check_and_reset_quest_set(user_id: int) -> bool:
+    """Check if ALL quests in RESET_QUEST_SET are claimed.
+    If so, reset ALL of them immediately.
+    
+    Returns True if reset was performed.
+    """
+    uid = str(user_id)
+    
+    if "daemon_quests" not in _data:
+        _data["daemon_quests"] = {}
+    if uid not in _data["daemon_quests"]:
+        _data["daemon_quests"][uid] = {}
+    
+    user_quests = _data["daemon_quests"][uid]
+    
+    # Check if ALL quests in the set are claimed
+    all_claimed = all(
+        user_quests.get(qid, {}).get("claimed", False)
+        for qid in RESET_QUEST_SET
+    )
+    
+    if not all_claimed:
+        return False
+    
+    # All quests are claimed — reset ALL of them immediately
+    for quest_id in RESET_QUEST_SET:
+        if quest_id not in user_quests:
+            user_quests[quest_id] = {"progress": 0, "claimed": False}
+        else:
+            user_quests[quest_id]["progress"] = 0
+            user_quests[quest_id]["claimed"] = False
+        user_quests[quest_id].pop("notified", None)
+    
+    _schedule_save("daemon_quests")
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # RAID STATE FUNCTIONS (for persistence)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -994,8 +1054,8 @@ QUEST_DEFS = {
         "tier": "power",
         "type": "daily",
         "description": "Send 50 messages to Jarvis AI",
-        "goal": 50,
-        "reward_jc": 100,
+        "goal": 1,
+        "reward_jc": 50,
         "reward_power": 0.1,
     },
     "say_breach": {
@@ -1033,6 +1093,24 @@ QUEST_DEFS = {
         "goal": 1,
         "reward_jc": 500,
         "reward_power": 1.0,  
+    },
+    "image_seeker": {
+        "name": "Image Seeker",
+        "tier": "power",
+        "type": "daily",
+        "description": "Ask Jarvis to send 3 images",
+        "goal": 3,
+        "reward_jc": 50,
+        "reward_power": 0.2,
+    },
+    "jc_spender": {
+        "name": "JC Spender",
+        "tier": "power",
+        "type": "daily",
+        "description": "Spend 50 Jarvis Credits anywhere",
+        "goal": 50,
+        "reward_jc": 30,
+        "reward_power": 0.3,
     },
     
     # COMBAT QUESTS
@@ -1472,6 +1550,15 @@ def get_live_daemon_perks(user_id: int) -> dict:
     
     return {}
 
+def bump_jc_spent(user_id: int, amount: int) -> None:
+    """Track JC spent for the jc_spender quest."""
+    # Only track if the quest is active and not claimed
+    quest_data = get_daemon_quest(user_id)
+    if quest_data.get("jc_spender", {}).get("claimed", False):
+        return
+    
+    # Increment progress by the amount spent
+    bump_daemon_quest(user_id, "jc_spender", amount)
 
 def get_power_tier(power: float) -> str:
     """Get power tier name from power percentage."""
@@ -2455,20 +2542,71 @@ class SystemBreach(commands.Cog):
         _check_invite_quest(user_id)
         user_quests = get_daemon_quest(user_id)
         
+        # Check completion status of the reset set
+        completed = []
+        not_completed = []
+        for quest_id in RESET_QUEST_SET:
+            quest_data = user_quests.get(quest_id, {})
+            quest = QUEST_DEFS[quest_id]
+            progress = quest_data.get("progress", 0)
+            claimed = quest_data.get("claimed", False)
+            
+            if claimed:
+                completed.append(quest["name"])
+            else:
+                if progress >= quest["goal"]:
+                    status = "🎯 READY TO CLAIM!"
+                else:
+                    status = f"{progress}/{quest['goal']}"
+                not_completed.append(f"{quest['name']} ({status})")
+        
+        # Build status message
+        if len(completed) == len(RESET_QUEST_SET):
+            reset_status = "🔄 **All quests complete!** They will reset when you claim the last one."
+        elif not_completed:
+            reset_status = f"📋 **Progress:** {len(completed)}/{len(RESET_QUEST_SET)} complete\n"
+            reset_status += f"Remaining: {', '.join(not_completed)}"
+        else:
+            reset_status = "Complete all 4 quests to reset and repeat them!"
+        
         embed = discord.Embed(
-            title="⚡ Power Quests (Always Available)",
-            description="Complete these to stabilize Jarvis and unlock Combat Quests!",
+            title="⚡ Power Quests",
+            description=(
+                "Complete these to stabilize Jarvis and unlock Combat Quests!\n\n"
+                f"{reset_status}\n\n"
+                "📌 **One-Time Quests** — complete once for permanent rewards"
+            ),
             color=0xF39C12,
         )
         
-        for quest_id in POWER_QUESTS:
+        # Quest set (resets together)
+        for quest_id in RESET_QUEST_SET:
+            quest = QUEST_DEFS[quest_id]
+            progress = user_quests.get(quest_id, {}).get("progress", 0)
+            claimed = user_quests.get(quest_id, {}).get("claimed", False)
+            
+            if claimed:
+                status = "✅"
+            elif progress >= quest["goal"]:
+                status = "🎯 READY TO CLAIM!"
+            else:
+                status = f"{progress}/{quest['goal']}"
+            
+            embed.add_field(
+                name=f"{status} {quest['name']}",
+                value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
+                inline=False,
+            )
+        
+        # One-time quests
+        for quest_id in ONE_TIME_QUESTS:
             quest = QUEST_DEFS[quest_id]
             progress = user_quests.get(quest_id, {}).get("progress", 0)
             claimed = user_quests.get(quest_id, {}).get("claimed", False)
             
             status = "✅" if claimed else f"{progress}/{quest['goal']}"
             embed.add_field(
-                name=f"{status} {quest['name']}",
+                name=f"{status} 📌 {quest['name']}",
                 value=f"{quest['description']}\n💰 {quest['reward_jc']} JC + {quest['reward_power']}% Power",
                 inline=False,
             )
@@ -3763,6 +3901,16 @@ class SystemBreach(commands.Cog):
         new_badges = _check_badges(user_id)
         for badge in new_badges:
             await ctx.channel.send(f"🏅 **{ctx.author.display_name}** earned the **{badge['emoji']} {badge['name']}** badge!")
+
+        # ── NEW: Check if the quest set should reset ──
+        if quest_id in RESET_QUEST_SET:
+            if _check_and_reset_quest_set(user_id):
+                # All 3 quests are now complete! Reset them all.
+                await ctx.reply(
+                    "🔄 **Quest Set Complete!**\n"
+                    "You've completed all 4 quests! They have been reset "
+                    "and are ready to be completed again!"
+                )
 
         await ctx.reply(f"✅ Claimed **{quest['name']}**!\n💰 +{quest['reward_jc']} JC\n⚡ +{quest['reward_power']}% Jarvis Power")
 
