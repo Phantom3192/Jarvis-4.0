@@ -1054,7 +1054,7 @@ QUEST_DEFS = {
         "tier": "power",
         "type": "daily",
         "description": "Send 50 messages to Jarvis AI",
-        "goal": 1,
+        "goal": 25,
         "reward_jc": 50,
         "reward_power": 0.1,
     },
