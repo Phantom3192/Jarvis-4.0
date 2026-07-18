@@ -295,12 +295,15 @@ def bump_daemon_quest(user_id: int, quest_id: str, amount: int = 1) -> int:
 
 def bump_chat_streak_day(user_id: int) -> bool:
     """Record today (UTC) as a day this user chatted with Jarvis AI, and bump
-    the chat_streak_3 quest ('Chat with Jarvis AI on 3 different days') the
-    first time — and only the first time — a given day is recorded.
+    whichever stage of the chat streak quest chain
+    (chat_streak_3 -> chat_streak_5 -> chat_streak_7 -> chat_streak_10 ->
+    chat_streak_12) is currently active, the first time — and only the
+    first time — a given day is recorded.
 
     Returns True the first time a given UTC day is recorded for this user
-    (i.e. chat_streak_3 progress was just bumped), False if today was
-    already recorded (repeat messages on the same day don't over-count).
+    (i.e. the active streak quest's progress was just bumped), False if
+    today was already recorded (repeat messages on the same day don't
+    over-count).
     """
     uid = str(user_id)
     if "chat_streak_days" not in _data:
@@ -311,7 +314,8 @@ def bump_chat_streak_day(user_id: int) -> bool:
         return False
     days.append(today)
     _schedule_save("chat_streak_days")
-    bump_daemon_quest(user_id, "chat_streak_3", 1)
+    active_streak_quest = _get_active_streak_quest(user_id)
+    bump_daemon_quest(user_id, active_streak_quest, 1)
     return True
 
 def mark_engagement_action(user_id: int) -> None:
@@ -408,9 +412,27 @@ RESET_QUEST_SET = [
 # Quests that are one-time only (never reset)
 ONE_TIME_QUESTS = [
     "chat_streak_3",
+    "chat_streak_5",
+    "chat_streak_7",
+    "chat_streak_10",
+    "chat_streak_12",
     "invite_user",
     "say_breach",
 ]
+
+# Ordered chain for the chat streak quest progression (3 -> 5 -> 7 -> 10 -> 12 days)
+STREAK_CHAIN_ORDER = ["chat_streak_3", "chat_streak_5", "chat_streak_7", "chat_streak_10", "chat_streak_12"]
+
+
+def _get_active_streak_quest(user_id: int) -> str:
+    """Return the id of the streak quest the user is currently working on —
+    the first quest in the chain that hasn't been claimed yet. Once every
+    stage has been claimed, the final stage id is returned."""
+    user_quests = get_daemon_quest(user_id)
+    for quest_id in STREAK_CHAIN_ORDER:
+        if not user_quests.get(quest_id, {}).get("claimed", False):
+            return quest_id
+    return STREAK_CHAIN_ORDER[-1]
 
 # All Power Quests (combined)
 POWER_QUESTS = RESET_QUEST_SET + ONE_TIME_QUESTS
@@ -1008,6 +1030,10 @@ POWER_QUESTS = [
     "say_breach",
     "mystery_box",
     "chat_streak_3",
+    "chat_streak_5",
+    "chat_streak_7",
+    "chat_streak_10",
+    "chat_streak_12",
     "invite_user",
 ]
 
@@ -1079,11 +1105,52 @@ QUEST_DEFS = {
     "chat_streak_3": {
         "name": "Chat Streak (3 days)",
         "tier": "power",
-        "type": "set",
-        "description": "Chat with Jarvis AI on 3 different days",
+        "type": "chain",
+        "description": "Chat with Jarvis AI on 3 different days (Streak 1/5)",
         "goal": 3,
         "reward_jc": 200,
-        "reward_power": 1.0, 
+        "reward_power": 1.0,
+        "next_quest": "chat_streak_5",
+    },
+    "chat_streak_5": {
+        "name": "Chat Streak (5 days)",
+        "tier": "power",
+        "type": "chain",
+        "description": "Chat with Jarvis AI on 5 different days (Streak 2/5)",
+        "goal": 5,
+        "reward_jc": 300,
+        "reward_power": 1.5,
+        "next_quest": "chat_streak_7",
+    },
+    "chat_streak_7": {
+        "name": "Chat Streak (7 days)",
+        "tier": "power",
+        "type": "chain",
+        "description": "Chat with Jarvis AI on 7 different days (Streak 3/5)",
+        "goal": 7,
+        "reward_jc": 400,
+        "reward_power": 2.0,
+        "next_quest": "chat_streak_10",
+    },
+    "chat_streak_10": {
+        "name": "Chat Streak (10 days)",
+        "tier": "power",
+        "type": "chain",
+        "description": "Chat with Jarvis AI on 10 different days (Streak 4/5)",
+        "goal": 10,
+        "reward_jc": 500,
+        "reward_power": 2.5,
+        "next_quest": "chat_streak_12",
+    },
+    "chat_streak_12": {
+        "name": "Chat Streak (12 days)",
+        "tier": "power",
+        "type": "chain",
+        "description": "Chat with Jarvis AI on 12 different days (Streak 5/5)",
+        "goal": 12,
+        "reward_jc": 750,
+        "reward_power": 3.0,
+        "next_quest": None,
     },
     "invite_user": {
         "name": "Invite a New User",
@@ -2599,7 +2666,12 @@ class SystemBreach(commands.Cog):
             )
         
         # One-time quests
+        active_streak_quest = _get_active_streak_quest(user_id)
         for quest_id in ONE_TIME_QUESTS:
+            # Only show the currently active stage of the streak chain
+            if quest_id in STREAK_CHAIN_ORDER and quest_id != active_streak_quest:
+                continue
+
             quest = QUEST_DEFS[quest_id]
             progress = user_quests.get(quest_id, {}).get("progress", 0)
             claimed = user_quests.get(quest_id, {}).get("claimed", False)
