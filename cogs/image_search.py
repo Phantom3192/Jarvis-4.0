@@ -121,6 +121,28 @@ MAX_RESULTS    = 10   # Serper returns up to 10 image results by default
 IMAGE_SEARCH_COOLDOWN = 10 * 60  # 10 minutes in seconds
 IMAGE_BYPASS_COST     = 50       # JC cost to skip the cooldown
 
+# ── Channels exempt from the cooldown ─────────────────────────────────────────
+# Set in .env like:
+#   IMAGE_COOLDOWN_EXEMPT_CHANNELS=123456789012345678,987654321098765432
+# Any channel ID listed here will have NO cooldown on !image / /image.
+
+def _load_exempt_channels() -> set[int]:
+    raw = os.getenv("IMAGE_COOLDOWN_EXEMPT_CHANNELS", "").strip()
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    if ids:
+        print(f"[ImageSearch] Cooldown exempt channels: {ids}")
+    return ids
+
+IMAGE_COOLDOWN_EXEMPT_CHANNELS: set[int] = _load_exempt_channels()
+
+def _is_cooldown_exempt(channel) -> bool:
+    channel_id = getattr(channel, "id", None)
+    return channel_id is not None and channel_id in IMAGE_COOLDOWN_EXEMPT_CHANNELS
+
 # ── Per-user rate limit ───────────────────────────────────────────────────────
 
 _last_searched: dict[int, float] = {}
@@ -301,7 +323,7 @@ class ImageSearch(commands.Cog):
             )
             return
 
-        remaining = _check_cooldown(user.id)
+        remaining = 0.0 if _is_cooldown_exempt(channel) else _check_cooldown(user.id)
         if remaining > 0:
             # Only offer bypass button if user can afford it
             if get_credits(user.id) >= IMAGE_BYPASS_COST:
@@ -376,7 +398,10 @@ class ImageSearch(commands.Cog):
         index  = max(1, min(index, len(results)))
         result = results[index - 1]
         embed  = _build_embed(query, result, index, len(results), user)
-        _mark_searched(user.id)
+        if not _is_cooldown_exempt(channel):
+            _mark_searched(user.id)
+        else:
+            record_image_search(user.id)  # still log the search for stats, just skip the cooldown timer
         await reply_fn(embed=embed)
 
     async def _send_image(self, message: discord.Message, query: str, index: int = 1) -> None:
