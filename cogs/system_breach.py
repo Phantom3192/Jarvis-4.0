@@ -3184,6 +3184,11 @@ class SystemBreach(commands.Cog):
             # progress is already tracked per user via bump_daemon_quest
             pass
         
+        # ── For daemon-catch chain quests, progress lives on the shared
+        #    total_catches counter, not on the quest's own progress field ──
+        elif quest.get("type") == "chain":
+            progress = quest_data.get("total_catches", {}).get("progress", 0)
+        
         if progress >= quest["goal"] and not claimed and not notified:
             user_key = str(user_id)
             if user_key not in _data["daemon_quests"]:
@@ -3944,6 +3949,11 @@ class SystemBreach(commands.Cog):
                 progress = 1 if get_raid_defeated() else 0
             elif quest_id in ["raid_participate_25", "raid_participate_50"]:
                 progress = get_raid_participant_count()
+        
+        # Daemon-catch chain quests track progress on the shared total_catches
+        # counter, not on the individual quest's own progress field
+        elif quest.get("type") == "chain":
+            progress = user_quests.get("total_catches", {}).get("progress", 0)
         
         if progress < quest["goal"]:
             await ctx.reply(f"❌ **{quest['name']}** progress: {progress}/{quest['goal']}. Not completed yet.")
