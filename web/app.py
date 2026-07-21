@@ -32,7 +32,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -220,6 +220,46 @@ def create_app(bot) -> FastAPI:
             "bot_name": bot.user.name if bot.user else "Jarvis",
             "usage": usage,
         })
+
+    @app.post("/webhook/topgg")
+    async def webhook_topgg(request: Request, authorization: str = Header(default="")):
+        """top.gg calls this every time someone votes for the bot.
+        Configure the exact same URL + secret on top.gg's "Webhooks" tab
+        for this bot listing, and set TOPGG_WEBHOOK_AUTH to that same
+        secret here. Without a matching secret, nothing is trusted or
+        recorded — this endpoint just 401s.
+        """
+        expected_auth = os.getenv("TOPGG_WEBHOOK_AUTH", "")
+        if not expected_auth or authorization != expected_auth:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        try:
+            payload = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid json"}, status_code=400)
+
+        if payload.get("type") == "test":
+            # top.gg's "Test" button on the webhook page — acknowledge only.
+            return JSONResponse({"status": "ok"})
+
+        user_id_raw = payload.get("user")
+        if not user_id_raw:
+            return JSONResponse({"error": "missing user"}, status_code=400)
+
+        try:
+            user_id = int(user_id_raw)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "invalid user id"}, status_code=400)
+
+        from cogs.vote import record_vote
+        stats = record_vote(user_id)
+        print(
+            f"🗳️ Vote recorded for {user_id} — "
+            f"streak {stats['streak']}, total {stats['total_votes']}, "
+            f"pending boxes {stats['pending_boxes']}"
+        )
+
+        return JSONResponse({"status": "ok"})
 
     @app.get("/healthz")
     async def healthz():

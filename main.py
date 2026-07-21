@@ -48,6 +48,7 @@ COGS = [
     "cogs.dm",
     "cogs.suggestions",
     "cogs.bugreport",
+    "cogs.vote",
     "cogs.errorhandler",
     "cogs.help",
     "cogs.game",

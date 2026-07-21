@@ -59,6 +59,7 @@ _data: dict[str, Any] = {
     "lifetime_earned": {}, # str(user_id) → int, cumulative JC ever gained via add_credits (never decreases)
     # ── System Breach Event Badges (persist after event) ───────────────────
     "system_breach_badges": {},  # str(user_id) → [badge_id, ...]
+    "votes": {},  # str(user_id) → {"total_votes": int, "streak": int, "last_vote_ts": float, "streak_milestones": [int,...]}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -92,6 +93,7 @@ _SERIALISE: dict[str, Any] = {
     "tos_accepted":        lambda: _data["tos_accepted"],
     "lifetime_earned":     lambda: _data["lifetime_earned"],
     "system_breach_badges": lambda: _data["system_breach_badges"],
+    "votes":                lambda: _data["votes"],
 }
 
 
@@ -165,6 +167,7 @@ async def init_db():
     if "tos_accepted"    in db: _data["tos_accepted"]    = db["tos_accepted"]
     if "lifetime_earned" in db: _data["lifetime_earned"] = db["lifetime_earned"]
     if "system_breach_badges" in db: _data["system_breach_badges"] = db["system_breach_badges"]
+    if "votes"           in db: _data["votes"]           = db["votes"]
 
     # ── One-time migration: back-fill first_interaction for users who were
     # already marked "seen" before this table existed. mark_seen() only
@@ -936,6 +939,166 @@ def bump_streak(user_id: int) -> tuple[int, list[int]]:
 
     _schedule_save("credit_meta")
     return meta["streak"], hit
+
+
+# ── top.gg vote tracking ─────────────────────────────────────────────────────
+# top.gg lets a user vote once every 12h; the webhook (web/app.py) only fires
+# when a real vote lands, so streak continuity is judged purely by the gap
+# between consecutive votes rather than a calendar day like the chat streak.
+
+VOTE_COOLDOWN_SECONDS = 12 * 3600       # top.gg's own per-user vote cooldown
+VOTE_STREAK_GRACE_SECONDS = 24 * 3600   # must vote again within this window
+                                          # of the last vote to keep the streak
+                                          # alive (one missed 12h slot is OK,
+                                          # a full missed day is not)
+
+VOTE_STREAK_MILESTONES: dict[int, int] = {
+    3:  50,    # 🔥 3 votes in a row
+    7:  150,   # ⭐ a full week of voting
+    30: 750,   # 👑 a month of voting
+}
+
+
+def _vote_entry(user_id: int) -> dict:
+    uid = str(user_id)
+    entry = _data["votes"].get(uid)
+    if not entry:
+        entry = {
+            "total_votes": 0, "streak": 0, "last_vote_ts": 0.0, "streak_milestones": [],
+            "pending_boxes": 0, "reminder_enabled": False, "reminder_sent": False,
+        }
+        _data["votes"][uid] = entry
+    else:
+        entry.setdefault("total_votes", 0)
+        entry.setdefault("streak", 0)
+        entry.setdefault("last_vote_ts", 0.0)
+        entry.setdefault("streak_milestones", [])
+        entry.setdefault("pending_boxes", 0)
+        entry.setdefault("reminder_enabled", False)
+        entry.setdefault("reminder_sent", False)
+    return entry
+
+
+def get_vote_stats(user_id: int) -> dict:
+    """Read-only snapshot of a user's vote stats, plus derived cooldown info.
+    Safe to call even if the user has never voted."""
+    entry = _vote_entry(user_id)
+    now = time.time()
+    last_ts = entry["last_vote_ts"]
+    next_vote_ts = last_ts + VOTE_COOLDOWN_SECONDS if last_ts else 0.0
+    return {
+        "total_votes": entry["total_votes"],
+        "streak": entry["streak"],
+        "last_vote_ts": last_ts,
+        "next_vote_ts": next_vote_ts,
+        "can_vote_now": (not last_ts) or now >= next_vote_ts,
+        "pending_boxes": entry["pending_boxes"],
+        "reminder_enabled": entry["reminder_enabled"],
+    }
+
+
+def bump_vote(user_id: int) -> dict:
+    """Record a fresh top.gg vote (call this from the /webhook/topgg handler
+    only — this is trusted, authenticated input, not user-triggered).
+
+    Streak continues if this vote lands within VOTE_STREAK_GRACE_SECONDS of
+    the previous one, otherwise it resets to 1. Doesn't hand out any JC
+    itself — it just banks one unclaimed Vote Mystery Box, which the user
+    opens themselves via !voteclaim / /voteclaim. Returns the updated stats
+    plus any newly-hit streak milestones (subset of VOTE_STREAK_MILESTONES),
+    each fired once per user per streak run — same pattern as bump_streak().
+    """
+    entry = _vote_entry(user_id)
+    now = time.time()
+    last_ts = entry["last_vote_ts"]
+
+    if last_ts and (now - last_ts) <= VOTE_STREAK_GRACE_SECONDS:
+        entry["streak"] += 1
+    else:
+        entry["streak"] = 1
+        entry["streak_milestones"] = []
+
+    entry["total_votes"] += 1
+    entry["last_vote_ts"] = now
+    entry["pending_boxes"] += 1
+    entry["reminder_sent"] = False  # new cooldown window — allow a fresh reminder once it elapses
+
+    hit = [m for m in VOTE_STREAK_MILESTONES if entry["streak"] == m and m not in entry["streak_milestones"]]
+    for m in hit:
+        entry["streak_milestones"].append(m)
+
+    _schedule_save("votes")
+    return {
+        "total_votes": entry["total_votes"],
+        "streak": entry["streak"],
+        "last_vote_ts": entry["last_vote_ts"],
+        "next_vote_ts": entry["last_vote_ts"] + VOTE_COOLDOWN_SECONDS,
+        "pending_boxes": entry["pending_boxes"],
+        "milestones_hit": hit,
+    }
+
+
+def claim_vote_box(user_id: int) -> bool:
+    """Consume one unclaimed Vote Mystery Box. Returns False if the user
+    has none pending (caller should not grant a reward in that case)."""
+    entry = _vote_entry(user_id)
+    if entry["pending_boxes"] <= 0:
+        return False
+    entry["pending_boxes"] -= 1
+    _schedule_save("votes")
+    return True
+
+
+def get_vote_reminder_enabled(user_id: int) -> bool:
+    """Whether this user has opted into a DM the moment their top.gg vote
+    cooldown resets."""
+    return bool(_vote_entry(user_id)["reminder_enabled"])
+
+
+def set_vote_reminder_enabled(user_id: int, enabled: bool) -> None:
+    """Toggle vote-reset DM reminders on/off for this user."""
+    entry = _vote_entry(user_id)
+    entry["reminder_enabled"] = bool(enabled)
+    _schedule_save("votes")
+
+
+def get_users_due_for_vote_reminder() -> list[int]:
+    """Users who opted in, haven't already been reminded this cooldown
+    cycle, and whose 12h vote cooldown has just elapsed. Meant to be
+    polled periodically (see cogs/vote.py's background loop) rather than
+    computed on every state change."""
+    now = time.time()
+    due = []
+    for uid_str, entry in _data["votes"].items():
+        if not entry.get("reminder_enabled"):
+            continue
+        if entry.get("reminder_sent"):
+            continue
+        last_ts = entry.get("last_vote_ts", 0.0)
+        if not last_ts:
+            continue
+        if now >= last_ts + VOTE_COOLDOWN_SECONDS:
+            due.append(int(uid_str))
+    return due
+
+
+def mark_vote_reminder_sent(user_id: int) -> None:
+    """Mark this cooldown cycle's reminder as sent (or attempted) so the
+    background loop doesn't keep retrying every cycle — cleared again the
+    next time the user actually votes."""
+    entry = _vote_entry(user_id)
+    entry["reminder_sent"] = True
+    _schedule_save("votes")
+
+
+def get_vote_leaderboard(limit: int = 10) -> list[tuple[str, dict]]:
+    """Top voters by total_votes, most votes first. Returns (user_id_str, entry) pairs."""
+    ranked = sorted(
+        _data["votes"].items(),
+        key=lambda kv: (kv[1].get("total_votes", 0), kv[1].get("streak", 0)),
+        reverse=True,
+    )
+    return ranked[:limit]
 
 
 def grant_onboarding_bonus(user_id: int, amount: int) -> int:

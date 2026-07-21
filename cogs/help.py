@@ -199,6 +199,8 @@ CATEGORIES = {
         "commands": [
             ("!feedback  /feedback",      "Submit a suggestion or feedback"),
             ("!bugreport  /bugreport",    "Report a bug you found"),
+            ("!vote  /vote",              "Vote for Jarvis on top.gg"),
+            ("!voteclaim  /voteclaim",    "Open a Vote Mystery Box earned from voting"),
         ],
     },
     "🎨 Prompts": {
