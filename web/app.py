@@ -28,11 +28,14 @@ Keeping this split means the bot and the website can be deployed,
 scaled, and restarted completely independently.
 """
 import asyncio
+import hashlib
+import hmac
+import json
 import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -222,50 +225,80 @@ def create_app(bot) -> FastAPI:
         })
 
     @app.post("/webhook/topgg")
-    async def webhook_topgg(request: Request, authorization: str = Header(default="")):
-        """top.gg calls this every time someone votes for the bot.
-        Configure the exact same URL + secret on top.gg's "Webhooks" tab
-        for this bot listing, and set TOPGG_WEBHOOK_AUTH to that same
-        secret here. Without a matching secret, nothing is trusted or
-        recorded — this endpoint just 401s.
+    async def webhook_topgg(request: Request):
+        """top.gg calls this every time someone votes for the bot (or when
+        the "Send Test" button on their Webhooks dashboard is used).
+
+        This is top.gg's *current* (v1) webhook scheme, which signs each
+        request with HMAC-SHA256 instead of the old plain shared-secret
+        Authorization header:
+
+            X-Topgg-Signature: t=<unix ts>,v1=<hex hmac>
+
+        The signed content is "{timestamp}.{raw request body}", HMAC'd with
+        TOPGG_WEBHOOK_AUTH (the "whs_..." secret shown on top.gg's Webhooks
+        page for this listing) as the key. Reference implementation:
+        https://github.com/top-gg/webhooks-v2-nodejs-example
+
+        The payload shape also changed — events now look like
+        {"type": "vote.create", "data": {...}} instead of the old flat
+        {"type": "upvote", "user": "..."}. The voter's Discord ID lives at
+        data.user.platform_id (data.user.id is top.gg's own internal ID,
+        NOT the Discord ID — using it by mistake would silently credit the
+        wrong/nonexistent account). See https://docs.top.gg/webhooks/events
         """
-        # Log immediately on arrival, before anything else, and flush right
-        # away — stdout is block-buffered in most container hosts (Railway
-        # included) when it's not attached to a real terminal, so plain
-        # print() calls can sit unflushed for a while. flush=True forces
-        # every webhook-related log line out immediately so `Send Test` /
-        # a real vote shows up in the logs the instant it happens.
-        print(f"📨 /webhook/topgg hit (Authorization header present: {bool(authorization)})", flush=True)
-
-        expected_auth = os.getenv("TOPGG_WEBHOOK_AUTH", "")
-
-        # 🔧 TEMP DEBUG — remove once the mismatch is sorted, don't leave a
-        # secret printed to logs long-term.
-        print(f"🔧 TEMP DEBUG all incoming headers = {dict(request.headers)!r}", flush=True)
-        print(f"🔧 TEMP DEBUG expected_auth = {expected_auth!r}", flush=True)
-        print(f"🔧 TEMP DEBUG received authorization header = {authorization!r}", flush=True)
-
-        if not expected_auth:
+        secret = os.getenv("TOPGG_WEBHOOK_AUTH", "")
+        if not secret:
             print("⚠️ /webhook/topgg hit but TOPGG_WEBHOOK_AUTH is not set — rejecting.", flush=True)
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        if authorization != expected_auth:
-            print(
-                f"⚠️ /webhook/topgg hit with mismatched Authorization header "
-                f"(got {len(authorization)} chars, expected {len(expected_auth)} chars) — rejecting.",
-                flush=True,
-            )
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        signature_header = request.headers.get("x-topgg-signature", "")
+        if not signature_header:
+            print("⚠️ /webhook/topgg hit with no X-Topgg-Signature header — rejecting.", flush=True)
+            return JSONResponse({"error": "missing signature"}, status_code=401)
 
         try:
-            payload = await request.json()
+            sig_parts = dict(part.split("=", 1) for part in signature_header.split(","))
+            timestamp = sig_parts["t"]
+            signature = sig_parts["v1"]
+        except (KeyError, ValueError):
+            print(f"⚠️ /webhook/topgg malformed signature header: {signature_header!r} — rejecting.", flush=True)
+            return JSONResponse({"error": "invalid signature format"}, status_code=400)
+
+        # Must HMAC the exact raw bytes top.gg sent — re-serializing the
+        # parsed JSON would very likely produce a different byte sequence
+        # (key order, spacing) and make every signature fail to match.
+        raw_body = await request.body()
+        expected_digest = hmac.new(
+            secret.encode("utf-8"),
+            f"{timestamp}.{raw_body.decode('utf-8')}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(expected_digest, signature):
+            print("⚠️ /webhook/topgg signature mismatch — rejecting.", flush=True)
+            return JSONResponse({"error": "invalid signature"}, status_code=403)
+
+        try:
+            payload = json.loads(raw_body)
         except Exception:
             return JSONResponse({"error": "invalid json"}, status_code=400)
 
-        if payload.get("type") == "test":
-            # top.gg's "Test" button on the webhook page — acknowledge only.
+        event_type = payload.get("type")
+        data = payload.get("data") or {}
+
+        if event_type == "webhook.test":
+            # top.gg's "Test" button on the webhook page — signature already
+            # verified above, so this just confirms end-to-end connectivity.
+            print("✅ /webhook/topgg test event verified successfully.", flush=True)
             return JSONResponse({"status": "ok"})
 
-        user_id_raw = payload.get("user")
+        if event_type != "vote.create":
+            # Unknown/future event type — acknowledge so top.gg doesn't keep
+            # retrying, but there's nothing for us to record.
+            return JSONResponse({"status": "ignored"})
+
+        user_id_raw = (data.get("user") or {}).get("platform_id")
         if not user_id_raw:
             return JSONResponse({"error": "missing user"}, status_code=400)
 
