@@ -238,6 +238,12 @@ def create_app(bot) -> FastAPI:
         print(f"📨 /webhook/topgg hit (Authorization header present: {bool(authorization)})", flush=True)
 
         expected_auth = os.getenv("TOPGG_WEBHOOK_AUTH", "")
+
+        # 🔧 TEMP DEBUG — remove once the mismatch is sorted, don't leave a
+        # secret printed to logs long-term.
+        print(f"🔧 TEMP DEBUG expected_auth = {expected_auth!r}", flush=True)
+        print(f"🔧 TEMP DEBUG received authorization header = {authorization!r}", flush=True)
+
         if not expected_auth:
             print("⚠️ /webhook/topgg hit but TOPGG_WEBHOOK_AUTH is not set — rejecting.", flush=True)
             return JSONResponse({"error": "unauthorized"}, status_code=401)
