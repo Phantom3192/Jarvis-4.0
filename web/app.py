@@ -241,6 +241,7 @@ def create_app(bot) -> FastAPI:
 
         # 🔧 TEMP DEBUG — remove once the mismatch is sorted, don't leave a
         # secret printed to logs long-term.
+        print(f"🔧 TEMP DEBUG all incoming headers = {dict(request.headers)!r}", flush=True)
         print(f"🔧 TEMP DEBUG expected_auth = {expected_auth!r}", flush=True)
         print(f"🔧 TEMP DEBUG received authorization header = {authorization!r}", flush=True)
 
