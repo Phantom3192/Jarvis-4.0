@@ -229,8 +229,24 @@ def create_app(bot) -> FastAPI:
         secret here. Without a matching secret, nothing is trusted or
         recorded — this endpoint just 401s.
         """
+        # Log immediately on arrival, before anything else, and flush right
+        # away — stdout is block-buffered in most container hosts (Railway
+        # included) when it's not attached to a real terminal, so plain
+        # print() calls can sit unflushed for a while. flush=True forces
+        # every webhook-related log line out immediately so `Send Test` /
+        # a real vote shows up in the logs the instant it happens.
+        print(f"📨 /webhook/topgg hit (Authorization header present: {bool(authorization)})", flush=True)
+
         expected_auth = os.getenv("TOPGG_WEBHOOK_AUTH", "")
-        if not expected_auth or authorization != expected_auth:
+        if not expected_auth:
+            print("⚠️ /webhook/topgg hit but TOPGG_WEBHOOK_AUTH is not set — rejecting.", flush=True)
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if authorization != expected_auth:
+            print(
+                f"⚠️ /webhook/topgg hit with mismatched Authorization header "
+                f"(got {len(authorization)} chars, expected {len(expected_auth)} chars) — rejecting.",
+                flush=True,
+            )
             return JSONResponse({"error": "unauthorized"}, status_code=401)
 
         try:
@@ -256,7 +272,8 @@ def create_app(bot) -> FastAPI:
         print(
             f"🗳️ Vote recorded for {user_id} — "
             f"streak {stats['streak']}, total {stats['total_votes']}, "
-            f"pending boxes {stats['pending_boxes']}"
+            f"pending boxes {stats['pending_boxes']}",
+            flush=True,
         )
 
         return JSONResponse({"status": "ok"})
