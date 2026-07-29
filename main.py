@@ -60,7 +60,6 @@ COGS = [
     # "cogs.music",
     "cogs.economy",
     "cogs.profile", 
-    "cogs.system_breach",
     "cogs.status",
     "cogs.tos",
 ]
