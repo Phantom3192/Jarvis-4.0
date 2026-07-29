@@ -162,19 +162,17 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
         sb_badge_ids = get_system_breach_badges(uid)
         total_badges = len(badge_ids) + len(sb_badge_ids)
         if total_badges:
-            lines = []
+            emojis = []
             if badge_ids:
-                badge_line = "  ".join(
+                emojis.extend(
                     ACHIEVEMENTS[b]["emoji"] for b in badge_ids if b in ACHIEVEMENTS
                 )
-                lines.append(badge_line)
             if sb_badge_ids:
-                sb_badge_line = "  ".join(
+                emojis.extend(
                     SYSTEM_BREACH_BADGE_LABELS[b].split(" ", 1)[0]
                     for b in sb_badge_ids if b in SYSTEM_BREACH_BADGE_LABELS
                 )
-                lines.append(f"<:System_Breach:1532119653214584853> **System Breach:** {sb_badge_line}")
-            embed.add_field(name=f"🏅 Badges ({total_badges})", value="\n".join(lines), inline=False)
+            embed.add_field(name=f"🏅 Badges ({total_badges})", value="  ".join(emojis), inline=False)
         else:
             embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
 
