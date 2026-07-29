@@ -138,8 +138,10 @@ SYSTEM_BREACH_BADGE_LABELS: dict[str, str] = {
     "full_compliance": "📜 Full Compliance",
     "registry_complete": "🗂️ Registry Complete",
     "breach_contained": "<:Breach_Contained:1532121198035730472> Breach Contained",
+    "system_breach": "<:System_Breach:1532119653214584853> System Breach",
 }
 
+# Add to TITLE_LABELS so event titles resolve properly even without the cog
 TITLE_LABELS.update(SYSTEM_BREACH_BADGE_LABELS)
 
 
