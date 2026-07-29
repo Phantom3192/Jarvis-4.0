@@ -168,6 +168,7 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
                     ACHIEVEMENTS[b]["emoji"] for b in badge_ids if b in ACHIEVEMENTS
                 )
             if sb_badge_ids:
+                emojis.append("<:System_Breach:1532119653214584853>")
                 emojis.extend(
                     SYSTEM_BREACH_BADGE_LABELS[b].split(" ", 1)[0]
                     for b in sb_badge_ids if b in SYSTEM_BREACH_BADGE_LABELS
