@@ -26,69 +26,69 @@ from cogs.state import (
 
 ACHIEVEMENTS: dict[str, dict] = {
     "chess_novice": {
-        "name": "Chess Novice", "emoji": "♟️",
+        "name": "Chess Novice", "emoji": "<a:Chess_Novice:1532126516467601489>",
         "description": "Win your first chess game.",
-        "title": "♟️ Chess Novice",
+        "title": "<a:Chess_Novice:1532126516467601489> Chess Novice",
         "metric": lambda uid: get_game_stats(uid)["chess_wins"], "threshold": 1,
     },
     "chess_master": {
-        "name": "Chess Master", "emoji": "🏆",
+        "name": "Chess Master", "emoji": "<:Chess_Master:1532127055364362331>",
         "description": "Win 10 chess games.",
-        "title": "🏆 Chess Master",
+        "title": "<:Chess_Master:1532127055364362331> Chess Master",
         "metric": lambda uid: get_game_stats(uid)["chess_wins"], "threshold": 10,
     },
     "chess_grandmaster": {
-        "name": "Chess Grandmaster", "emoji": "👑",
+        "name": "Chess Grandmaster", "emoji": "<:Chess_Grandmaster:1532127405018189834>",
         "description": "Win 50 chess games.",
-        "title": "👑 Chess Grandmaster",
+        "title": "<:Chess_Grandmaster:1532127405018189834> Chess Grandmaster",
         "metric": lambda uid: get_game_stats(uid)["chess_wins"], "threshold": 50,
     },
     "mafia_survivor": {
-        "name": "Mafia Survivor", "emoji": "🎭",
+        "name": "Mafia Survivor", "emoji": "<:Mafia_Survivor:1532128095329587370>",
         "description": "Win 5 Mafia games.",
-        "title": "🎭 Mafia MVP",
+        "title": "<:Mafia_Survivor:1532128095329587370> Mafia MVP",
         "metric": lambda uid: get_game_stats(uid)["mafia_wins"], "threshold": 5,
     },
     "mafia_kingpin": {
-        "name": "Mafia Kingpin", "emoji": "🔫",
+        "name": "Mafia Kingpin", "emoji": "<:Mafia_Kingpin:1532128423059656897>",
         "description": "Win 20 Mafia games.",
-        "title": "🔫 Mafia Kingpin",
+        "title": "<:Mafia_Kingpin:1532128423059656897> Mafia Kingpin",
         "metric": lambda uid: get_game_stats(uid)["mafia_wins"], "threshold": 20,
     },
     "hangman_hero": {
-        "name": "Hangman Hero", "emoji": "🪢",
+        "name": "Hangman Hero", "emoji": "<:Hangman_Hero:1532128624918925393>",
         "description": "Solve 25 hangman rounds.",
-        "title": "🪢 Hangman Hero",
+        "title": "<:Hangman_Hero:1532128624918925393> Hangman Hero",
         "metric": lambda uid: get_game_stats(uid)["hangman_wins"], "threshold": 25,
     },
     "loyal_week": {
-        "name": "Week-Long Regular", "emoji": "🔥",
+        "name": "Week-Long Regular", "emoji": "<:Loyal_Week:1532128998765629450>",
         "description": "Keep a 7-day chat streak going.",
         "title": None,
         "metric": lambda uid: get_streak(uid), "threshold": 7,
     },
     "loyal_month": {
-        "name": "Monthly Loyalist", "emoji": "⭐",
+        "name": "Monthly Loyalist", "emoji": "<:Loyal_Month:1532129368011309156>",
         "description": "Keep a 30-day chat streak going.",
-        "title": "⭐ Monthly Loyalist",
+        "title": "<:Loyal_Month:1532129368011309156> Monthly Loyalist",
         "metric": lambda uid: get_streak(uid), "threshold": 30,
     },
     "loyal_100": {
-        "name": "Centurion", "emoji": "🏵️",
+        "name": "Centurion", "emoji": "<:Loyal_100:1532129806383190067>",
         "description": "Keep a 100-day chat streak going.",
-        "title": "🏵️ Centurion",
+        "title": "<:Loyal_100:1532129806383190067> Centurion",
         "metric": lambda uid: get_streak(uid), "threshold": 100,
     },
     "loyal_year": {
-        "name": "Year One", "emoji": "🎇",
+        "name": "Year One", "emoji": "<:Loyal_Year:1532130270776398025>",
         "description": "Keep a 365-day chat streak going.",
-        "title": "🎇 Year One",
+        "title": "<:Loyal_Year:1532130270776398025> Year One",
         "metric": lambda uid: get_streak(uid), "threshold": 365,
     },
     "chatterbox": {
-        "name": "Chatterbox", "emoji": "💬",
+        "name": "Chatterbox", "emoji": "<:Chatterbox:1532130749896065175>",
         "description": "Send 500 messages to Jarvis.",
-        "title": "💬 Chatterbox",
+        "title": "<:Chatterbox:1532130749896065175> Chatterbox",
         "metric": lambda uid: (get_stats(uid) or {}).get("messages", 0), "threshold": 500,
     },
 }
@@ -131,16 +131,15 @@ TITLE_LABELS: dict[str, str] = {
 # the event cog is removed. The actual badge data is stored in state.py.
 
 SYSTEM_BREACH_BADGE_LABELS: dict[str, str] = {
-    "process_hunter": "🔎 Process Hunter",
-    "daemon_wrangler": "🧩 Daemon Wrangler",
+    "process_hunter": "<:Process_Hunter:1532120636103721181> Process Hunter",
+    "daemon_wrangler": "<:Daemon_Wrangler:1532121440499798206> Daemon Wrangler",
     "system_purger": "🔥 System Purger",
     "core_guardian": "👑 Core Guardian",
     "full_compliance": "📜 Full Compliance",
     "registry_complete": "🗂️ Registry Complete",
-    "breach_contained": "🕸️ Breach Contained",
+    "breach_contained": "<:Breach_Contained:1532121198035730472> Breach Contained",
 }
 
-# Add to TITLE_LABELS so event titles resolve properly even without the cog
 TITLE_LABELS.update(SYSTEM_BREACH_BADGE_LABELS)
 
 

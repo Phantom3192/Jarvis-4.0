@@ -173,7 +173,7 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
                     SYSTEM_BREACH_BADGE_LABELS[b]
                     for b in sb_badge_ids if b in SYSTEM_BREACH_BADGE_LABELS
                 )
-                lines.append(f"⚠️ **System Breach:** {sb_badge_line}")
+                lines.append(f"<:System_Breach:1532119653214584853> **System Breach:** {sb_badge_line}")
             embed.add_field(name=f"🏅 Badges ({total_badges})", value="\n".join(lines), inline=False)
         else:
             embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
