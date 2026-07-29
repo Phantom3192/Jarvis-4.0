@@ -170,7 +170,7 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
                 lines.append(badge_line)
             if sb_badge_ids:
                 sb_badge_line = "  ".join(
-                    SYSTEM_BREACH_BADGE_LABELS[b]
+                    SYSTEM_BREACH_BADGE_LABELS[b].split(" ", 1)[0]
                     for b in sb_badge_ids if b in SYSTEM_BREACH_BADGE_LABELS
                 )
                 lines.append(f"<:System_Breach:1532119653214584853> **System Breach:** {sb_badge_line}")
