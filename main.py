@@ -57,7 +57,7 @@ COGS = [
     "cogs.summary",
     "cogs.presence",
     "cogs.youtube",
-    # "cogs.music",
+    "cogs.music",
     "cogs.economy",
     "cogs.profile", 
     "cogs.status",

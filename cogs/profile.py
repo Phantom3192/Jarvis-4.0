@@ -18,9 +18,9 @@ from cogs.state import (
     get_favorite_song, get_stats, get_badges, get_titles, get_banners,
     equip_title, equip_banner, PROFILE_FIELDS, get_hidden_fields,
     set_field_hidden, get_referral_count, get_lifetime_earned, get_ai_usage,
-    get_first_interaction, is_new_user,
+    get_first_interaction, is_new_user, get_system_breach_badges,
 )
-from cogs.achievements import ACHIEVEMENTS
+from cogs.achievements import ACHIEVEMENTS, SYSTEM_BREACH_BADGE_LABELS
 from cogs.economy import JC_EMOJI, JC_NAME, BANNER_COLORS, get_title_label
 
 # ── Leveling ──────────────────────────────────────────────────────────────────
@@ -159,11 +159,22 @@ def _profile_embed(user: discord.User | discord.Member, viewer: discord.User | d
 
     if "badges" not in hidden:
         badge_ids = get_badges(uid)
-        if badge_ids:
-            badge_line = "  ".join(
-                ACHIEVEMENTS[b]["emoji"] for b in badge_ids if b in ACHIEVEMENTS
-            )
-            embed.add_field(name=f"🏅 Badges ({len(badge_ids)})", value=badge_line, inline=False)
+        sb_badge_ids = get_system_breach_badges(uid)
+        total_badges = len(badge_ids) + len(sb_badge_ids)
+        if total_badges:
+            lines = []
+            if badge_ids:
+                badge_line = "  ".join(
+                    ACHIEVEMENTS[b]["emoji"] for b in badge_ids if b in ACHIEVEMENTS
+                )
+                lines.append(badge_line)
+            if sb_badge_ids:
+                sb_badge_line = "  ".join(
+                    SYSTEM_BREACH_BADGE_LABELS[b]
+                    for b in sb_badge_ids if b in SYSTEM_BREACH_BADGE_LABELS
+                )
+                lines.append(f"⚠️ **System Breach:** {sb_badge_line}")
+            embed.add_field(name=f"🏅 Badges ({total_badges})", value="\n".join(lines), inline=False)
         else:
             embed.add_field(name="🏅 Badges", value="None yet — play some games or chat to unlock some!", inline=False)
 
