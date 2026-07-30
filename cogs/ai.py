@@ -373,6 +373,77 @@ DEFAULT_SYSTEM_PROMPT = (
     "Never make up a number for ping or any other live value."
 )
 
+# ── Anti-hallucination: never invent a command that doesn't exist ──────────
+# The model has, in the wild, suggested plausible-sounding but entirely
+# fake commands (e.g. "!price", "!convert", "!crypto") when asked about
+# something the bot doesn't actually do. _bot_ref is set by AI.__init__ so
+# this can read the live, always-accurate command list straight from
+# discord.py's command registry instead of a hand-maintained (and easily
+# stale) list.
+_bot_ref: commands.Bot | None = None
+_real_command_list_cache: str | None = None
+
+# Bot-owner-only or global-admin-only commands (grants credits/subs, bans,
+# force-controls other users' music, reloads the bot, etc). These are real
+# commands, but suggesting them to a regular user is actively misleading —
+# they'll just get a permission-denied, or worse, it reads like Jarvis is
+# endorsing an exploit (e.g. "run !addcredits to increase your balance").
+# discord.py's is_owner()/has_permissions() checks aren't reliably
+# introspectable at runtime for commands that gate manually in the command
+# body (the common pattern in this codebase via is_admin()/is_owner()), so
+# this is a curated list — add new entries here whenever a new owner/admin-
+# only command is created.
+OWNER_ADMIN_ONLY_COMMANDS = {
+    "set-cooldown", "set-burst", "adminhelp",
+    "apistatus", "backfill_servers",
+    "givecredits", "givejc", "addcredits",
+    "removejc", "removecredits", "deductjc",
+    "grantsub", "givesub", "grantvip",
+    "forcejoin", "fjoin", "forceplay", "fplay", "forcestop", "fstop",
+    "forcepause", "fpause", "forceresume", "fresume", "forceskip", "fskip",
+    "forcequeue", "fqueue", "fq", "forcenp", "fnp", "forcevolume", "fvol",
+    "forcecontrols", "fctrl", "fcp",
+    "stats", "status",
+    "global-ban", "global-unban", "global-bans", "resetlimit",
+    "guild-ban", "guild-unban", "guild-bans",
+    "panel", "apanel", "reload",
+    "global-announce", "announce",
+}
+
+def _build_real_command_list() -> str:
+    """Return a comma-separated list of every real, regular-user-usable
+    !-prefix command name and alias currently registered on the bot (owner/
+    admin-only commands are excluded — see OWNER_ADMIN_ONLY_COMMANDS).
+    Cached after first build since the command set is fixed once all cogs
+    have loaded."""
+    global _real_command_list_cache
+    if _real_command_list_cache is not None:
+        return _real_command_list_cache
+    if _bot_ref is None:
+        return ""  # cog not loaded yet — caller should treat this as "unknown"
+    names = set()
+    for cmd in _bot_ref.commands:
+        if cmd.name in OWNER_ADMIN_ONLY_COMMANDS:
+            continue
+        names.add(cmd.name)
+        names.update(a for a in cmd.aliases if a not in OWNER_ADMIN_ONLY_COMMANDS)
+    _real_command_list_cache = ", ".join(f"!{n}" for n in sorted(names))
+    return _real_command_list_cache
+
+COMMAND_HALLUCINATION_GUARD = (
+    "\n\nCRITICAL: Never invent, guess, or make up a command that doesn't exist. "
+    "The ONLY real commands you may ever mention or suggest are the exact ones in this "
+    "list — every valid ! command also works as a matching / slash command: {command_list}. "
+    "This list has already been filtered to exclude owner/admin-only commands, so treat it "
+    "as the complete set of things a regular user can actually do. "
+    "If someone asks about a feature (e.g. crypto prices, currency conversion, weather) "
+    "and no command in that list actually does it, just say plainly that Jarvis doesn't "
+    "have that feature — do NOT suggest a command name that isn't in the list above, "
+    "even if it sounds plausible. Never suggest a command as a way to directly increase "
+    "your own or someone else's currency balance — Jarvis Credits can only be earned "
+    "through normal activity (chatting, games, daily streaks), never granted on request."
+)
+
 SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 MAX_IMAGE_BYTES       = 20 * 1024 * 1024
 AI_UNAVAILABLE_MSG    = "⏳ The AI provider is still working on your request. Please wait a moment for a response."
@@ -1559,6 +1630,9 @@ async def generate_ai_response(
                 return cached_response
 
     base_prompt = get_guild_prompt(guild_id) or DEFAULT_SYSTEM_PROMPT
+    command_list = _build_real_command_list()
+    if command_list:
+        base_prompt = base_prompt + COMMAND_HALLUCINATION_GUARD.format(command_list=command_list)
     in_group    = _is_in_group(user_id, channel_id)
     in_merge    = thread_root_id is not None
 
@@ -1895,6 +1969,8 @@ def _dnd_check(ctx: commands.Context) -> bool:
 class AI(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        global _bot_ref
+        _bot_ref = bot
         self.reminder_task = asyncio.create_task(self._reminder_loop())
 
     async def cog_check(self, ctx: commands.Context) -> bool:

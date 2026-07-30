@@ -60,6 +60,7 @@ _data: dict[str, Any] = {
     # ── System Breach Event Badges (persist after event) ───────────────────
     "system_breach_badges": {},  # str(user_id) → [badge_id, ...]
     "votes": {},  # str(user_id) → {"total_votes": int, "streak": int, "last_vote_ts": float, "streak_milestones": [int,...]}
+    "guild_prefixes": {},  # str(guild_id) → custom command prefix string
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -94,6 +95,7 @@ _SERIALISE: dict[str, Any] = {
     "lifetime_earned":     lambda: _data["lifetime_earned"],
     "system_breach_badges": lambda: _data["system_breach_badges"],
     "votes":                lambda: _data["votes"],
+    "guild_prefixes":       lambda: _data["guild_prefixes"],
 }
 
 
@@ -168,6 +170,7 @@ async def init_db():
     if "lifetime_earned" in db: _data["lifetime_earned"] = db["lifetime_earned"]
     if "system_breach_badges" in db: _data["system_breach_badges"] = db["system_breach_badges"]
     if "votes"           in db: _data["votes"]           = db["votes"]
+    if "guild_prefixes"  in db: _data["guild_prefixes"]  = db["guild_prefixes"]
 
     # ── One-time migration: back-fill first_interaction for users who were
     # already marked "seen" before this table existed. mark_seen() only
@@ -436,6 +439,31 @@ def reset_guild_prompt(guild_id: int) -> bool:
     if uid in _data["prompts"]:
         del _data["prompts"][uid]
         _schedule_save("prompts")
+        return True
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GUILD COMMAND PREFIX
+# ══════════════════════════════════════════════════════════════════════════════
+
+DEFAULT_PREFIX = "!"
+
+def get_guild_prefix(guild_id: int | None) -> str:
+    """Return this guild's custom prefix, or the default '!' if unset/DM."""
+    if guild_id is None:
+        return DEFAULT_PREFIX
+    return _data["guild_prefixes"].get(str(guild_id), DEFAULT_PREFIX)
+
+def set_guild_prefix(guild_id: int, prefix: str) -> None:
+    _data["guild_prefixes"][str(guild_id)] = prefix
+    _schedule_save("guild_prefixes")
+
+def reset_guild_prefix(guild_id: int) -> bool:
+    uid = str(guild_id)
+    if uid in _data["guild_prefixes"]:
+        del _data["guild_prefixes"][uid]
+        _schedule_save("guild_prefixes")
         return True
     return False
 

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from cogs.errorhandler import install_stdout_error_forwarding, install_view_error_suppression
-from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown, flush_all_saves
+from cogs.state import is_bot_banned, init_db, check_burst_and_maybe_timeout, check_cooldown, flush_all_saves, get_guild_prefix
 from cogs.tos import ensure_tos
 import cogs.http_session as http_session
 from cogs.history import init_history, load_all_histories
@@ -31,8 +31,15 @@ intents.members         = True
 intents.voice_states = True
 
 
+def _resolve_prefix(bot: commands.Bot, message: discord.Message) -> str:
+    """Per-server custom prefix (set via !setprefix). DMs and guilds that
+    haven't customised it fall back to the default '!'."""
+    guild_id = message.guild.id if message.guild else None
+    return get_guild_prefix(guild_id)
+
+
 bot = commands.Bot(
-    command_prefix="!",
+    command_prefix=_resolve_prefix,
     intents=intents,
     help_command=None,
     allowed_mentions=discord.AllowedMentions.none(),

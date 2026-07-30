@@ -18,6 +18,7 @@ import asyncio
 import os
 import time
 from cogs.state import bot_bans, save_bans, is_bot_banned, reset_ai_usage, get_setting, set_setting, _data, _schedule_save
+from cogs.state import get_guild_prefix, set_guild_prefix, reset_guild_prefix, DEFAULT_PREFIX
 from cogs.help import AdminHelpView, _build_admin_overview_embed
 import re
 
@@ -662,6 +663,123 @@ class Admin(commands.Cog):
             return
         embed = await _build_guild_ban_embed(self.bot)
         await ctx.reply(embed=embed)
+
+    # ── Server prefix ────────────────────────────────────────────────────────
+    # Per-server custom command prefix, set via !setprefix. Requires Manage
+    # Server. Slash commands (/) are unaffected — this only changes the
+    # prefix used for !-style text commands.
+
+    MAX_PREFIX_LEN = 5
+
+    @staticmethod
+    def _has_manage_guild(user: discord.Member | discord.User) -> bool:
+        if not isinstance(user, discord.Member):
+            return False
+        return user.guild_permissions.manage_guild
+
+    @classmethod
+    def _validate_prefix(cls, prefix: str) -> str | None:
+        """Return an error message if the prefix is invalid, else None."""
+        if not prefix:
+            return "Prefix can't be empty."
+        if len(prefix) > cls.MAX_PREFIX_LEN:
+            return f"Prefix must be {cls.MAX_PREFIX_LEN} characters or fewer."
+        if prefix.isspace():
+            return "Prefix can't be just whitespace."
+        if prefix.startswith("/"):
+            return "Prefix can't start with `/` — that's reserved for slash commands."
+        if "@" in prefix:
+            return "Prefix can't contain `@` — that could conflict with mentions."
+        return None
+
+    @commands.command(name="setprefix")
+    @commands.guild_only()
+    async def prefix_setprefix(self, ctx: commands.Context, *, prefix: str = None):
+        """!setprefix <prefix> — change the command prefix for this server. Requires Manage Server."""
+        if not self._has_manage_guild(ctx.author):
+            await ctx.reply("🚫 You need the **Manage Server** permission to change the prefix.")
+            return
+        if not prefix:
+            current = get_guild_prefix(ctx.guild.id)
+            await ctx.reply(
+                f"**Usage:** `{current}setprefix <new prefix>`\n"
+                f"**Example:** `{current}setprefix ?`"
+            )
+            return
+        error = self._validate_prefix(prefix)
+        if error:
+            await ctx.reply(f"❌ {error}")
+            return
+        set_guild_prefix(ctx.guild.id, prefix)
+        await ctx.reply(
+            f"✅ Prefix for **{ctx.guild.name}** is now `{prefix}`.\n"
+            f"Example: `{prefix}help`. Slash commands (`/`) still work as normal."
+        )
+
+    @commands.command(name="resetprefix")
+    @commands.guild_only()
+    async def prefix_resetprefix(self, ctx: commands.Context):
+        """!resetprefix — reset this server's prefix back to the default. Requires Manage Server."""
+        if not self._has_manage_guild(ctx.author):
+            await ctx.reply("🚫 You need the **Manage Server** permission to reset the prefix.")
+            return
+        existed = reset_guild_prefix(ctx.guild.id)
+        if existed:
+            await ctx.reply(f"✅ Prefix reset to the default `{DEFAULT_PREFIX}` for **{ctx.guild.name}**.")
+        else:
+            await ctx.reply(f"ℹ️ This server is already using the default prefix `{DEFAULT_PREFIX}`.")
+
+    @commands.command(name="prefix")
+    @commands.guild_only()
+    async def prefix_prefix(self, ctx: commands.Context):
+        """!prefix — show this server's current command prefix."""
+        current = get_guild_prefix(ctx.guild.id)
+        await ctx.reply(f"📎 Current prefix for **{ctx.guild.name}**: `{current}`")
+
+    @app_commands.command(name="setprefix", description="Change the command prefix for this server")
+    @app_commands.describe(prefix="The new prefix (max 5 characters)")
+    @app_commands.guild_only()
+    async def slash_setprefix(self, interaction: discord.Interaction, prefix: str):
+        if not self._has_manage_guild(interaction.user):
+            await interaction.response.send_message(
+                "🚫 You need the **Manage Server** permission to change the prefix.",
+                ephemeral=True,
+            )
+            return
+        error = self._validate_prefix(prefix)
+        if error:
+            await interaction.response.send_message(f"❌ {error}", ephemeral=True)
+            return
+        set_guild_prefix(interaction.guild_id, prefix)
+        await interaction.response.send_message(
+            f"✅ Prefix for **{interaction.guild.name}** is now `{prefix}`.\n"
+            f"Example: `{prefix}help`. Slash commands (`/`) still work as normal."
+        )
+
+    @app_commands.command(name="resetprefix", description="Reset this server's prefix back to the default")
+    @app_commands.guild_only()
+    async def slash_resetprefix(self, interaction: discord.Interaction):
+        if not self._has_manage_guild(interaction.user):
+            await interaction.response.send_message(
+                "🚫 You need the **Manage Server** permission to reset the prefix.",
+                ephemeral=True,
+            )
+            return
+        existed = reset_guild_prefix(interaction.guild_id)
+        if existed:
+            await interaction.response.send_message(
+                f"✅ Prefix reset to the default `{DEFAULT_PREFIX}` for **{interaction.guild.name}**."
+            )
+        else:
+            await interaction.response.send_message(
+                f"ℹ️ This server is already using the default prefix `{DEFAULT_PREFIX}`."
+            )
+
+    @app_commands.command(name="prefix", description="Show this server's current command prefix")
+    @app_commands.guild_only()
+    async def slash_prefix(self, interaction: discord.Interaction):
+        current = get_guild_prefix(interaction.guild_id)
+        await interaction.response.send_message(f"📎 Current prefix for **{interaction.guild.name}**: `{current}`")
 
 
 async def setup(bot: commands.Bot):

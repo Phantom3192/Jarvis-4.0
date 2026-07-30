@@ -20,7 +20,7 @@ from cogs.state import (
     get_equipped_title, grant_title, get_titles, grant_banner, get_banners,
     get_all_subscriptions, get_subscriptions, set_subscription, clear_subscription, revoke_title,
     revoke_banner, equip_title, get_auto_renew, set_auto_renew, clear_auto_renew,
-    get_setting, set_setting,
+    get_setting, set_setting, get_hidden_fields,
 )
 from cogs.achievements import TITLE_LABELS
 
@@ -660,8 +660,11 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
     for i in range(min(3, len(resolved))):
         uid, bal, user = resolved[i]
         name_display, bal = _display(uid, bal, user)
-        bar = _lb_bar(bal, max_bal)
-        podium_lines.append(f"{_MEDALS[i]} {name_display}\n`{bar}` **{bal:,}** {JC_EMOJI}")
+        if "balance" in get_hidden_fields(int(uid)):
+            podium_lines.append(f"{_MEDALS[i]} {name_display}\n🔒 *Balance hidden*")
+        else:
+            bar = _lb_bar(bal, max_bal)
+            podium_lines.append(f"{_MEDALS[i]} {name_display}\n`{bar}` **{bal:,}** {JC_EMOJI}")
 
     embed.description = "\n\n".join(podium_lines)
 
@@ -670,7 +673,10 @@ async def _leaderboard_embed(bot: commands.Bot) -> discord.Embed:
         for i in range(3, len(resolved)):
             uid, bal, user = resolved[i]
             name_display, bal = _display(uid, bal, user)
-            rest_lines.append(f"`#{i + 1:>2}` {name_display} — **{bal:,}** {JC_EMOJI}")
+            if "balance" in get_hidden_fields(int(uid)):
+                rest_lines.append(f"`#{i + 1:>2}` {name_display} — 🔒 *Hidden*")
+            else:
+                rest_lines.append(f"`#{i + 1:>2}` {name_display} — **{bal:,}** {JC_EMOJI}")
         embed.add_field(name=f"Ranks 4–{len(resolved)}", value="\n".join(rest_lines), inline=False)
 
     top_user = resolved[0][2]
@@ -1615,16 +1621,13 @@ class Economy(commands.Cog):
         await self.bot.wait_until_ready()
 
     @commands.command(name="balance", aliases=["jc", "credits"])
-    async def prefix_balance(self, ctx: commands.Context, user: discord.User = None):
-        """!balance / !jc / !credits — check your (or someone else's) JC balance."""
-        target = user or ctx.author
-        await ctx.reply(embed=_balance_embed(target))
+    async def prefix_balance(self, ctx: commands.Context):
+        """!balance / !jc / !credits — check your own JC balance."""
+        await ctx.reply(embed=_balance_embed(ctx.author))
 
     @app_commands.command(name="balance", description="Check your Jarvis Credit (JC) balance")
-    @app_commands.describe(user="User to look up (optional — leave empty for yourself)")
-    async def slash_balance(self, interaction: discord.Interaction, user: discord.User = None):
-        target = user or interaction.user
-        await interaction.response.send_message(embed=_balance_embed(target))
+    async def slash_balance(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=_balance_embed(interaction.user))
 
     @commands.command(name="givecredits", aliases=["givejc", "addcredits"])
     @commands.is_owner()
