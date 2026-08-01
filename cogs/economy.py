@@ -68,8 +68,9 @@ MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 # that VIP/Elite's mystery_box_multiplier perk applies to. The plain Mystery
 # Box above always pays out its normal range, no title bonus involved.
 DELUXE_MYSTERY_BOX_COST = 1000  # JC to open a Deluxe Mystery Box
-DELUXE_MYSTERY_BOX_MIN  = 100   # min payout
+DELUXE_MYSTERY_BOX_MIN  = 0   # min payout
 DELUXE_MYSTERY_BOX_MAX  = 2000  # max payout — equal chance across the whole range
+DELUXE_MYSTERY_BOX_MAX_REWARD = 2500  # cap after title/perk boosts so the box stays within the intended deluxe range
 
 # Profile banner colors — shown as the /profile embed color once equipped.
 # Keyed by the same id used in SHOP_ITEMS/grant_banner/equip_banner.
@@ -218,6 +219,19 @@ def describe_perks(title_id: str) -> list[str]:
         if label:
             lines.append(f"• {label}")
     return lines
+
+
+def apply_mystery_box_multiplier(reward: int, multiplier: float, *, max_reward: int | None = None) -> int:
+    """Apply a mystery-box payout multiplier while capping the result.
+
+    Deluxe and vote mystery boxes use this boost path when a title or daemon
+    perk increases payouts. The cap prevents premium perks from turning the box
+    into a near-infinite JC source.
+    """
+    boosted = round(reward * multiplier)
+    if max_reward is not None:
+        return min(boosted, max_reward)
+    return boosted
 
 
 def get_active_perks(user_id: int) -> dict:
@@ -850,7 +864,11 @@ async def _purchase_item(
     elif kind == "mystery_box_deluxe":
         reward = random.randint(DELUXE_MYSTERY_BOX_MIN, DELUXE_MYSTERY_BOX_MAX)
         perks = get_active_perks(user.id)
-        reward = round(reward * perks.get("mystery_box_multiplier", 1.0))
+        reward = apply_mystery_box_multiplier(
+            reward,
+            perks.get("mystery_box_multiplier", 1.0),
+            max_reward=DELUXE_MYSTERY_BOX_MAX_REWARD,
+        )
         new_balance = add_credits(user.id, reward)
         fallback_msg = f"🎆 You opened the Deluxe Mystery Box and won **+{reward} {JC_NAME}**! New balance: **{new_balance}** {JC_EMOJI}"
         public_msg = mystery_box_result_embed(

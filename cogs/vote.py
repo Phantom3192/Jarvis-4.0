@@ -44,11 +44,11 @@ def _open_vote_box(user_id: int) -> tuple[int, int]:
     have confirmed (via claim_vote_box) that a box was actually pending.
     Returns (reward_jc, new_balance)."""
     from cogs.state import add_credits
-    from cogs.economy import get_active_perks
+    from cogs.economy import apply_mystery_box_multiplier, get_active_perks
 
     reward = random.randint(VOTE_BOX_MIN, VOTE_BOX_MAX)
     perks = get_active_perks(user_id)
-    reward = round(reward * perks.get("mystery_box_multiplier", 1.0))
+    reward = apply_mystery_box_multiplier(reward, perks.get("mystery_box_multiplier", 1.0))
     new_balance = add_credits(user_id, reward)
     return reward, new_balance
 

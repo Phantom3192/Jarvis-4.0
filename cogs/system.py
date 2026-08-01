@@ -8,7 +8,9 @@ Commands
 !usage / /usage      — Full CPU/RAM/disk/process stats. Admin only.
 !reload / /reload    — Reload all cogs + GC. Admin only.
 """
+import asyncio
 import gc
+import math
 import os
 import time
 import discord
@@ -414,12 +416,11 @@ async def _do_reload(bot: commands.Bot) -> str:
 class System(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        if _PSUTIL and not _storage_cache["ts"]:
-            # Prime once synchronously at startup so the first /api/stats
-            # response has a real number instead of 0 for the ~30s until
-            # _sample_storage_loop's first tick.
-            _storage_cache["used_bytes"] = _bot_storage_used()
-            _storage_cache["ts"] = time.time()
+        # NOTE: storage cache is intentionally left unprimed here — this
+        # __init__ re-runs on every !reload while the bot is live and
+        # connected, and a synchronous os.walk() at that point would stall
+        # the gateway heartbeat exactly like the old loop-based call did.
+        # /api/stats just reads 0 for the ~30s until the loop's first tick.
         self._sample_loop.start()
         self._sample_storage_loop.start()
         self._sample_ping_loop.start()
@@ -444,8 +445,15 @@ class System(commands.Cog):
     async def _sample_storage_loop(self):
         """The one genuinely non-trivial sample here — os.walk() over the
         whole project directory — deliberately kept on its own much
-        slower cadence. See _STORAGE_INTERVAL comment above."""
-        _storage_cache["used_bytes"] = _bot_storage_used()
+        slower cadence. See _STORAGE_INTERVAL comment above.
+
+        Runs in a worker thread: os.walk()/os.path.getsize() are blocking
+        syscalls, and calling them directly on the event loop stalls
+        heartbeat processing (the gateway "Can't keep up" warnings) and
+        starves every other coroutine — including the ping loop, whose
+        latency reading depends on heartbeats actually being sent.
+        """
+        _storage_cache["used_bytes"] = await asyncio.to_thread(_bot_storage_used)
         _storage_cache["ts"] = time.time()
 
     @tasks.loop(seconds=_PING_INTERVAL)
@@ -457,7 +465,13 @@ class System(commands.Cog):
         the website's /api/stats all read the exact same fresh snapshot
         instead of racing each other.
         """
-        ws_ms = round(self.bot.latency * 1000) if self.bot.latency == self.bot.latency else None  # NaN guard
+        # discord.py reports bot.latency as float('inf') while a heartbeat
+        # is outstanding (e.g. during the gateway lag seen in the logs),
+        # and as NaN before the first heartbeat. round(inf * 1000) raises
+        # OverflowError, which is what was crashing this loop — checking
+        # only `latency == latency` catches NaN but not inf.
+        _lat = self.bot.latency
+        ws_ms = round(_lat * 1000) if math.isfinite(_lat) else None
 
         api_ms = None
         if self.bot.is_ready() and self.bot.user:
