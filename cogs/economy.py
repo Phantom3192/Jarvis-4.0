@@ -68,7 +68,7 @@ MYSTERY_BOX_MAX      = 300  # max payout — equal chance across the whole range
 # that VIP/Elite's mystery_box_multiplier perk applies to. The plain Mystery
 # Box above always pays out its normal range, no title bonus involved.
 DELUXE_MYSTERY_BOX_COST = 1250  # JC to open a Deluxe Mystery Box
-DELUXE_MYSTERY_BOX_MIN  = 0   # min payout
+DELUXE_MYSTERY_BOX_MIN  = 100   # min payout
 DELUXE_MYSTERY_BOX_MAX  = 2000  # max payout — equal chance across the whole range
 DELUXE_MYSTERY_BOX_MAX_REWARD = 2500  # cap after title/perk boosts so the box stays within the intended deluxe range
 
