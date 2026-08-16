@@ -293,6 +293,7 @@ ADMIN_CATEGORIES = {
             ("!reload  /reload",           "Reload all cogs and clear memory cache (bot owner)"),
             ("!status",                    "Live bot status dashboard (bot owner)"),
             ("!apistatus  /apistatus",     "Show AI provider status, latency, and token usage"),
+            ("!api  /api",                 "Live dashboard: activity, DB/inference/response latency"),
             ("!global-announce  /global-announce", "DM an announcement to every Jarvis user (bot owner)"),
             ("!announce  /announce",       "DM a specific user as Jarvis (bot owner)"),
             ("!backfill_servers",          "Backfill server-join logs to the webhook for every current server (bot owner)"),

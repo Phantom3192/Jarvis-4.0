@@ -166,6 +166,12 @@ def _get_or_create_key_entry(provider_stats: dict, api_key: str | None) -> dict:
 
 
 def _record_provider_result(provider: str, api_key: str | None, *, success: bool, latency_ms: float, tokens: int = 0, error: str | None = None, status: str | None = None) -> None:
+    try:
+        from cogs.api_metrics import record_inference
+        record_inference(latency_ms)
+    except Exception:
+        pass  # metrics are best-effort — never let a dashboard hiccup break AI replies
+
     stats = _API_PROVIDER_STATS.setdefault(provider, _init_provider_status(0))
     stats["requests"] += 1
     if success:

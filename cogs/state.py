@@ -61,6 +61,7 @@ _data: dict[str, Any] = {
     "system_breach_badges": {},  # str(user_id) → [badge_id, ...]
     "votes": {},  # str(user_id) → {"total_votes": int, "streak": int, "last_vote_ts": float, "streak_milestones": [int,...]}
     "guild_prefixes": {},  # str(guild_id) → custom command prefix string
+    "locked_messages": {},  # lock_id (str) → {"author": int, "target": int, "content": str, "opened": bool, "created": float}
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -96,6 +97,7 @@ _SERIALISE: dict[str, Any] = {
     "system_breach_badges": lambda: _data["system_breach_badges"],
     "votes":                lambda: _data["votes"],
     "guild_prefixes":       lambda: _data["guild_prefixes"],
+    "locked_messages":      lambda: _data["locked_messages"],
 }
 
 
@@ -171,6 +173,7 @@ async def init_db():
     if "system_breach_badges" in db: _data["system_breach_badges"] = db["system_breach_badges"]
     if "votes"           in db: _data["votes"]           = db["votes"]
     if "guild_prefixes"  in db: _data["guild_prefixes"]  = db["guild_prefixes"]
+    if "locked_messages" in db: _data["locked_messages"] = db["locked_messages"]
 
     # ── One-time migration: back-fill first_interaction for users who were
     # already marked "seen" before this table existed. mark_seen() only
@@ -1603,3 +1606,34 @@ def grant_system_breach_badge(user_id: int, badge_id: str) -> bool:
     badges.append(badge_id)
     _schedule_save("system_breach_badges")
     return True
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOCKED MESSAGES (!lock / /lock — a message only the intended recipient can open)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_locked_message(lock_id: str, author_id: int, target_id: int, content: str) -> None:
+    """Store a new locked message, keyed by a short random id embedded in the
+    reveal button's custom_id. Persists via Turso so the button keeps working
+    even if the bot restarts before it's opened."""
+    _data["locked_messages"][lock_id] = {
+        "author":  author_id,
+        "target":  target_id,
+        "content": content,
+        "opened":  False,
+        "created": time.time(),
+    }
+    _schedule_save("locked_messages")
+
+
+def get_locked_message(lock_id: str) -> dict | None:
+    """Return the locked message entry for lock_id, or None if it doesn't
+    exist (expired data, tampered custom_id, etc.)."""
+    return _data["locked_messages"].get(lock_id)
+
+
+def mark_locked_message_opened(lock_id: str) -> None:
+    """Flag a locked message as opened once the intended recipient reveals it."""
+    entry = _data["locked_messages"].get(lock_id)
+    if entry is not None:
+        entry["opened"] = True
+        _schedule_save("locked_messages")

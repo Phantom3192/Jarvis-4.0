@@ -97,7 +97,7 @@ COGS = [
     "cogs.summary",
     "cogs.presence",
     "cogs.youtube",
-    # "cogs.music",  # TEMPORARILY DISABLED — kept in sync with main.py's COGS list.
+    "cogs.music",
     "cogs.economy",
     "cogs.status",
 ]
@@ -162,6 +162,31 @@ def _bot_storage_used() -> int:
             except OSError:
                 pass
     return total
+
+
+def _active_model_label() -> str:
+    """Primary AI model currently in use, for the !api footer. Imported
+    lazily (not at module load time) since cogs.ai imports things from
+    this module too — a top-level import here would create a cycle."""
+    try:
+        from cogs.ai import GROQ_MODEL_TEXT
+        return GROQ_MODEL_TEXT
+    except Exception:
+        return "unknown"
+
+
+def _active_backend_label() -> str:
+    """Which provider(s) are actually configured/enabled right now."""
+    try:
+        from cogs.ai import GROQ_API_KEYS, GEMINI_API_KEYS
+        parts = []
+        if GROQ_API_KEYS:
+            parts.append("Groq")
+        if GEMINI_API_KEYS:
+            parts.append("Gemini")
+        return " + ".join(parts) if parts else "none configured"
+    except Exception:
+        return "unknown"
 
 
 def _ping_colour(ms: float) -> discord.Color:
@@ -382,6 +407,53 @@ def _build_server_list_embeds(bot: commands.Bot) -> list[discord.Embed]:
 
 # ── Reload logic ──────────────────────────────────────────────────────────────
 
+# ── Reload confirmation ────────────────────────────────────────────────────
+
+class _ReloadConfirmView(discord.ui.View):
+    """Yes/No gate in front of !reload / /reload — reloading swaps out every
+    cog's code live, so a stray keypress or fat-fingered command shouldn't be
+    able to trigger it. Same visual language (✅ success / ❌ secondary) as
+    the SpendCreditsView confirm prompts in economy.py, for consistency."""
+
+    def __init__(self, user_id: int, bot: commands.Bot, *, timeout: float = 30):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.bot = bot
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This prompt isn't for you!", ephemeral=True)
+            return False
+        return True
+
+    def _disable(self) -> None:
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(label="Reload", style=discord.ButtonStyle.success, emoji="✅")
+    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable()
+        await interaction.response.edit_message(content="🔄 Reloading…", view=self)
+        result = await _do_reload(self.bot)
+        await interaction.edit_original_response(content=result, view=self)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self._disable()
+        await interaction.response.edit_message(content="❌ Reload cancelled.", view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        self._disable()
+        if self.message:
+            try:
+                await self.message.edit(content="⌛ Reload prompt timed out.", view=self)
+            except discord.HTTPException:
+                pass
+
+
 async def _do_reload(bot: commands.Bot) -> str:
     collected = gc.collect()
     bot._connection._messages.clear()
@@ -424,6 +496,7 @@ class System(commands.Cog):
         self._sample_loop.start()
         self._sample_storage_loop.start()
         self._sample_ping_loop.start()
+        self._command_starts: dict[int, float] = {}  # message.id -> monotonic start
 
     def cog_unload(self):
         # Critical for !reload: without this, every reload_extension() call
@@ -498,6 +571,47 @@ class System(commands.Cog):
     async def _before_sample_ping_loop(self):
         await self.bot.wait_until_ready()
 
+    # ── command timing (feeds the !api dashboard's Response stats) ──────────
+    # Bracket every prefix command's full handling time — from dispatch to
+    # completion — so the !api embed's "Response" numbers reflect real user-
+    # facing latency, not just one internal call. Best-effort only: a missing
+    # start time (e.g. right after a !reload swapped this cog mid-command)
+    # just skips that one sample instead of raising.
+
+    @commands.Cog.listener()
+    async def on_command(self, ctx: commands.Context):
+        self._command_starts[ctx.message.id] = time.monotonic()
+
+    @commands.Cog.listener()
+    async def on_command_completion(self, ctx: commands.Context):
+        start = self._command_starts.pop(ctx.message.id, None)
+        if start is None:
+            return
+        try:
+            from cogs.api_metrics import record_command
+            record_command((time.monotonic() - start) * 1000, ctx.author.id)
+        except Exception:
+            pass
+
+    # ── !api ──────────────────────────────────────────────────────────────────
+
+    @commands.command(name="api")
+    @commands.is_owner()
+    async def prefix_api(self, ctx: commands.Context):
+        """Bot owner only: live API/DB/inference latency dashboard."""
+        from cogs.api_metrics import build_api_embed
+        embed = build_api_embed(self.bot, model_label=_active_model_label(), backend_label=_active_backend_label())
+        await ctx.reply(embed=embed)
+
+    @app_commands.command(name="api", description="Show live API/DB/inference latency stats (owner only)")
+    async def slash_api(self, interaction: discord.Interaction):
+        if not await self.bot.is_owner(interaction.user):
+            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
+            return
+        from cogs.api_metrics import build_api_embed
+        embed = build_api_embed(self.bot, model_label=_active_model_label(), backend_label=_active_backend_label())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # ── !ping ─────────────────────────────────────────────────────────────────
 
     @commands.command(name="ping")
@@ -558,9 +672,10 @@ class System(commands.Cog):
         if not is_admin(ctx.author):
             await ctx.reply("🚫 You don't have permission to use this command.")
             return
-        msg = await ctx.reply("🔄 Reloading…")
-        result = await _do_reload(self.bot)
-        await msg.edit(content=result)
+        view = _ReloadConfirmView(ctx.author.id, self.bot)
+        view.message = await ctx.reply(
+            "⚠️ This will reload every cog live. Continue?", view=view
+        )
 
     @app_commands.command(name="reload", description="Reload all cogs and clear memory cache (admin only)")
     async def slash_reload(self, interaction: discord.Interaction):
@@ -569,9 +684,11 @@ class System(commands.Cog):
                 "🚫 You don't have permission to use this command.", ephemeral=True
             )
             return
-        await interaction.response.defer(ephemeral=True)
-        result = await _do_reload(self.bot)
-        await interaction.followup.send(result)
+        view = _ReloadConfirmView(interaction.user.id, self.bot)
+        await interaction.response.send_message(
+            "⚠️ This will reload every cog live. Continue?", view=view, ephemeral=True
+        )
+        view.message = await interaction.original_response()
 
 
     # ── !guildinfo ────────────────────────────────────────────────────────────

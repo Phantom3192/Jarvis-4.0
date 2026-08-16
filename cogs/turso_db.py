@@ -124,8 +124,14 @@ class TursoConnection:
         last_err: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
+                _t0 = time.monotonic()
                 result = await asyncio.to_thread(fn)
                 self._last_activity = time.monotonic()
+                try:
+                    from cogs.api_metrics import record_db
+                    record_db((self._last_activity - _t0) * 1000)
+                except Exception:
+                    pass  # metrics are best-effort — never let a dashboard hiccup break a DB call
                 return result
             except Exception as e:
                 last_err = e
