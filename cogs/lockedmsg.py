@@ -38,7 +38,7 @@ from discord import app_commands
 from cogs import state
 
 MAX_MSG_LEN = 1500
-NOT_FOR_YOU = "🔒 This msg isn't meant for u."
+NOT_FOR_YOU = "🔒 This message isn't meant for you."
 
 USAGE = (
     "**Usage:** `!lock @user <message>`\n"
