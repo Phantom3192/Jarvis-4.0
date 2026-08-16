@@ -197,7 +197,21 @@ def _count_schedule_save(guild_id: int):
 
 async def _count_debounced_save(guild_id: int, delay: float = 2.0):
     await asyncio.sleep(delay)
-    _count_persist(guild_id)
+    await asyncio.to_thread(_count_persist, guild_id)
+
+
+async def _count_persist_async(guild_id: int) -> None:
+    """Non-blocking wrapper around `_count_persist` — always call this from
+    async code (event handlers, commands, cog_unload) instead of calling
+    `_count_persist` directly, so the Turso network round-trip runs off the
+    event loop and can never stall other interactions (buttons, slash
+    commands, etc.) bot-wide while it's in flight."""
+    await asyncio.to_thread(_count_persist, guild_id)
+
+
+async def _count_delete_db_async(guild_id: int) -> None:
+    """Non-blocking wrapper around `_count_delete_db` — see `_count_persist_async`."""
+    await asyncio.to_thread(_count_delete_db, guild_id)
 
 
 def _count_delete_db(guild_id: int):
@@ -2523,7 +2537,7 @@ class Fun(commands.Cog):
                 task.cancel()
         for guild_id_str in list(_count_data):
             try:
-                _count_persist(int(guild_id_str))
+                await _count_persist_async(int(guild_id_str))
             except Exception:
                 pass
 
@@ -3035,7 +3049,7 @@ class Fun(commands.Cog):
     async def slash_countsetup(self, interaction: discord.Interaction, channel: discord.TextChannel):
         g = _count_guild(interaction.guild_id)
         g["channel_id"] = channel.id
-        _count_persist(interaction.guild_id)  # immediate save, not debounced
+        await _count_persist_async(interaction.guild_id)  # immediate save, not debounced
         await interaction.response.send_message(
             f"✅ Counting channel set to {channel.mention}!\n"
             f"Count up from **1** — no double-counting allowed."
@@ -3047,7 +3061,7 @@ class Fun(commands.Cog):
         channel = channel or ctx.channel
         g = _count_guild(ctx.guild.id)
         g["channel_id"] = channel.id
-        _count_persist(ctx.guild.id)  # immediate save, not debounced
+        await _count_persist_async(ctx.guild.id)  # immediate save, not debounced
         await ctx.reply(f"✅ Counting channel set to {channel.mention}!\nCount up from **1** — no double-counting allowed.")
 
     @app_commands.command(name="countremove", description="Remove the counting channel setup")
@@ -3056,7 +3070,7 @@ class Fun(commands.Cog):
         key = str(interaction.guild_id)
         if key in _count_data:
             del _count_data[key]
-        _count_delete_db(interaction.guild_id)
+        await _count_delete_db_async(interaction.guild_id)
         await interaction.response.send_message("🗑️ Counting channel has been removed.")
 
     @commands.command(name="countremove")
@@ -3065,7 +3079,7 @@ class Fun(commands.Cog):
         key = str(ctx.guild.id)
         if key in _count_data:
             del _count_data[key]
-        _count_delete_db(ctx.guild.id)
+        await _count_delete_db_async(ctx.guild.id)
         await ctx.reply("🗑️ Counting channel has been removed.")
 
     @app_commands.command(name="countstats", description="Show the current count and high score")
@@ -3413,6 +3427,21 @@ async def _aki_get_next_question(game: dict, guild_id) -> str:
         return raw
 
 
+def _aki_thinking_embed(game: dict) -> discord.Embed:
+    """Disabled interim state shown the instant a button is clicked, before
+    the (sometimes slow — Groq failover to Gemini can take 15-40s) AI call
+    runs. Removes the live buttons immediately so a second, impatient click
+    has nothing stale to land on."""
+    embed = discord.Embed(
+        title="🔮 Akinator",
+        description="🤔 *Thinking...*",
+        color=discord.Color.purple(),
+    )
+    embed.set_thumbnail(url="https://en.akinator.com/bundles/elokencobundle/img/akinator.png")
+    embed.set_footer(text=f"{game['user'].display_name}'s game")
+    return embed
+
+
 def _aki_embed_view(game: dict, channel_id: int):
     theme_labels = {"c": "Characters 🧑", "a": "Animals 🐾", "o": "Objects 📦"}
     theme_label  = theme_labels.get(game["theme"], "Characters 🧑")
@@ -3502,6 +3531,19 @@ class AkinatorView(discord.ui.View):
             game["step"]  += 1
             game["guess"]  = None  # clear pending guess
 
+            # Immediately show a disabled "thinking" state and pull the live
+            # buttons off the message before the (sometimes 15-40s, when
+            # Groq fails over to Gemini) AI call. Without this the message
+            # looks untouched during that wait, inviting a second click on
+            # buttons whose view was already stop()'d above — which has
+            # nothing left to route to and shows "Interaction failed."
+            try:
+                await interaction.edit_original_response(
+                    embed=_aki_thinking_embed(game), view=None
+                )
+            except discord.errors.NotFound:
+                pass
+
             # Get next move from AI (can take a few seconds — defer keeps token alive)
             next_q = await _aki_get_next_question(game, interaction.guild_id)
             game["current_question"] = next_q
@@ -3550,6 +3592,16 @@ class AkinatorView(discord.ui.View):
         })
         game["step"]  += 1
         game["guess"]  = None
+
+        # See comment in _make_answer_callback — show disabled "thinking"
+        # state before the slow AI call so a second click has no stale
+        # buttons left to hit.
+        try:
+            await interaction.edit_original_response(
+                embed=_aki_thinking_embed(game), view=None
+            )
+        except discord.errors.NotFound:
+            pass
 
         next_q = await _aki_get_next_question(game, interaction.guild_id)
         game["current_question"] = next_q
