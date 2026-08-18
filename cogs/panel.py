@@ -851,17 +851,6 @@ class Panel(commands.Cog):
         msg = await ctx.reply(embed=view.build_embed(), view=view)
         view.message = msg
 
-    @app_commands.command(name="panel", description="Open the live admin control panel (admin only)")
-    async def slash_panel(self, interaction: discord.Interaction):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 You don't have permission to use this command.", ephemeral=True
-            )
-            return
-        view = PanelHomeView(self, interaction.user.id)
-        await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
-        view.message = await interaction.original_response()
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Panel(bot))

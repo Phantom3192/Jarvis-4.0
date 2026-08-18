@@ -2638,14 +2638,6 @@ class AI(commands.Cog):
 
     # ── API diagnostics (owner-only) ───────────────────────────────────────
 
-    @app_commands.command(name="apistatus", description="Show safe API provider status, latency, and token usage")
-    async def slash_apistatus(self, interaction: discord.Interaction) -> None:
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
-            return
-        embed = build_api_status_embed(get_api_status_snapshot())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
     @commands.command(name="apistatus")
     @commands.is_owner()
     async def apistatus(self, ctx: commands.Context) -> None:

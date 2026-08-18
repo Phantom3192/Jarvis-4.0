@@ -1724,27 +1724,6 @@ class Economy(commands.Cog):
         elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
             await ctx.reply("**Usage:** `!removejc @user1 [@user2 ...] <amount>`\n**Example:** `!removejc @Phantom 100`")
 
-    @app_commands.command(name="givecredits", description="(Owner only) Grant or remove JC from a user")
-    @app_commands.describe(user="User to give/remove JC", amount="Amount of JC (negative to remove)")
-    async def slash_givecredits(self, interaction: discord.Interaction, user: discord.User, amount: int):
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
-            return
-        if amount == 0:
-            await interaction.response.send_message("⚠️ Amount must be non-zero.", ephemeral=True)
-            return
-        new_balance = add_credits(user.id, amount)
-        verb = "Granted" if amount > 0 else "Removed"
-        embed = discord.Embed(
-            description=(
-                f"{JC_EMOJI} **{verb} {abs(amount)} {JC_NAME}** "
-                f"{'to' if amount > 0 else 'from'} **{user.display_name}**.\n"
-                f"New balance: **{new_balance}** {JC_NAME}s."
-            ),
-            color=discord.Color.gold(),
-        )
-        await interaction.response.send_message(embed=embed)
-
     @commands.command(name="leaderboard", aliases=["jcleaderboard", "jctop"])
     async def prefix_leaderboard(self, ctx: commands.Context):
         """!leaderboard — top Jarvis Credit holders."""
@@ -2327,49 +2306,6 @@ class Economy(commands.Cog):
             await ctx.reply("🚫 Only the bot owner can use this command.")
         elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
             await ctx.reply("**Usage:** `!grantsub @user <vip|elite> [days]`\n**Example:** `!grantsub @user vip 14`")
-
-    @app_commands.command(name="grantsub", description="(Owner only) Grant or extend a VIP/Elite subscription for free")
-    @app_commands.describe(user="User to grant/extend", tier="vip or elite", days="Number of days to grant/extend (default 7)")
-    async def slash_grantsub(self, interaction: discord.Interaction, user: discord.User, tier: str, days: int = 7):
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
-            return
-        item_id, item = self._resolve_sub_tier(tier)
-        if item_id is None:
-            await interaction.response.send_message("❌ Unknown tier — use `vip` or `elite`.", ephemeral=True)
-            return
-        if days <= 0:
-            await interaction.response.send_message("❌ `days` must be a positive number.", ephemeral=True)
-            return
-
-        new_next_charge, extended = self._grant_or_extend_sub(user.id, item_id, days)
-        verb = "Extended" if extended else "Granted"
-        ts = int(new_next_charge)
-        embed = discord.Embed(
-            description=(
-                f"✅ {verb} **{item['name']}** for **{user.display_name}** — free of charge. "
-                f"Active until <t:{ts}:f> (<t:{ts}:R>). "
-                f"They'll still need to run `/title {item['name']}` to turn its perks on."
-            ),
-            color=discord.Color.gold(),
-        )
-        await interaction.response.send_message(embed=embed)
-        try:
-            await user.send(
-                f"🎁 The bot owner {verb.lower()} you **{item['name']}** — it's good until "
-                f"<t:{ts}:f>. Run `/title {item['name']}` to activate its perks!"
-            )
-        except discord.HTTPException:
-            pass
-
-    @slash_grantsub.autocomplete("tier")
-    async def grantsub_tier_autocomplete(self, interaction: discord.Interaction, current: str):
-        return [
-            app_commands.Choice(name=label, value=value)
-            for value, label in (("vip", "VIP"), ("elite", "Elite"))
-            if current.lower() in value
-        ]
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Economy(bot))

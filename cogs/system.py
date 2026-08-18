@@ -603,15 +603,6 @@ class System(commands.Cog):
         embed = build_api_embed(self.bot, model_label=_active_model_label(), backend_label=_active_backend_label())
         await ctx.reply(embed=embed)
 
-    @app_commands.command(name="api", description="Show live API/DB/inference latency stats (owner only)")
-    async def slash_api(self, interaction: discord.Interaction):
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("🚫 Only the bot owner can use this command.", ephemeral=True)
-            return
-        from cogs.api_metrics import build_api_embed
-        embed = build_api_embed(self.bot, model_label=_active_model_label(), backend_label=_active_backend_label())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
     # ── !ping ─────────────────────────────────────────────────────────────────
 
     @commands.command(name="ping")
@@ -712,30 +703,6 @@ class System(commands.Cog):
                 return
 
         await ctx.reply(embed=_build_guild_embed(guild))
-
-    @app_commands.command(name="guildinfo", description="Show detailed info about this server")
-    async def slash_guildinfo(self, interaction: discord.Interaction, guild_id: Optional[int] = None):
-        """Show detailed info about the current server or for a specified guild ID.
-
-        Usage: `/guildinfo` or `/guildinfo guild_id:123456789012345678`
-        """
-        if guild_id is None:
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    "🚫 This command must be used in a server or you must provide a guild ID.",
-                    ephemeral=True,
-                )
-                return
-            guild = interaction.guild
-        else:
-            guild = self.bot.get_guild(guild_id)
-            if guild is None:
-                await interaction.response.send_message(
-                    "❌ I couldn't find a guild with that ID that I'm in.", ephemeral=True
-                )
-                return
-
-        await interaction.response.send_message(embed=_build_guild_embed(guild))
 
 
 

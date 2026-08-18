@@ -1061,39 +1061,11 @@ class Music(commands.Cog):
         async with ctx.typing():
             await self._do_play(ctx.guild, ctx.author, query.strip(), ctx.reply)
 
-    @app_commands.command(name="forcejoin", description="(Owner) Force the bot to join your VC")
-    async def slash_forcejoin(self, interaction: discord.Interaction) -> None:
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        player = await self._get_player(interaction.guild, interaction.user, interaction.followup.send)
-        if not player:
-            return
-        await interaction.followup.send(f"✅ Joined **{player.channel.name}** (force).")
-
-    @app_commands.command(name="forceplay", description="(Owner) Force-play a track, bypassing feature-down")
-    @app_commands.describe(query="Song name or YouTube URL")
-    async def slash_forceplay(self, interaction: discord.Interaction, query: str) -> None:
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        await self._do_play(interaction.guild, interaction.user, query.strip(), interaction.followup.send)
-
     @commands.command(name="forcestop", aliases=["fstop"])
     @commands.is_owner()
     async def prefix_forcestop(self, ctx: commands.Context) -> None:
         """Owner-only: force-stop and disconnect, bypassing feature-down."""
         await self._do_stop(ctx.guild, ctx.reply)
-
-    @app_commands.command(name="forcestop", description="(Owner) Force stop and disconnect")
-    async def slash_forcestop(self, interaction: discord.Interaction) -> None:
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        await self._do_stop(interaction.guild, interaction.followup.send)
 
     @commands.command(name="forcepause", aliases=["fpause"])
     @commands.is_owner()
@@ -1125,14 +1097,6 @@ class Music(commands.Cog):
     async def prefix_forceskip(self, ctx: commands.Context) -> None:
         """Owner-only: force skip the current track, bypassing feature-down."""
         await self._do_skip(ctx.guild, ctx.reply)
-
-    @app_commands.command(name="forceskip", description="(Owner) Force skip the current track")
-    async def slash_forceskip(self, interaction: discord.Interaction) -> None:
-        if not await self.bot.is_owner(interaction.user):
-            await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        await self._do_skip(interaction.guild, interaction.followup.send)
 
     @commands.command(name="forcequeue", aliases=["fqueue", "fq"])
     @commands.is_owner()

@@ -69,7 +69,8 @@ COGS = [
     "cogs.profile", 
     "cogs.status",
     "cogs.tos",
-    "cogs.lockedmsg"
+    "cogs.lockedmsg",
+    "cogs.cards"
 ]
 
 # Track users we've already DM'd about their ban this session — avoid spamming

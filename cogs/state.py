@@ -62,6 +62,7 @@ _data: dict[str, Any] = {
     "votes": {},  # str(user_id) → {"total_votes": int, "streak": int, "last_vote_ts": float, "streak_milestones": [int,...]}
     "guild_prefixes": {},  # str(guild_id) → custom command prefix string
     "locked_messages": {},  # lock_id (str) → {"author": int, "target": int, "content": str, "opened": bool, "created": float}
+    "user_cards":      {},  # str(user_id) → {card_id (str): quantity (int)} — beast card collection inventory
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -98,6 +99,7 @@ _SERIALISE: dict[str, Any] = {
     "votes":                lambda: _data["votes"],
     "guild_prefixes":       lambda: _data["guild_prefixes"],
     "locked_messages":      lambda: _data["locked_messages"],
+    "user_cards":           lambda: _data["user_cards"],
 }
 
 
@@ -174,6 +176,7 @@ async def init_db():
     if "votes"           in db: _data["votes"]           = db["votes"]
     if "guild_prefixes"  in db: _data["guild_prefixes"]  = db["guild_prefixes"]
     if "locked_messages" in db: _data["locked_messages"] = db["locked_messages"]
+    if "user_cards"      in db: _data["user_cards"]      = db["user_cards"]
 
     # ── One-time migration: back-fill first_interaction for users who were
     # already marked "seen" before this table existed. mark_seen() only
@@ -1637,3 +1640,56 @@ def mark_locked_message_opened(lock_id: str) -> None:
     if entry is not None:
         entry["opened"] = True
         _schedule_save("locked_messages")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CARD COLLECTION (beast cards — inventory, quantities, trading)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def get_user_cards(user_id: int) -> dict[str, int]:
+    """Return a copy of the user's card_id → quantity inventory."""
+    return dict(_data["user_cards"].get(str(user_id), {}))
+
+
+def get_card_quantity(user_id: int, card_id: str) -> int:
+    """Return how many copies of card_id the user owns (0 if none)."""
+    return int(_data["user_cards"].get(str(user_id), {}).get(card_id, 0))
+
+
+def add_card(user_id: int, card_id: str, amount: int = 1) -> int:
+    """Add `amount` copies of card_id to the user's inventory (duplicates
+    stack as a quantity, not separate entries). Returns the new quantity
+    owned of that card."""
+    uid = str(user_id)
+    inv = _data["user_cards"].setdefault(uid, {})
+    new_qty = inv.get(card_id, 0) + amount
+    inv[card_id] = new_qty
+    _schedule_save("user_cards")
+    return new_qty
+
+
+def remove_card(user_id: int, card_id: str, amount: int = 1) -> bool:
+    """Attempt to remove `amount` copies of card_id from the user's
+    inventory. Returns False (and changes nothing) if they don't own
+    enough. Drops the card_id key entirely once quantity hits 0."""
+    uid = str(user_id)
+    inv = _data["user_cards"].get(uid, {})
+    have = inv.get(card_id, 0)
+    if have < amount:
+        return False
+    remaining = have - amount
+    if remaining <= 0:
+        inv.pop(card_id, None)
+    else:
+        inv[card_id] = remaining
+    _schedule_save("user_cards")
+    return True
+
+
+def transfer_card(sender_id: int, recipient_id: int, card_id: str, amount: int = 1) -> bool:
+    """Atomically move `amount` copies of card_id from sender to recipient.
+    Returns False (nothing changed) if the sender doesn't own enough —
+    the deduction and grant either both happen or neither does."""
+    if not remove_card(sender_id, card_id, amount):
+        return False
+    add_card(recipient_id, card_id, amount)
+    return True

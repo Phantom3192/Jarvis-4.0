@@ -122,59 +122,6 @@ class Announce(commands.Cog):
             )
         )
 
-    @app_commands.command(name="global-announce", description="Send a DM announcement to all Jarvis users")
-    @app_commands.describe(
-        message="The announcement message",
-        format="Plain text or embedded message",
-        title="Embed title (only used if format is Embed)",
-        color="Embed color as hex, e.g. #ff0000 (only used if format is Embed)",
-    )
-    @app_commands.choices(format=[
-        app_commands.Choice(name="Plain text", value="plain"),
-        app_commands.Choice(name="Embed",      value="embed"),
-    ])
-    async def slash_announce(
-        self,
-        interaction: discord.Interaction,
-        message: str,
-        format: str = "plain",
-        title: str | None = None,
-        color: str | None = None,
-    ):
-        if not is_admin(interaction.user):
-            await interaction.response.send_message(
-                "🚫 You don't have permission to send announcements.", ephemeral=True
-            )
-            return
-
-        use_embed       = format == "embed"
-        embed           = build_dm_embed(title, message, color, default_title="📢 Announcement") if use_embed else None
-        recipient_count = len(seen_users)
-        _, embeds       = _build_preview_embed(recipient_count, use_embed, message, embed)
-
-        view = ConfirmView()
-        await interaction.response.send_message(embeds=embeds, view=view, ephemeral=True)
-        await view.wait()
-
-        if not view.confirmed:
-            await interaction.edit_original_response(content="❌ Announcement cancelled.", embeds=[], view=None)
-            return
-
-        await interaction.edit_original_response(
-            content=f"📤 Sending to {recipient_count} user(s)…", embeds=[], view=None
-        )
-        success, fail = await _deliver(self.bot, message if not use_embed else None, embed)
-
-        await interaction.edit_original_response(
-            content=(
-                f"📢 **Announcement sent!**\n"
-                f"✅ Delivered: **{success}** | ❌ Failed (DMs closed): **{fail}**"
-            ),
-            embeds=[],
-            view=None,
-        )
-
-
 def _parse_announce_flags(args: str) -> tuple[str | None, str | None, str]:
     """Extract --title and --color from an argument string. Returns (title, color, remaining)."""
     title = color = None

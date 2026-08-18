@@ -386,23 +386,6 @@ class Stats(commands.Cog):
         mem    = await self._memory_count(target.id)
         await ctx.reply(embed=_format_stats(target, data, rank=rank, memory_count=mem))
 
-    @app_commands.command(name="stats", description="Owner only — view a user's full Jarvis usage stats")
-    @app_commands.describe(user="User to look up (leave empty for your own stats)")
-    async def slash_stats(self, interaction: discord.Interaction, user: discord.User = None):
-        if not await interaction.client.is_owner(interaction.user):
-            await interaction.response.send_message(
-                "🚫 This command is restricted to the bot owner.", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-        target = user or interaction.user
-        data   = get_stats(target.id) or {}
-
-        rank = self._user_rank(target.id)
-        mem  = await self._memory_count(target.id)
-        await interaction.followup.send(embed=_format_stats(target, data, rank=rank, memory_count=mem))
-
 
 
 async def setup(bot: commands.Bot):

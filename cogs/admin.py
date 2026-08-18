@@ -589,21 +589,6 @@ class Admin(commands.Cog):
             await ctx.reply(f"✅ `auto_respond` has been turned {'on' if new_value else 'off'} for this channel.")
         else:
             await ctx.reply(f"✅ `restrict_mode` has been turned {'on' if new_value else 'off'} for this channel.")
-    @app_commands.command(name="adminhelp", description="Browse admin and moderator commands")
-    @commands.is_owner()
-    async def slash_adminhelp(self, interaction: discord.Interaction):
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                "Admin help is only available in servers.", ephemeral=True
-            )
-            return
-        if not (is_admin(interaction.user) or interaction.user.guild_permissions.manage_channels):
-            await interaction.response.send_message(
-                "🚫 You need Manage Channels permission to view admin help.", ephemeral=True
-            )
-            return
-        view = AdminHelpView(author_id=interaction.user.id)
-        await interaction.response.send_message(embed=_build_admin_overview_embed(), view=view, ephemeral=True)
 
     @commands.command(name="adminhelp")
     @commands.is_owner()
