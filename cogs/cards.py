@@ -1,14 +1,16 @@
 """
 Cards — collectible card feature.
 
-Acquisition: a free weighted-random pull every day (/dailycard), and daily
-quests that reward a card on completion (/quests, never Legendary).
-!givecard still exists as an owner-only override for one-off grants/
-corrections. Duplicates stack as a quantity rather than separate items (see
-state.py's user_cards store), and cards can be traded directly between two
-users via a mutual accept/decline flow. Cards belong to themed sets (see
-CARD_SETS) — owning at least one copy of every card in a set pays out a
-one-time JC bonus via /cardsets.
+Acquisition: quests are the *only* way to earn cards — finish a daily
+quest (/quests) and you're rewarded with one weighted-random card,
+Legendary included (rarely). There's no free daily pull; quests are
+deliberately hard so cards stay worth chasing. !givecard still exists as
+an owner-only override for one-off grants/corrections. Duplicates stack
+as a quantity rather than separate items (see state.py's user_cards
+store), and cards can be traded directly between two users via a mutual
+accept/decline flow. Cards belong to themed sets (see CARD_SETS) — owning
+at least one copy of every card in a set pays out a one-time JC bonus via
+/cardsets.
 
 Commands:
   /cardinfo    — view full details on one specific card (rendered as an image)
@@ -17,12 +19,12 @@ Commands:
                  ones you own, and their rarity
   /cardtrade   — offer one of your cards to another user in exchange for JC
                  (or a straight gift if asking_price is 0)
-  /dailycard   — claim your free daily weighted-random card pull
-  /quests      — view today's card quests and claim finished ones
+  /quests      — view today's (hard) card quests and claim finished ones —
+                 the only way to earn new cards
   /cardsets    — view set-completion progress and claim finished sets
   !givecard    — owner only, grants a card to a user (prefix-only override,
                  mainly for corrections/events — normal acquisition is
-                 /dailycard and /quests)
+                 /quests only)
 
 Follows the same patterns as cogs/economy.py: state.py owns persistence,
 this cog owns commands/UI, and pending trade offers are tracked in an
@@ -44,11 +46,11 @@ from PIL import Image, ImageDraw, ImageFont
 from cogs.state import (
     spend_credits, add_credits,
     get_user_cards, get_card_quantity, add_card, remove_card, transfer_card,
-    has_claimed_daily_card, claim_daily_card,
     get_daily_quests, assign_daily_quests, mark_quest_claimed,
     get_claimed_sets, claim_set_reward,
     get_stats, get_lifetime_earned, get_lifetime_spent,
-    get_image_search_count,
+    get_image_search_count, get_songs_played,
+    get_mystery_box_open_count, get_deluxe_mystery_box_open_count, get_referral_count,
     today_utc,
 )
 
@@ -64,94 +66,94 @@ RARITIES = {
 }
 
 # ── Card roster ──────────────────────────────────────────────────────────
-CARD_RARITY: dict[str, str] = {
-    # Legendary
-    "Optimus Prime": "Legendary",
-    "Megatron": "Legendary",
-    "Bumblebee": "Legendary",
-    "Starscream": "Legendary",
-    "Optimus Primal": "Legendary",
-    "Unicron": "Legendary",
-    "Primus": "Legendary",
-    "Galvatron": "Legendary",
-    "Ultra Magnus": "Legendary",
-    "Hot Rod / Rodimus Prime": "Legendary",
-
-    # Rare
-    "Ironhide": "Rare",
-    "Ratchet": "Rare",
-    "Jazz": "Rare",
-    "Grimlock": "Rare",
-    "Soundwave": "Rare",
-    "Shockwave": "Rare",
-    "Arcee": "Rare",
-    "Cyclonus": "Rare",
-    "Scourge": "Rare",
-    "Blitzwing": "Rare",
-    "Astrotrain": "Rare",
-    "Cheetor": "Rare",
-    "Rattrap": "Rare",
-    "Dinobot (Beast Wars)": "Rare",
-    "Rhinox": "Rare",
-    "Blackarachnia": "Rare",
-    "Waspinator": "Rare",
-    "Tarantulas": "Rare",
-    "Lugnut": "Rare",
-    "Blackout": "Rare",
-    "Barricade": "Rare",
-    "Sideways": "Rare",
-    "Vector Prime": "Rare",
-    "Elita-1": "Rare",
-    "Windblade": "Rare",
-    "Alpha Trion": "Rare",
-    "Jetfire (Skyfire)": "Rare",
-    "Wreck-Gar": "Rare",
-    "Springer": "Rare",
-    "Kup": "Rare",
-
-    # Common
-    "Wheeljack": "Common",
-    "Sideswipe": "Common",
-    "Sunstreaker": "Common",
-    "Mirage": "Common",
-    "Hound": "Common",
-    "Prowl": "Common",
-    "Bluestreak": "Common",
-    "Cliffjumper": "Common",
-    "Slag": "Common",
-    "Sludge": "Common",
-    "Snarl": "Common",
-    "Swoop": "Common",
-    "Blaster": "Common",
-    "Wheelie": "Common",
-    "Sandstorm": "Common",
-    "Perceptor": "Common",
-    "Smokescreen": "Common",
-    "Thundercracker": "Common",
-    "Skywarp": "Common",
-    "Ravage": "Common",
-    "Rumble": "Common",
-    "Frenzy": "Common",
-    "Laserbeak": "Common",
-    "Skyfire": "Common",
-    "Bonecrusher": "Common",
-    "Scavenger": "Common",
-    "Hook": "Common",
-    "Long Haul": "Common",
-    "Mixmaster": "Common",
-    "Scrapper": "Common",
-    "Motormaster": "Common",
-    "Dead End": "Common",
-    "Drag Strip": "Common",
-    "Wildrider": "Common",
-    "Breakdown": "Common",
-    "Blast Off": "Common",
-    "Brawl": "Common",
-    "Onslaught": "Common",
-    "Swindle": "Common",
-    "Vortex": "Common",
-    "Megatron (Beast Wars)": "Common",
-}
+# Each entry carries its own flavor text, so there's nothing extra to keep
+# in sync elsewhere — add/edit a card by editing its dict here, done.
+CARDS: list[dict[str, str]] = [
+    # ===================== AUTOBOTS =====================
+    {"name": "Optimus Prime", "rarity": "Legendary", "faction": "Autobots", "description": "Noble Autobot leader, wielder of the Matrix"},
+    {"name": "Bumblebee", "rarity": "Legendary", "faction": "Autobots", "description": "Small, fearless, loyal Autobot scout"},
+    {"name": "Jazz", "rarity": "Rare", "faction": "Autobots", "description": "Smooth special ops commander, always cool"},
+    {"name": "Ironhide", "rarity": "Rare", "faction": "Autobots", "description": "Grizzled veteran, Autobot weapons specialist"},
+    {"name": "Ratchet", "rarity": "Rare", "faction": "Autobots", "description": "Skilled, stubborn Autobot medical officer"},
+    {"name": "Wheeljack", "rarity": "Common", "faction": "Autobots", "description": "Reckless inventor, gadgets often backfire"},
+    {"name": "Sideswipe", "rarity": "Common", "faction": "Autobots", "description": "Daredevil warrior, thrives on danger"},
+    {"name": "Sunstreaker", "rarity": "Common", "faction": "Autobots", "description": "Vain, short-tempered, fierce melee fighter"},
+    {"name": "Mirage", "rarity": "Common", "faction": "Autobots", "description": "Camouflage master, turns invisible in battle"},
+    {"name": "Hound", "rarity": "Common", "faction": "Autobots", "description": "Nature-loving scout, projects battlefield illusions"},
+    {"name": "Prowl", "rarity": "Common", "faction": "Autobots", "description": "Logical tactician, calculates every move"},
+    {"name": "Bluestreak", "rarity": "Common", "faction": "Autobots", "description": "Talkative gunner, deadly long-range precision"},
+    {"name": "Cliffjumper", "rarity": "Common", "faction": "Autobots", "description": "Hot-headed, always eager for a fight"},
+    {"name": "Grimlock", "rarity": "Rare", "faction": "Autobots", "description": "Blunt, powerful Dinobot leader, T-Rex form"},
+    {"name": "Slag", "rarity": "Common", "faction": "Autobots", "description": "Short-fused Triceratops Dinobot"},
+    {"name": "Sludge", "rarity": "Common", "faction": "Autobots", "description": "Slow, devastating Brontosaurus Dinobot"},
+    {"name": "Snarl", "rarity": "Common", "faction": "Autobots", "description": "Tough-hided, stubborn Stegosaurus Dinobot"},
+    {"name": "Swoop", "rarity": "Common", "faction": "Autobots", "description": "Aerial Pteranodon Dinobot support"},
+    {"name": "Ultra Magnus", "rarity": "Legendary", "faction": "Autobots", "description": "Stoic commander, strict Autobot codes"},
+    {"name": "Hot Rod / Rodimus Prime", "rarity": "Legendary", "faction": "Autobots", "description": "Brash youth destined to become Prime"},
+    {"name": "Kup", "rarity": "Rare", "faction": "Autobots", "description": "Grizzled old warrior, mentor figure"},
+    {"name": "Arcee", "rarity": "Rare", "faction": "Autobots", "description": "Fierce, highly skilled Autobot warrior"},
+    {"name": "Blaster", "rarity": "Common", "faction": "Autobots", "description": "Communications officer, deploys cassette allies"},
+    {"name": "Wheelie", "rarity": "Common", "faction": "Autobots", "description": "Small, rhyme-speaking, underestimated Autobot"},
+    {"name": "Springer", "rarity": "Rare", "faction": "Autobots", "description": "Versatile Wrecker, no-nonsense triple-changer"},
+    {"name": "Sandstorm", "rarity": "Common", "faction": "Autobots", "description": "Fierce Wrecker triple-changer fighter"},
+    {"name": "Perceptor", "rarity": "Common", "faction": "Autobots", "description": "Precise scientist and long-range sniper"},
+    {"name": "Wreck-Gar", "rarity": "Rare", "faction": "Autobots", "description": "Chaotic Junkion leader, speaks in quotes"},
+    {"name": "Smokescreen", "rarity": "Common", "faction": "Autobots", "description": "Strategist gambler, outwits with misdirection"},
+    {"name": "Jetfire (Skyfire)", "rarity": "Rare", "faction": "Autobots", "description": "Massive jet-formed Autobot ally"},
+    {"name": "Cheetor", "rarity": "Rare", "faction": "Autobots", "description": "Speedy, energetic cheetah-formed Maximal"},
+    {"name": "Rattrap", "rarity": "Rare", "faction": "Autobots", "description": "Sarcastic, resourceful Maximal rat-bot"},
+    {"name": "Dinobot (Beast Wars)", "rarity": "Rare", "faction": "Autobots", "description": "Honor-bound Maximal, velociraptor warrior"},
+    {"name": "Optimus Primal", "rarity": "Legendary", "faction": "Autobots", "description": "Gorilla-formed Maximal leader, carries Prime's legacy"},
+    {"name": "Rhinox", "rarity": "Rare", "faction": "Autobots", "description": "Wise Maximal engineer, rhinoceros form"},
+    {"name": "Blackarachnia", "rarity": "Rare", "faction": "Autobots", "description": "Former Predacon spider, turned Maximal ally"},
+    # ===================== DECEPTICONS =====================
+    {"name": "Megatron", "rarity": "Legendary", "faction": "Decepticons", "description": "Ruthless Decepticon tyrant, hungers for conquest"},
+    {"name": "Starscream", "rarity": "Legendary", "faction": "Decepticons", "description": "Treacherous, ambitious, forever scheming schemer"},
+    {"name": "Soundwave", "rarity": "Rare", "faction": "Decepticons", "description": "Loyal spymaster, deploys cassette minions"},
+    {"name": "Shockwave", "rarity": "Rare", "faction": "Decepticons", "description": "Cold, logical scientist, no emotion"},
+    {"name": "Thundercracker", "rarity": "Common", "faction": "Decepticons", "description": "Sonic-boom jet, occasional doubts"},
+    {"name": "Skywarp", "rarity": "Common", "faction": "Decepticons", "description": "Teleporting jet trickster, ambush specialist"},
+    {"name": "Ravage", "rarity": "Common", "faction": "Decepticons", "description": "Stealthy panther-formed cassette warrior"},
+    {"name": "Rumble", "rarity": "Common", "faction": "Decepticons", "description": "Piledriver fists, causes ground tremors"},
+    {"name": "Frenzy", "rarity": "Common", "faction": "Decepticons", "description": "Erratic twin, sonic disruption chaos"},
+    {"name": "Laserbeak", "rarity": "Common", "faction": "Decepticons", "description": "Bird-formed aerial spy cassette"},
+    {"name": "Blitzwing", "rarity": "Rare", "faction": "Decepticons", "description": "Unstable triple-changer, chaotic personality"},
+    {"name": "Astrotrain", "rarity": "Rare", "faction": "Decepticons", "description": "Self-serving triple-changer transport enforcer"},
+    {"name": "Skyfire", "rarity": "Common", "faction": "Decepticons", "description": "Once neutral, torn scientist ally"},
+    {"name": "Bonecrusher", "rarity": "Common", "faction": "Decepticons", "description": "Constructicon demolitions expert, forms Devastator"},
+    {"name": "Scavenger", "rarity": "Common", "faction": "Decepticons", "description": "Constructicon excavator, quietly effective"},
+    {"name": "Hook", "rarity": "Common", "faction": "Decepticons", "description": "Precise Constructicon engineer, Devastator's head"},
+    {"name": "Long Haul", "rarity": "Common", "faction": "Decepticons", "description": "Constructicon hauler, brute strength"},
+    {"name": "Mixmaster", "rarity": "Common", "faction": "Decepticons", "description": "Constructicon mixer, mixes chemicals too"},
+    {"name": "Scrapper", "rarity": "Common", "faction": "Decepticons", "description": "Constructicon leader, coordinates Devastator"},
+    {"name": "Motormaster", "rarity": "Common", "faction": "Decepticons", "description": "Brutal Stunticon leader, Menasor's head"},
+    {"name": "Dead End", "rarity": "Common", "faction": "Decepticons", "description": "Nihilistic Stunticon, bleak outlook"},
+    {"name": "Drag Strip", "rarity": "Common", "faction": "Decepticons", "description": "Speed-obsessed, arrogant Stunticon racer"},
+    {"name": "Wildrider", "rarity": "Common", "faction": "Decepticons", "description": "Reckless Stunticon, causes constant chaos"},
+    {"name": "Breakdown", "rarity": "Common", "faction": "Decepticons", "description": "Paranoid, twitchy but effective Stunticon"},
+    {"name": "Blast Off", "rarity": "Common", "faction": "Decepticons", "description": "Arrogant Combaticon shuttle, air transport"},
+    {"name": "Brawl", "rarity": "Common", "faction": "Decepticons", "description": "Aggressive, destructive Combaticon tank"},
+    {"name": "Onslaught", "rarity": "Common", "faction": "Decepticons", "description": "Combaticon leader, tactician, forms Bruticus"},
+    {"name": "Swindle", "rarity": "Common", "faction": "Decepticons", "description": "Opportunistic Combaticon arms dealer"},
+    {"name": "Vortex", "rarity": "Common", "faction": "Decepticons", "description": "Feared Combaticon interrogation specialist"},
+    {"name": "Cyclonus", "rarity": "Rare", "faction": "Decepticons", "description": "Loyal, relentless Decepticon lieutenant"},
+    {"name": "Scourge", "rarity": "Rare", "faction": "Decepticons", "description": "Cold bounty hunter, leads the Sweeps"},
+    {"name": "Galvatron", "rarity": "Legendary", "faction": "Decepticons", "description": "Reborn Megatron, unstable and volatile"},
+    {"name": "Lugnut", "rarity": "Rare", "faction": "Decepticons", "description": "Fanatically loyal, believes in Megatron"},
+    {"name": "Blackout", "rarity": "Rare", "faction": "Decepticons", "description": "Massive helicopter Decepticon enforcer"},
+    {"name": "Barricade", "rarity": "Rare", "faction": "Decepticons", "description": "Police-disguised Decepticon, hunts Autobots"},
+    {"name": "Sideways", "rarity": "Rare", "faction": "Decepticons", "description": "Mysterious double-agent, unclear loyalty"},
+    {"name": "Waspinator", "rarity": "Rare", "faction": "Decepticons", "description": "Unlucky Predacon wasp, endlessly persistent"},
+    {"name": "Tarantulas", "rarity": "Rare", "faction": "Decepticons", "description": "Cunning, treacherous Predacon spider schemer"},
+    {"name": "Megatron (Beast Wars)", "rarity": "Common", "faction": "Decepticons", "description": "Predacon leader, rewrites history obsessively"},
+    # ===================== OTHERS / KEY FIGURES =====================
+    {"name": "Unicron", "rarity": "Legendary", "faction": "Others", "description": "Planet-sized entity of pure destruction"},
+    {"name": "Primus", "rarity": "Legendary", "faction": "Others", "description": "Benevolent creator god, Unicron's rival"},
+    {"name": "Alpha Trion", "rarity": "Rare", "faction": "Others", "description": "Ancient wise elder, keeper of history"},
+    {"name": "Vector Prime", "rarity": "Rare", "faction": "Others", "description": "Guardian of time and space"},
+    {"name": "Elita-1", "rarity": "Rare", "faction": "Others", "description": "Strong-willed Autobot commander, leads own team"},
+    {"name": "Windblade", "rarity": "Rare", "faction": "Others", "description": "Cityspeaker warrior, talks to cities"},
+]
 
 _RARITY_ORDER = ["Common", "Rare", "Legendary"]
 _POWER_RANGES = {
@@ -159,7 +161,18 @@ _POWER_RANGES = {
     "Rare": (44, 53),
     "Legendary": (94, 98),
 }
-_SET_CHUNK_SIZE = 4  # how many cards land in each auto-generated set
+# Sets are grouped by faction now (not fixed-size chunks) — one set per
+# distinct "faction" value on the CARDS entries, in first-seen order.
+# Reward scales with how many cards a faction actually has, so a big
+# faction like Autobots/Decepticons pays out more than the small Others
+# set — falls back to a flat default for any faction not listed here, so
+# adding a brand-new faction later doesn't require touching this dict.
+_FACTION_SET_REWARDS = {
+    "Autobots": 1500,
+    "Decepticons": 1500,
+    "Others": 500,
+}
+_DEFAULT_SET_REWARD = 500
 
 
 def _slugify(name: str, taken: set) -> str:
@@ -184,21 +197,30 @@ def _normalize_rarity(raw: str) -> str:
     no longer exists (e.g. 'epic'), instead of silently misbehaving."""
     key = raw.strip().lower()
     if key not in _VALID_RARITIES:
-        raise ValueError(f"Unknown rarity {raw!r} in CARD_RARITY — must be one of: {', '.join(_RARITY_ORDER)}")
+        raise ValueError(f"Unknown rarity {raw!r} in CARDS — must be one of: {', '.join(_RARITY_ORDER)}")
     return _VALID_RARITIES[key]
 
 
-def _build_cards(card_rarity: dict[str, str]) -> tuple[dict, dict]:
-    """Build (CARD_DEFS, CARD_SETS) from {name: rarity}. Each card gets a
+def _build_cards(cards: list[dict[str, str]]) -> tuple[dict, dict]:
+    """Build (CARD_DEFS, CARD_SETS) from the CARDS roster. Each card gets a
     deterministic pseudo-random power within its rarity's range (seeded by
-    the card's id, so it's stable across restarts), and cards are grouped
-    into sets of _SET_CHUNK_SIZE in the order they appear in the dict."""
+    the card's id, so it's stable across restarts), its flavor text is
+    pulled straight from that entry's "description" (no separate flavor
+    map to keep in sync), and cards are grouped into one set per distinct
+    "faction" value — currently Autobots / Decepticons / Others — in the
+    order each faction first appears in the list. Adding more cards to an
+    existing faction just grows that set automatically; adding a brand-new
+    faction value creates a fourth set with no further code changes needed."""
     taken_slugs: set = set()
     defs: dict[str, dict] = {}
-    ordered_ids: list[str] = []
+    faction_order: list[str] = []
+    faction_cards: dict[str, list[str]] = {}
 
-    for name, raw_rarity in card_rarity.items():
-        rarity = _normalize_rarity(raw_rarity)
+    for entry in cards:
+        name = entry["name"]
+        rarity = _normalize_rarity(entry["rarity"])
+        faction = entry.get("faction") or "Others"
+        flavor = entry.get("description") or "No description yet — edit this card's flavor text in CARDS."
         card_id = _slugify(name, taken_slugs)
         rng = random.Random(card_id)
         lo, hi = _POWER_RANGES[rarity]
@@ -206,31 +228,31 @@ def _build_cards(card_rarity: dict[str, str]) -> tuple[dict, dict]:
             "name": name,
             "rarity": rarity,
             "power": rng.randint(lo, hi),
-            "flavor": "No description yet — edit this card's flavor text in CARD_DEFS.",
+            "flavor": flavor,
             "set": None,  # filled in below
         }
-        ordered_ids.append(card_id)
+        if faction not in faction_cards:
+            faction_cards[faction] = []
+            faction_order.append(faction)
+        faction_cards[faction].append(card_id)
 
     sets: dict[str, dict] = {}
-    for i in range(0, len(ordered_ids), _SET_CHUNK_SIZE):
-        chunk = ordered_ids[i:i + _SET_CHUNK_SIZE]
-        if not chunk:
-            continue
-        set_num = i // _SET_CHUNK_SIZE + 1
-        set_id = f"set_{set_num}"
-        for cid in chunk:
+    for faction in faction_order:
+        card_ids = faction_cards[faction]
+        set_id = _slugify(faction, set())  # independent namespace from card ids
+        for cid in card_ids:
             defs[cid]["set"] = set_id
         sets[set_id] = {
-            "name": f"Set {set_num}",
-            "card_ids": chunk,
-            "reward_credits": 300 if len(chunk) <= 4 else 400,
+            "name": faction,
+            "card_ids": card_ids,
+            "reward_credits": _FACTION_SET_REWARDS.get(faction, _DEFAULT_SET_REWARD),
         }
     return defs, sets
 
 
-# id is stable and used as the storage key — see CARD_RARITY above for how
-# to add/edit cards safely.
-CARD_DEFS, CARD_SETS = _build_cards(CARD_RARITY)
+# id is stable and used as the storage key — see CARDS above for how to
+# add/edit cards safely.
+CARD_DEFS, CARD_SETS = _build_cards(CARDS)
 
 
 # ── Weighted random pulls ────────────────────────────────────────────────
@@ -621,7 +643,40 @@ def _dex_overview_embed(viewer_id: int) -> discord.Embed:
     return embed
 
 
-def _dex_rarity_embed(viewer_id: int, rarity: str) -> discord.Embed:
+# Discord caps a single embed field's value at 1024 characters. Leave some
+# headroom below that so we never brush right up against the hard limit.
+_DEX_FIELD_CHAR_LIMIT = 1000
+
+
+def _paginate_lines(lines: list[str], limit: int = _DEX_FIELD_CHAR_LIMIT) -> list[list[str]]:
+    """Greedily pack lines into pages whose newline-joined length stays
+    under `limit`. This is what keeps /carddex working no matter how many
+    cards get added to a rarity in the future — once a rarity's list would
+    overflow one embed field, it just spills onto page 2, 3, etc. instead
+    of erroring out."""
+    if not lines:
+        return [[]]
+    pages: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        added_len = len(line) + (1 if current else 0)  # +1 accounts for the joining "\n"
+        if current and current_len + added_len > limit:
+            pages.append(current)
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += added_len
+    if current:
+        pages.append(current)
+    return pages
+
+
+def _dex_rarity_embed(viewer_id: int, rarity: str, page: int = 0) -> tuple[discord.Embed, int]:
+    """Build one page of a rarity's card list. Returns (embed, total_pages)
+    — the list is auto-paginated so it never exceeds Discord's per-field
+    character limit, however many cards end up in this rarity."""
     cards_in_tier = [(cid, c) for cid, c in CARD_DEFS.items() if c["rarity"] == rarity]
     total_weight = sum(r["weight"] for r in RARITIES.values())
     pct = RARITIES[rarity]["weight"] / total_weight * 100
@@ -632,6 +687,7 @@ def _dex_rarity_embed(viewer_id: int, rarity: str) -> discord.Embed:
         description=f"You own **{owned_count}/{len(cards_in_tier)}** {rarity} cards (~{pct:.1f}% pull chance).",
         color=RARITIES[rarity]["color"],
     )
+
     if cards_in_tier:
         lines = []
         for cid, c in cards_in_tier:
@@ -639,15 +695,23 @@ def _dex_rarity_embed(viewer_id: int, rarity: str) -> discord.Embed:
             mark = "✅" if owned else "❔"
             name = f"**{c['name']}**" if owned else f"~~{c['name']}~~"
             lines.append(f"{mark} {name} — {c['flavor']}")
-        embed.add_field(name=f"{rarity} cards", value="\n".join(lines), inline=False)
+        pages = _paginate_lines(lines)
+        total_pages = len(pages)
+        page = max(0, min(page, total_pages - 1))
+        field_name = f"{rarity} cards" if total_pages == 1 else f"{rarity} cards (page {page + 1}/{total_pages})"
+        embed.add_field(name=field_name, value="\n".join(pages[page]), inline=False)
     else:
+        total_pages = 1
         embed.add_field(name=f"{rarity} cards", value="*No cards defined for this rarity yet.*", inline=False)
-    return embed
+
+    if total_pages > 1:
+        embed.set_footer(text=f"Page {page + 1}/{total_pages} — use ◀ ▶ to flip pages.")
+
+    return embed, total_pages
 
 
 class _DexRaritySelect(discord.ui.Select):
-    def __init__(self, viewer_id: int):
-        self.viewer_id = viewer_id
+    def __init__(self):
         options = [discord.SelectOption(label="Overview", value="__overview__", emoji="📖", description="See counts across all rarities")]
         options += [
             discord.SelectOption(label=rarity, value=rarity, description=f"Browse {rarity} cards")
@@ -656,19 +720,68 @@ class _DexRaritySelect(discord.ui.Select):
         super().__init__(placeholder="Browse by rarity...", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.viewer_id:
+        view: DexView = self.view
+        if interaction.user.id != view.viewer_id:
             await interaction.response.send_message("This isn't your dex to browse — run `/carddex` yourself!", ephemeral=True)
             return
-        choice = self.values[0]
-        embed = _dex_overview_embed(self.viewer_id) if choice == "__overview__" else _dex_rarity_embed(self.viewer_id, choice)
-        await interaction.response.edit_message(embed=embed)
+        view.current = self.values[0]
+        view.page = 0
+        await view.refresh(interaction)
 
 
 class DexView(discord.ui.View):
+    """Rarity dropdown + Prev/Next pager. The pager buttons stay disabled
+    on the overview page (and on a rarity page that fits in one page) and
+    light up automatically whenever a rarity's card list spills past
+    _DEX_FIELD_CHAR_LIMIT and needs more than one page."""
+
     def __init__(self, viewer_id: int, *, timeout: float = 180):
         super().__init__(timeout=timeout)
+        self.viewer_id = viewer_id
         self.message: discord.Message | None = None
-        self.add_item(_DexRaritySelect(viewer_id))
+        self.current = "__overview__"
+        self.page = 0
+        self.total_pages = 1
+
+        self.add_item(_DexRaritySelect())
+
+        self.prev_button = discord.ui.Button(label="◀ Prev", style=discord.ButtonStyle.secondary, disabled=True, row=1)
+        self.next_button = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, disabled=True, row=1)
+        self.prev_button.callback = self._on_prev
+        self.next_button.callback = self._on_next
+        self.add_item(self.prev_button)
+        self.add_item(self.next_button)
+
+    def _build_embed(self) -> discord.Embed:
+        if self.current == "__overview__":
+            self.total_pages = 1
+            return _dex_overview_embed(self.viewer_id)
+        embed, self.total_pages = _dex_rarity_embed(self.viewer_id, self.current, self.page)
+        return embed
+
+    def _sync_buttons(self) -> None:
+        on_rarity_page = self.current != "__overview__"
+        self.prev_button.disabled = not on_rarity_page or self.page <= 0
+        self.next_button.disabled = not on_rarity_page or self.page >= self.total_pages - 1
+
+    async def refresh(self, interaction: discord.Interaction) -> None:
+        embed = self._build_embed()
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _on_prev(self, interaction: discord.Interaction):
+        if interaction.user.id != self.viewer_id:
+            await interaction.response.send_message("This isn't your dex to browse — run `/carddex` yourself!", ephemeral=True)
+            return
+        self.page = max(0, self.page - 1)
+        await self.refresh(interaction)
+
+    async def _on_next(self, interaction: discord.Interaction):
+        if interaction.user.id != self.viewer_id:
+            await interaction.response.send_message("This isn't your dex to browse — run `/carddex` yourself!", ephemeral=True)
+            return
+        self.page = min(self.total_pages - 1, self.page + 1)
+        await self.refresh(interaction)
 
     async def on_timeout(self) -> None:
         for child in self.children:
@@ -802,37 +915,48 @@ class TradeRequestView(discord.ui.View):
 
 
 # ── Daily quests ─────────────────────────────────────────────────────────
-# Each quest tracks progress against a stat that already exists elsewhere
-# in state.py (messages sent, songs played, game wins, JC earned) rather
-# than adding new per-action tracking. A "baseline" snapshot of that stat
-# is taken the moment a quest is assigned for the day, and progress is
-# (current value - baseline) — so it doesn't matter that e.g. songs_played
-# is a lifetime counter, only how much it moved *today*. "claim_pull" is
-# the one exception: it's inherently day-scoped already (has_claimed_daily_card
-# checks "today"), so it reads directly with no baseline needed.
+# Quests are the *only* way to earn cards — there's no free daily pull
+# anymore, so targets here are deliberately steep. Each quest tracks
+# progress against a stat that already exists elsewhere in state.py
+# (messages sent, songs played, JC earned/spent, image searches, mystery
+# boxes opened, referrals) rather than adding new per-action tracking. A
+# "baseline" snapshot of that stat is taken the moment a quest is assigned
+# for the day, and progress is (current value - baseline) — so it doesn't
+# matter that e.g. songs_played is a lifetime counter, only how much it
+# moved *today*.
 
 QUEST_DEFS: dict[str, dict] = {
-    "chat100":    {"desc": "Send 100 messages to Jarvis",            "target": 100, "kind": "delta", "get": lambda uid: (get_stats(uid) or {}).get("messages", 0)},
-    "spend100jc": {"desc": f"Spend 100 {JC_EMOJI} {JC_NAME}s",        "target": 100, "kind": "delta", "get": lambda uid: get_lifetime_spent(uid)},
-    "earn300jc":  {"desc": f"Earn 300 {JC_EMOJI} {JC_NAME}s",         "target": 300, "kind": "delta", "get": lambda uid: get_lifetime_earned(uid)},
-    "search5":    {"desc": "Do 5 image searches",                    "target": 5,   "kind": "delta", "get": lambda uid: get_image_search_count(uid)},
-    "claimpull":  {"desc": "Claim your free daily card pull",        "target": 1,   "kind": "today", "get": lambda uid: 1 if has_claimed_daily_card(uid) else 0},
+    "chat50":     {"desc": "Send 50 messages to Jarvis",                           "target": 50,   "kind": "delta", "get": lambda uid: (get_stats(uid) or {}).get("messages", 0)},
+    "spend2kjc":  {"desc": f"Spend 2,000 {JC_EMOJI} {JC_NAME}s",                    "target": 2000, "kind": "delta", "get": lambda uid: get_lifetime_spent(uid)},
+    "earn1000jc": {"desc": f"Earn 1,000 {JC_EMOJI} {JC_NAME}s",                     "target": 1000, "kind": "delta", "get": lambda uid: get_lifetime_earned(uid)},
+    "search20":   {"desc": "Do 20 image searches",                                 "target": 20,   "kind": "delta", "get": lambda uid: get_image_search_count(uid)},
+    "songs30":    {"desc": "Play 30 songs",                                        "target": 30,   "kind": "delta", "get": lambda uid: get_songs_played(uid)},
+    "openbox5":   {"desc": "Buy/open 5 Mystery Boxes",                             "target": 5,    "kind": "delta", "get": lambda uid: get_mystery_box_open_count(uid)},
+    "deluxebox2": {"desc": "Buy/open 2 Deluxe Mystery Boxes",                       "target": 2,    "kind": "delta", "get": lambda uid: get_deluxe_mystery_box_open_count(uid)},
+    "invite1":    {"desc": "Invite 1 friend to Jarvis (via your referral code)",   "target": 1,    "kind": "delta", "get": lambda uid: get_referral_count(uid)},
 }
-QUESTS_PER_DAY = 4
-QUEST_REWARD_JC = 25
-QUEST_COMPLETE_ALL_BONUS_JC = 100
+QUESTS_PER_DAY = 3
+QUEST_REWARD_JC = 50
+QUEST_COMPLETE_ALL_BONUS_JC = 150
+# Always include this one so there's a guaranteed easy quest every day —
+# the other QUESTS_PER_DAY - 1 slots are filled randomly from the rest.
+_GUARANTEED_QUEST_ID = "chat50"
 
 
 def _get_or_assign_quests(user_id: int) -> dict:
     """Return today's quest record for user_id, assigning a fresh set
     (deterministically shuffled per user+day, so repeated calls the same
-    day return the same set of quests) if none exists yet today."""
+    day return the same set of quests) if none exists yet today.
+    _GUARANTEED_QUEST_ID is always one of the slots; the rest are randomly
+    sampled from the remaining pool."""
     entry = get_daily_quests(user_id)
     if entry is not None:
         return entry
 
     rng = random.Random(f"{user_id}-{today_utc()}")
-    quest_ids = rng.sample(list(QUEST_DEFS.keys()), QUESTS_PER_DAY)
+    rest_pool = [qid for qid in QUEST_DEFS if qid != _GUARANTEED_QUEST_ID]
+    picked_rest = rng.sample(rest_pool, QUESTS_PER_DAY - 1)
+    quest_ids = [_GUARANTEED_QUEST_ID] + picked_rest
     baselines = {
         qid: QUEST_DEFS[qid]["get"](user_id)
         for qid in quest_ids
@@ -853,7 +977,7 @@ def _quest_progress(user_id: int, quest_id: str, entry: dict) -> int:
 def _quests_embed(user: discord.User | discord.Member, entry: dict) -> discord.Embed:
     embed = discord.Embed(
         title=f"📜 {user.display_name}'s Daily Quests",
-        description="Finish quests to earn JC and a random card. Quests reset every day.",
+        description="Quests are tough on purpose — they're the only way to earn cards. Finish one for JC and a random card (any rarity, Legendary included). Quests reset every day.",
         color=discord.Color.teal(),
     )
     for qid in entry["quest_ids"]:
@@ -906,7 +1030,10 @@ class QuestClaimView(discord.ui.View):
                 return
             mark_quest_claimed(self.user.id, quest_id)
             add_credits(self.user.id, QUEST_REWARD_JC)
-            card_id, new_qty = _grant_random_card(self.user.id, exclude=("Legendary",))
+            # No exclusion here — quests are the only source of cards now,
+            # so every rarity (Legendary included) is on the table, just
+            # weighted rare per RARITIES.
+            card_id, new_qty = _grant_random_card(self.user.id)
             card_def = CARD_DEFS[card_id]
 
             bonus_note = ""
@@ -1064,36 +1191,10 @@ class Cards(commands.Cog):
         target = user or interaction.user
         await interaction.response.send_message(embed=_collection_embed(target))
 
-    # ── !dailycard / /dailycard ────────────────────────────────────────
-    async def _do_dailycard(self, respond, user: discord.User | discord.Member):
-        if not claim_daily_card(user.id):
-            await respond(content="⏰ You've already claimed your free daily card pull today — come back after 00:00 UTC.", ephemeral=True)
-            return
-        card_id = _pick_card()
-        new_qty = add_card(user.id, card_id)
-        card_def = CARD_DEFS[card_id]
-        embed = discord.Embed(
-            title=f"🃏 Daily Pull! {card_def['name']}",
-            description=f"You pulled **{card_def['name']}** ({card_def['rarity']}) — revealed below.",
-            color=RARITIES[card_def["rarity"]]["color"],
-        )
-        embed.set_image(url="attachment://card.png")
-        await respond(embed=embed, file=card_file(card_id, qty=new_qty))
-
-    @commands.command(name="dailycard", aliases=["pullcard"])
-    async def prefix_dailycard(self, ctx: commands.Context):
-        """!dailycard — claim your free daily weighted-random card pull."""
-        async def respond(content=None, embed=None, file=None, ephemeral=False):
-            await ctx.reply(content=content, embed=embed, file=file)
-        await self._do_dailycard(respond, ctx.author)
-
-    @app_commands.command(name="dailycard", description="Claim your free daily weighted-random card pull")
-    async def slash_dailycard(self, interaction: discord.Interaction):
-        async def respond(content=None, embed=None, file=None, ephemeral=False):
-            await interaction.response.send_message(content=content, embed=embed, file=file, ephemeral=ephemeral)
-        await self._do_dailycard(respond, interaction.user)
-
     # ── !quests / /quests ─────────────────────────────────────────────
+    # Quests are the *only* way to earn cards now — there's no free daily
+    # pull anymore, so completing a quest is the sole source of new cards
+    # (see QUEST_DEFS below for the — deliberately hard — targets).
     @commands.command(name="quests", aliases=["cardquests"])
     async def prefix_quests(self, ctx: commands.Context):
         """!quests — view today's card quests and claim finished ones."""
@@ -1249,7 +1350,7 @@ class Cards(commands.Cog):
         return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
 
     # ── !givecard (owner only) ──────────────────────────────────────────
-    # Normal acquisition is /dailycard and /quests — this is an owner-only
+    # Normal acquisition is /quests only — this is an owner-only
     # override for one-off grants, corrections, and event rewards.
     @commands.command(name="givecard")
     @commands.is_owner()

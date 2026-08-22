@@ -791,8 +791,12 @@ def _title_perks_embed() -> discord.Embed:
     return embed
 
 
-def _bump_mystery_box_quest(user_id: int) -> None:
-    """Progress the System Breach 'Open a Mystery Box' quest.
+def _bump_mystery_box_quest(user_id: int, *, deluxe: bool = False) -> None:
+    """Progress the System Breach 'Open a Mystery Box' quest, and record
+    the open for the card-quest system's lifetime counters too (see
+    cogs.state.record_mystery_box_open / cogs.cards's 'openbox5' and
+    'deluxebox2' quests). `deluxe` routes the card-quest counter to the
+    right bucket — the System Breach quest doesn't distinguish box tier.
 
     Imported lazily (not at module load time) since cogs.system_breach
     imports cogs.state at import time too, and doing this import at the top
@@ -805,6 +809,9 @@ def _bump_mystery_box_quest(user_id: int) -> None:
         bump_daemon_quest(user_id, "mystery_box", 1)
     except Exception as e:
         print(f"[Warning] Failed to bump mystery_box quest for {user_id}: {e}")
+
+    from cogs.state import record_mystery_box_open
+    record_mystery_box_open(user_id, deluxe=deluxe)
 
 
 async def _purchase_item(
@@ -876,7 +883,7 @@ async def _purchase_item(
             box_name="Deluxe Mystery Box", box_emoji="🎆",
             jackpot_threshold=500, nice_threshold=350,
         )
-        _bump_mystery_box_quest(user.id)
+        _bump_mystery_box_quest(user.id, deluxe=True)
 
     elif kind == "title":
         grant_title(user.id, item_id)

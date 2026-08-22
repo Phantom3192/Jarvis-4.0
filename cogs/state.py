@@ -426,6 +426,33 @@ def get_image_search_count(user_id: int) -> int:
     data = _data["stats"].get(str(user_id))
     return data.get("image_searches", 0) if data else 0
 
+def record_mystery_box_open(user_id: int, *, deluxe: bool = False) -> None:
+    """Bump a user's cumulative Mystery Box open count. Tracks regular and
+    Deluxe boxes as separate counters (deluxe=True bumps the deluxe one)
+    so each can back its own card quest. Reuses the same 'stats' table/
+    persistence as record_message() rather than adding a new table."""
+    uid   = str(user_id)
+    now   = time.time()
+    stats = _data["stats"]
+    if uid not in stats:
+        stats[uid] = {
+            "messages":   0,
+            "tokens_est": 0,
+            "first_seen": now,
+            "last_seen":  now,
+        }
+    key = "mystery_boxes_deluxe_opened" if deluxe else "mystery_boxes_opened"
+    stats[uid][key] = stats[uid].get(key, 0) + 1
+    _schedule_save("stats")
+
+def get_mystery_box_open_count(user_id: int) -> int:
+    data = _data["stats"].get(str(user_id))
+    return data.get("mystery_boxes_opened", 0) if data else 0
+
+def get_deluxe_mystery_box_open_count(user_id: int) -> int:
+    data = _data["stats"].get(str(user_id))
+    return data.get("mystery_boxes_deluxe_opened", 0) if data else 0
+
 def get_all_stats() -> dict[str, dict]:
     """Return a copy of all user stats, keyed by str(user_id)."""
     return dict(_data["stats"])
