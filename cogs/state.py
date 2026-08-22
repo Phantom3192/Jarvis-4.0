@@ -57,12 +57,16 @@ _data: dict[str, Any] = {
     "profile_privacy": {}, # str(user_id) → list[str] of field keys hidden from OTHER viewers (owner always sees all)
     "tos_accepted":    {}, # str(user_id) → {"version": int, "accepted_at": float}
     "lifetime_earned": {}, # str(user_id) → int, cumulative JC ever gained via add_credits (never decreases)
+    "lifetime_spent":  {}, # str(user_id) → int, cumulative JC ever deducted via spend_credits (never decreases)
     # ── System Breach Event Badges (persist after event) ───────────────────
     "system_breach_badges": {},  # str(user_id) → [badge_id, ...]
     "votes": {},  # str(user_id) → {"total_votes": int, "streak": int, "last_vote_ts": float, "streak_milestones": [int,...]}
     "guild_prefixes": {},  # str(guild_id) → custom command prefix string
     "locked_messages": {},  # lock_id (str) → {"author": int, "target": int, "content": str, "opened": bool, "created": float}
     "user_cards":      {},  # str(user_id) → {card_id (str): quantity (int)} — beast card collection inventory
+    "card_meta":       {},  # str(user_id) → {"last_daily_card": "YYYY-MM-DD"} — daily card pull cooldown
+    "card_quests":     {},  # str(user_id) → {"date": "YYYY-MM-DD", "quest_ids": [str,...], "baselines": {quest_id: int}, "claimed": [quest_id,...]}
+    "card_set_claims": {},  # str(user_id) → [set_id (str), ...] — beast card sets already rewarded
 }
 
 # Serialisers for each key (avoids if/elif chain in _debounced_save)
@@ -95,11 +99,15 @@ _SERIALISE: dict[str, Any] = {
     "profile_privacy":     lambda: _data["profile_privacy"],
     "tos_accepted":        lambda: _data["tos_accepted"],
     "lifetime_earned":     lambda: _data["lifetime_earned"],
+    "lifetime_spent":      lambda: _data["lifetime_spent"],
     "system_breach_badges": lambda: _data["system_breach_badges"],
     "votes":                lambda: _data["votes"],
     "guild_prefixes":       lambda: _data["guild_prefixes"],
     "locked_messages":      lambda: _data["locked_messages"],
     "user_cards":           lambda: _data["user_cards"],
+    "card_meta":            lambda: _data["card_meta"],
+    "card_quests":          lambda: _data["card_quests"],
+    "card_set_claims":      lambda: _data["card_set_claims"],
 }
 
 
@@ -172,11 +180,15 @@ async def init_db():
     if "profile_privacy" in db: _data["profile_privacy"] = db["profile_privacy"]
     if "tos_accepted"    in db: _data["tos_accepted"]    = db["tos_accepted"]
     if "lifetime_earned" in db: _data["lifetime_earned"] = db["lifetime_earned"]
+    if "lifetime_spent"  in db: _data["lifetime_spent"]  = db["lifetime_spent"]
     if "system_breach_badges" in db: _data["system_breach_badges"] = db["system_breach_badges"]
     if "votes"           in db: _data["votes"]           = db["votes"]
     if "guild_prefixes"  in db: _data["guild_prefixes"]  = db["guild_prefixes"]
     if "locked_messages" in db: _data["locked_messages"] = db["locked_messages"]
     if "user_cards"      in db: _data["user_cards"]      = db["user_cards"]
+    if "card_meta"       in db: _data["card_meta"]       = db["card_meta"]
+    if "card_quests"     in db: _data["card_quests"]     = db["card_quests"]
+    if "card_set_claims" in db: _data["card_set_claims"] = db["card_set_claims"]
 
     # ── One-time migration: back-fill first_interaction for users who were
     # already marked "seen" before this table existed. mark_seen() only
@@ -491,6 +503,12 @@ def _today_utc() -> str:
     if ts - _today_cache[0] > 1.0:
         _today_cache = (ts, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
     return _today_cache[1]
+
+
+def today_utc() -> str:
+    """Public wrapper around _today_utc() for cogs that need to seed
+    date-scoped logic (e.g. deterministic daily quest selection)."""
+    return _today_utc()
 
 
 def _reset_entry(uid: str, today: str) -> dict:
@@ -855,6 +873,13 @@ def get_lifetime_earned(user_id: int) -> int:
     never grants), so it reflects earnings only."""
     return int(_data["lifetime_earned"].get(str(user_id), 0))
 
+
+def get_lifetime_spent(user_id: int) -> int:
+    """Cumulative JC ever deducted via spend_credits() — only ever goes up,
+    mirroring get_lifetime_earned() but for the spending side."""
+    return int(_data["lifetime_spent"].get(str(user_id), 0))
+
+
 def spend_credits(user_id: int, amount: int) -> bool:
     """Attempt to deduct `amount` JC. Returns False if insufficient."""
     uid = str(user_id)
@@ -863,7 +888,9 @@ def spend_credits(user_id: int, amount: int) -> bool:
         return False
     _data["credits"][uid] = bal - amount
     _schedule_save("credits")
-    
+    _data["lifetime_spent"][uid] = _data["lifetime_spent"].get(uid, 0) + amount
+    _schedule_save("lifetime_spent")
+
     # ── Track for System Breach quest ──
     try:
         from cogs.system_breach import bump_jc_spent
@@ -1692,4 +1719,87 @@ def transfer_card(sender_id: int, recipient_id: int, card_id: str, amount: int =
     if not remove_card(sender_id, card_id, amount):
         return False
     add_card(recipient_id, card_id, amount)
+    return True
+
+
+# ── Daily card pull ──────────────────────────────────────────────────────
+# Mirrors claim_daily_credits' shape: one free weighted pull per UTC day,
+# tracked separately from the JC daily bonus so the two cooldowns don't
+# collide with each other.
+
+def has_claimed_daily_card(user_id: int) -> bool:
+    """Whether the user already claimed their free daily card pull today."""
+    uid = str(user_id)
+    return _data["card_meta"].get(uid, {}).get("last_daily_card") == _today_utc()
+
+
+def claim_daily_card(user_id: int) -> bool:
+    """Mark today's free card pull as claimed. Returns True if this call
+    newly claimed it, False if it was already claimed today (caller should
+    not grant a card in that case)."""
+    uid = str(user_id)
+    today = _today_utc()
+    meta = _data["card_meta"].setdefault(uid, {})
+    if meta.get("last_daily_card") == today:
+        return False
+    meta["last_daily_card"] = today
+    _schedule_save("card_meta")
+    return True
+
+
+# ── Card quests ───────────────────────────────────────────────────────────
+# state.py only stores whatever quest_ids/baselines the cog hands it — the
+# meaning of each quest_id (what it tracks, its target, its reward) is
+# entirely the cog's business. This keeps state.py a dumb persistence layer
+# the same way the rest of the file works.
+
+def get_daily_quests(user_id: int) -> dict | None:
+    """Return today's assigned quest record for this user, or None if
+    they haven't been assigned quests yet today (caller should then call
+    assign_daily_quests)."""
+    entry = _data["card_quests"].get(str(user_id))
+    if not entry or entry.get("date") != _today_utc():
+        return None
+    return entry
+
+
+def assign_daily_quests(user_id: int, quest_ids: list[str], baselines: dict[str, int]) -> dict:
+    """Assign a fresh set of daily quests for today, overwriting any stale
+    (previous-day) record. Returns the newly-stored record."""
+    entry = {
+        "date": _today_utc(),
+        "quest_ids": list(quest_ids),
+        "baselines": dict(baselines),
+        "claimed": [],
+    }
+    _data["card_quests"][str(user_id)] = entry
+    _schedule_save("card_quests")
+    return entry
+
+
+def mark_quest_claimed(user_id: int, quest_id: str) -> None:
+    """Flag a quest as claimed so its reward can't be collected twice."""
+    entry = _data["card_quests"].get(str(user_id))
+    if entry is not None and quest_id not in entry["claimed"]:
+        entry["claimed"].append(quest_id)
+        _schedule_save("card_quests")
+
+
+# ── Card set rewards ──────────────────────────────────────────────────────
+
+def get_claimed_sets(user_id: int) -> list[str]:
+    """Return the list of set_ids this user has already claimed the
+    completion reward for."""
+    return list(_data["card_set_claims"].get(str(user_id), []))
+
+
+def claim_set_reward(user_id: int, set_id: str) -> bool:
+    """Mark a set's completion reward as claimed. Returns False if it was
+    already claimed before (caller should not grant the reward again)."""
+    uid = str(user_id)
+    claimed = _data["card_set_claims"].setdefault(uid, [])
+    if set_id in claimed:
+        return False
+    claimed.append(set_id)
+    _schedule_save("card_set_claims")
     return True
